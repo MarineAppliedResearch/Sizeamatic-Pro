@@ -89,6 +89,11 @@ class SizeamaticProApp:
         self._refresh_status_left()
         self._refresh_placeholder_canvases()
 
+        # When locked, the videos stay aligned by a fixed frame offset.
+        # Definition: offset = right_index - left_index.
+        # Example: if right is 12 frames ahead of left, offset = +12.
+        self.lock_offset_frames = 0
+
     # Closes OpenCV windows and releases captures before exiting.
     def on_app_close(self):
         # Stop playback loop.
@@ -471,10 +476,29 @@ class SizeamaticProApp:
             self._update_frame_labels()
             self._refresh_placeholder_canvases()
 
+    # Steps one frame backward.
     def on_step_back(self):
+        # If we are locked and both videos are loaded, step the master timeline
+        # and keep the stored offset alignment.
+        if self.lock_lr.get() and self._both_videos_loaded():
+            # Left is the master timeline for transport controls.
+            li = int(self.left_frame_index.get())
+            self._jump_frames_locked_with_offset("L", li - 1)
+            return
+
+        # Otherwise, fall back to the old behavior.
         self._nudge_frames_locked_or_single(delta=-1)
 
+    # Steps one frame forward.
     def on_step_forward(self):
+        # If we are locked and both videos are loaded, step the master timeline
+        # and keep the stored offset alignment.
+        if self.lock_lr.get() and self._both_videos_loaded():
+            li = int(self.left_frame_index.get())
+            self._jump_frames_locked_with_offset("L", li + 1)
+            return
+
+        # Otherwise, fall back to the old behavior.
         self._nudge_frames_locked_or_single(delta=+1)
 
     # Toggles playback on and off using a Tk after loop.
@@ -499,10 +523,32 @@ class SizeamaticProApp:
         # Speed affects playback step or timer interval later.
         self._set_status_mid(f"Speed set to {self.speed_var.get()} (UI only)")
 
+    # Toggles lock mode.
+    # When enabling lock, capture the current alignment as a fixed frame offset.
     def on_toggle_lock(self):
-        # Lock affects slider behavior. We already implement the UI behavior for slider movement.
+        # Update status UI.
         self._set_status_mid("Lock toggled")
         self._refresh_status_left()
+
+        # Only define an offset when BOTH videos are loaded.
+        # If only one video is loaded, lock is effectively meaningless.
+        if self.lock_lr.get() and self._both_videos_loaded():
+            # Read the current indices.
+            li = int(self.left_frame_index.get())
+            ri = int(self.right_frame_index.get())
+
+            # Store offset so that future locked moves preserve the current alignment.
+            # offset = R - L
+            self.lock_offset_frames = ri - li
+
+            # Do not jump any frames here.
+            # The current point in time is already aligned by the user's manual scrubbing.
+            self._set_status_mid(f"Lock enabled (offset {self.lock_offset_frames:+d} frames)")
+            return
+
+        # If disabling lock, we keep each slider where it is and do nothing else.
+        if not self.lock_lr.get():
+            self._set_status_mid("Lock disabled")
 
         # When enabling lock, unify indices to the left slider's current value.
         if self.lock_lr.get():
@@ -588,10 +634,9 @@ class SizeamaticProApp:
 
         i = int(round(float(self.left_slider.get())))
 
-        # If lock is enabled, the left slider becomes the master timeline.
-        # That means moving it will move BOTH timelines and BOTH panes.
+        # In lock mode, left slider drives the master and right follows with offset.
         if self.lock_lr.get() and self._both_videos_loaded():
-            self._jump_frames_locked_or_single(target_index=i)
+            self._jump_frames_locked_with_offset("L", i)
             return
 
         # If unlocked, the left slider only controls the left timeline.
@@ -616,10 +661,9 @@ class SizeamaticProApp:
         # Quantize slider float to an integer frame index.
         i = int(round(float(self.right_slider.get())))
 
-        # If lock is enabled, the right slider is also allowed to control the master index.
-        # Moving either slider will move both videos together.
+        # In lock mode, right slider drives the master and left follows with offset.
         if self.lock_lr.get() and self._both_videos_loaded():
-            self._jump_frames_locked_or_single(target_index=i)
+            self._jump_frames_locked_with_offset("R", i)
             return
 
         # Unlocked mode means right slider controls right video only.
@@ -629,6 +673,72 @@ class SizeamaticProApp:
         self._update_frame_labels()
 
         # Render so the right pane updates immediately.
+        self._render_current_frames()
+
+    # Jumps timelines in lock mode while preserving the stored frame offset.
+    # master_side indicates which slider the user is driving: "L" or "R".
+    def _jump_frames_locked_with_offset(self, master_side, target_index):
+        # Guard: lock mode requires both videos.
+        if not self._both_videos_loaded():
+            return
+
+        # Convert target to int frame index.
+        target = int(target_index)
+
+        # Compute desired indices using the offset definition:
+        # offset = R - L
+        if master_side == "L":
+            # User is driving left.
+            li = target
+            ri = li + int(self.lock_offset_frames)
+        else:
+            # User is driving right.
+            ri = target
+            li = ri - int(self.lock_offset_frames)
+
+        # Clamp using Option A:
+        # If one side hits an end stop, shift the other side to preserve offset.
+        #
+        # Left legal range is [0, left_frame_max]
+        # Right legal range is [0, right_frame_max]
+        lmax = int(self.left_frame_max)
+        rmax = int(self.right_frame_max)
+
+        # Clamp left first, and adjust right accordingly.
+        if li < 0:
+            li = 0
+            ri = li + int(self.lock_offset_frames)
+        elif li > lmax:
+            li = lmax
+            ri = li + int(self.lock_offset_frames)
+
+        # Now clamp right, and adjust left accordingly.
+        if ri < 0:
+            ri = 0
+            li = ri - int(self.lock_offset_frames)
+        elif ri > rmax:
+            ri = rmax
+            li = ri - int(self.lock_offset_frames)
+
+        # Final safety clamp in case adjustment pushed the other side slightly out.
+        # This keeps indices always valid even in extreme offset cases.
+        li = self._clamp(li, 0, lmax)
+        ri = self._clamp(ri, 0, rmax)
+
+        # Save indices.
+        self.left_frame_index.set(li)
+        self.right_frame_index.set(ri)
+
+        # Update sliders without triggering callbacks.
+        self._suppress_slider_callbacks = True
+        try:
+            self.left_slider.set(li)
+            self.right_slider.set(ri)
+        finally:
+            self._suppress_slider_callbacks = False
+
+        # Redraw.
+        self._update_frame_labels()
         self._render_current_frames()
 
     # -------------------------------------------------------------------------
@@ -651,7 +761,15 @@ class SizeamaticProApp:
         view = "Rectified" if self.view_rectified.get() else "Raw"
         lock = "Locked" if self.lock_lr.get() else "Unlocked"
 
-        self.status_left.config(text=f"L: {self._short_path(l)} | R: {self._short_path(r)} | Cal: {self._short_path(c)} | View: {view} | {lock}")
+        # Only show an offset when lock is enabled and both videos are loaded.
+        # This keeps the status line clean when you are still loading files.
+        offset_txt = ""
+        if self.lock_lr.get() and self._both_videos_loaded():
+            offset_txt = f" | Offset: {self.lock_offset_frames:+d}f"
+
+        self.status_left.config(
+            text=f"L: {self._short_path(l)} | R: {self._short_path(r)} | Cal: {self._short_path(c)} | View: {view} | {lock}{offset_txt}"
+        )
 
     def _short_path(self, path, max_len=45):
         if path is None:
