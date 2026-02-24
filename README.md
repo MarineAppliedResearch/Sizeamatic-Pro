@@ -1,6 +1,6 @@
 # Sizeamatic Pro
 
-Sizeamatic Pro is a Windows desktop tool for measuring real world distances from stereo video. Load your synchronized left and right recordings, scrub to any moment, click the same feature in both views, and Sizeamatic Pro reports depth and size in millimeters.
+Sizeamatic Pro is a desktop tool for measuring real world distances from stereo video. Load your synchronized left and right recordings, scrub to any moment, click the same feature in both views, and Sizeamatic Pro reports depth and size in millimeters.
 
 Built to run fully offline with your data stored locally.
 

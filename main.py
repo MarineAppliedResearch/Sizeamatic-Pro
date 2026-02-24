@@ -1,16 +1,12 @@
-# Sizeamatic Pro - GUI Skeleton (Tkinter only)
+# Sizeamatic Pro - 
 #
-# Purpose:
-#   Build the full GUI layout with all required elements and stub callbacks.
-#   No video decoding, no calibration loading, no rectification, no measurement math yet.
-#
-# Notes:
-#   - This file intentionally does not depend on OpenCV or PIL.
-#   - Canvases show placeholder content.
-#   - All commands are wired to stub handlers so you can wire logic later.
+
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+
+import cv2
+import base64
 
 
 class SizeamaticProApp:
@@ -38,16 +34,42 @@ class SizeamaticProApp:
         self.show_epipolar = tk.BooleanVar(value=False)
         self.lock_lr = tk.BooleanVar(value=True)
 
-        # ---- File state placeholders ----
+         # ---- File state ----
         self.left_video_path = None
         self.right_video_path = None
         self.calibration_folder = None
 
-        # ---- Frame counters placeholders ----
+        # ---- OpenCV video captures ----
+        # These remain open for the lifetime of the app, so seeking is fast.
+        self.capL = None
+        self.capR = None
+
+        # ---- Video metadata ----
+        # Each meta dict contains: fps, width, height, frame_count
+        self.metaL = None
+        self.metaR = None
+
+        # ---- Timeline state ----
+        # Frame indices are the master timeline values.
         self.left_frame_index = tk.IntVar(value=0)
         self.right_frame_index = tk.IntVar(value=0)
+
+        # Max frame index inclusive for each stream.
+        # These are updated after loading video and when lock mode changes.
         self.left_frame_max = 0
         self.right_frame_max = 0
+
+        # ---- Playback loop state ----
+        self.is_playing = False
+        self.play_after_id = None
+
+        # ---- Tk image handles ----
+        # Tk will garbage collect images unless we keep a reference.
+        self.tkimg_left = None
+        self.tkimg_right = None
+
+        # Prevents recursive slider callbacks when we update slider positions in code.
+        self._suppress_slider_callbacks = False
 
         # ---- Root layout ----
         # Row 0: menu (handled by root.config(menu=...))
@@ -66,6 +88,28 @@ class SizeamaticProApp:
         # ---- Initial UI refresh ----
         self._refresh_status_left()
         self._refresh_placeholder_canvases()
+
+    # Closes OpenCV windows and releases captures before exiting.
+    def on_app_close(self):
+        # Stop playback loop.
+        self.is_playing = False
+        if self.play_after_id is not None:
+            self.root.after_cancel(self.play_after_id)
+            self.play_after_id = None
+
+        # Release capture objects if open.
+        if self.capL:
+            self.capL.release()
+            self.capL = None
+        if self.capR:
+            self.capR.release()
+            self.capR = None
+
+        # Close any OpenCV windows.
+        cv2.destroyAllWindows()
+
+        # Close the Tk app.
+        self.root.destroy()
 
     # -------------------------------------------------------------------------
     # Menu bar
@@ -264,7 +308,9 @@ class SizeamaticProApp:
     # Stub handlers (menu)
     # -------------------------------------------------------------------------
 
+    # Loads the left video and updates UI state.
     def on_load_left_video(self):
+        # Ask user to choose a left MP4 file.
         path = filedialog.askopenfilename(
             title="Load Left Video",
             filetypes=[("MP4 Video", "*.mp4"), ("All Files", "*.*")],
@@ -272,21 +318,96 @@ class SizeamaticProApp:
         if not path:
             return
 
-        # Store path, no decoding yet.
+        # Close any previous capture so we do not leak file handles.
+        if self.capL:
+            self.capL.release()
+            self.capL = None
+            self.metaL = None
+
+        # Open the new capture and read its metadata.
+        cap, meta = self._open_video_capture(path)
+        if cap is None:
+            messagebox.showerror("Load Left Video", "Failed to open the selected video file.")
+            return
+
+        # Save state.
         self.left_video_path = path
-        self._set_status_mid("Loaded left video (UI only)")
+        self.capL = cap
+        self.metaL = meta
+
+        # Update header with metadata so you can verify the file quickly.
+        self.left_header.config(
+            text=f"Left  ({meta['width']}×{meta['height']}, fps={meta['fps']:.3f}, frames={meta['frame_count']})"
+        )
+
+        # Reset left index to 0 on new load to avoid seeking into nonsense.
+        self.left_frame_index.set(0)
+
+        # Update slider ranges based on lock mode and which videos are loaded.
+        self._update_slider_ranges()
+
+        # Render whichever frames are available.
+        self._render_current_frames()
+
+        # Update status.
+        self._set_status_mid("Loaded left video")
         self._refresh_status_left()
 
+
+
+
+    # Loads the right video and updates UI state.
     def on_load_right_video(self):
+        # Ask user to choose a right MP4 file.
+        # We do not assume both videos are loaded at once, so this must work independently.
         path = filedialog.askopenfilename(
             title="Load Right Video",
             filetypes=[("MP4 Video", "*.mp4"), ("All Files", "*.*")],
         )
         if not path:
+            # User cancelled the dialog.
             return
 
+        # If we already had a right capture open, release it.
+        # This avoids file handle leaks and lets the user reload different files safely.
+        if self.capR:
+            self.capR.release()
+            self.capR = None
+            self.metaR = None
+
+        # Open the new capture and read container metadata.
+        # We do this immediately so the UI can show fps, resolution, and frame count.
+        cap, meta = self._open_video_capture(path)
+        if cap is None:
+            # If OpenCV cannot open it, inform the user with a clear error.
+            messagebox.showerror("Load Right Video", "Failed to open the selected video file.")
+            return
+
+        # Save state so the rest of the app can render frames from this capture.
         self.right_video_path = path
-        self._set_status_mid("Loaded right video (UI only)")
+        self.capR = cap
+        self.metaR = meta
+
+        # Update the right header text so it is obvious what file was loaded.
+        # This is important for debugging when videos are mismatched.
+        self.right_header.config(
+            text=f"Right  ({meta['width']}×{meta['height']}, fps={meta['fps']:.3f}, frames={meta['frame_count']})"
+        )
+
+        # Reset the right timeline to frame 0 on load.
+        # This avoids "seek into the middle" behavior that is confusing during testing.
+        self.right_frame_index.set(0)
+
+        # Update slider max ranges and clamping rules.
+        # If lock is enabled and both videos exist, we clamp to the shorter length here.
+        self._update_slider_ranges()
+
+        # Draw the current frames (left if present, right always now).
+        # This makes it immediately obvious that loading worked.
+        self._render_current_frames()
+
+        # Update status line.
+        self._set_status_mid("Loaded right video")
         self._refresh_status_left()
 
     def on_load_calibration_folder(self):
@@ -310,10 +431,15 @@ class SizeamaticProApp:
         self._refresh_status_left()
         self._refresh_placeholder_canvases()
 
+    # Toggles fit-to-window rendering and redraws the current frames.
     def on_toggle_fit_to_window(self):
-        # In real wiring, this would change scaling logic for displayed frames.
-        self._set_status_mid("Fit To Window toggled (UI only)")
-        self._refresh_placeholder_canvases()
+        # Fit-to-window changes the display size calculation.
+        # It does not change the underlying frame indices.
+        self._set_status_mid("Fit To Window toggled")
+
+        # Redraw using the new scale rule.
+        # If videos are not loaded yet, _render_current_frames() is a no-op.
+        self._render_current_frames()
 
     def on_toggle_show_overlays(self):
         # In real wiring, this would enable/disable drawing points/lines on canvas.
@@ -351,9 +477,23 @@ class SizeamaticProApp:
     def on_step_forward(self):
         self._nudge_frames_locked_or_single(delta=+1)
 
+    # Toggles playback on and off using a Tk after loop.
     def on_play_pause(self):
-        # Playback loop comes later.
-        messagebox.showinfo("Play/Pause", "Playback not wired yet.\nThis is UI skeleton only.")
+        # Do nothing unless at least one video is loaded.
+        if not self.capL and not self.capR:
+            return
+
+        # Toggle playback state.
+        self.is_playing = not self.is_playing
+
+        # If enabling playback, start the loop immediately.
+        if self.is_playing:
+            self._playback_tick()
+        else:
+            # If disabling, cancel any scheduled tick.
+            if self.play_after_id is not None:
+                self.root.after_cancel(self.play_after_id)
+                self.play_after_id = None
 
     def on_speed_changed(self, _evt=None):
         # Speed affects playback step or timer interval later.
@@ -369,28 +509,127 @@ class SizeamaticProApp:
             master = int(round(self.left_slider.get()))
             self._jump_frames_locked_or_single(target_index=master)
 
+    # Advances the timeline and schedules the next playback tick.
+    def _playback_tick(self):
+        # If playback was turned off between ticks, stop immediately.
+        if not self.is_playing:
+            return
+
+        # Determine per tick frame step based on speed setting.
+        # We implement speed by skipping frames rather than changing decode rate.
+        step = 1
+        if self.speed_var.get() == "0.25x":
+            # 0.25x is implemented as a slower tick, not fractional frames.
+            step = 1
+            delay_ms = 160
+        elif self.speed_var.get() == "0.5x":
+            step = 1
+            delay_ms = 80
+        elif self.speed_var.get() == "1x":
+            step = 1
+            delay_ms = 40
+        elif self.speed_var.get() == "2x":
+            step = 2
+            delay_ms = 40
+        else:
+            step = 4
+            delay_ms = 40
+
+        # Compute maximum index depending on lock mode.
+        if self.lock_lr.get() and self.metaL and self.metaR:
+            max_i = min(self.left_frame_max, self.right_frame_max)
+            cur = int(self.left_frame_index.get())
+            nxt = cur + step
+
+            # Stop at the end.
+            if nxt > max_i:
+                self.is_playing = False
+                self.play_after_id = None
+                return
+
+            # Advance both indices in lock mode.
+            self.left_frame_index.set(nxt)
+            self.right_frame_index.set(nxt)
+            self.left_slider.set(nxt)
+            self.right_slider.set(nxt)
+        else:
+            # Unlocked playback advances each loaded stream independently.
+            if self.metaL:
+                curL = int(self.left_frame_index.get())
+                nxtL = curL + step
+                nxtL = self._clamp(nxtL, 0, int(self.left_frame_max))
+                self.left_frame_index.set(nxtL)
+                self.left_slider.set(nxtL)
+
+            if self.metaR:
+                curR = int(self.right_frame_index.get())
+                nxtR = curR + step
+                nxtR = self._clamp(nxtR, 0, int(self.right_frame_max))
+                self.right_frame_index.set(nxtR)
+                self.right_slider.set(nxtR)
+
+        # Render the new frames.
+        self._render_current_frames()
+
+        # Schedule the next tick.
+        self.play_after_id = self.root.after(delay_ms, self._playback_tick)
+
     # -------------------------------------------------------------------------
     # Slider callbacks
     # -------------------------------------------------------------------------
 
+    # Called whenever the user drags the left slider.
+    # This is the primary scrubbing mechanism for the left timeline.
     def on_left_slider_changed(self, _value):
-        # ttk.Scale gives float strings; we quantize to int frame index.
-        i = int(round(float(self.left_slider.get())))
-        if self.lock_lr.get():
-            self._jump_frames_locked_or_single(target_index=i)
-        else:
-            self.left_frame_index.set(i)
-            self._update_frame_labels()
-            self._refresh_placeholder_canvases()
+        # If we are moving the slider in code, ignore this callback.
+        # This prevents recursion when lock mode updates both sliders.
+        if self._suppress_slider_callbacks:
+            return
 
-    def on_right_slider_changed(self, _value):
-        i = int(round(float(self.right_slider.get())))
-        if self.lock_lr.get():
+        i = int(round(float(self.left_slider.get())))
+
+        # If lock is enabled, the left slider becomes the master timeline.
+        # That means moving it will move BOTH timelines and BOTH panes.
+        if self.lock_lr.get() and self._both_videos_loaded():
             self._jump_frames_locked_or_single(target_index=i)
-        else:
-            self.right_frame_index.set(i)
-            self._update_frame_labels()
-            self._refresh_placeholder_canvases()
+            return
+
+        # If unlocked, the left slider only controls the left timeline.
+        # We update the stored index so future renders use this frame.
+        self.left_frame_index.set(i)
+
+        # Update the numeric "Frame: i/max" label under the slider.
+        self._update_frame_labels()
+
+        # Render frames so the left pane updates immediately as the slider moves.
+        # Right pane will render too if the right video is loaded, but it stays on its own index.
+        self._render_current_frames()
+
+    # Called whenever the user drags the right slider.
+    # This is the primary scrubbing mechanism for the right timeline.
+    def on_right_slider_changed(self, _value):
+        # If we are moving the slider in code, ignore this callback.
+        # This prevents recursion when lock mode updates both sliders.
+        if self._suppress_slider_callbacks:
+            return
+    
+        # Quantize slider float to an integer frame index.
+        i = int(round(float(self.right_slider.get())))
+
+        # If lock is enabled, the right slider is also allowed to control the master index.
+        # Moving either slider will move both videos together.
+        if self.lock_lr.get() and self._both_videos_loaded():
+            self._jump_frames_locked_or_single(target_index=i)
+            return
+
+        # Unlocked mode means right slider controls right video only.
+        self.right_frame_index.set(i)
+
+        # Update the numeric labels under each slider.
+        self._update_frame_labels()
+
+        # Render so the right pane updates immediately.
+        self._render_current_frames()
 
     # -------------------------------------------------------------------------
     # Canvas stubs
@@ -524,8 +763,12 @@ class SizeamaticProApp:
             self.left_slider.set(li)
             self.right_slider.set(ri)
 
+            # Keep the frame counters under the sliders correct.
             self._update_frame_labels()
-            self._refresh_placeholder_canvases()
+
+            # Now that we can decode frames, render actual video content.
+            # This replaces placeholder drawing.
+            self._render_current_frames()
 
     def _jump_frames_locked_or_single(self, target_index):
         # Jump to target_index in lock mode or update only the active slider.
@@ -536,12 +779,20 @@ class SizeamaticProApp:
             self.left_frame_index.set(i)
             self.right_frame_index.set(i)
 
-            # Keep both sliders visually synced.
-            self.left_slider.set(i)
-            self.right_slider.set(i)
+            # Programmatically moving the sliders triggers their callbacks.
+            # We suppress callbacks here to prevent recursive lock updates.
+            self._suppress_slider_callbacks = True
+            try:
+                self.left_slider.set(i)
+                self.right_slider.set(i)
+            finally:
+                self._suppress_slider_callbacks = False
 
+            # Update the labels under the sliders so they reflect the new indices.
             self._update_frame_labels()
-            self._refresh_placeholder_canvases()
+
+            # Render the current frames after the jump so the UI updates immediately.
+            self._render_current_frames()
         else:
             # If unlocked, this helper is used for start/end operations.
             # We treat it as applying to both sides for toolbar actions.
@@ -551,11 +802,238 @@ class SizeamaticProApp:
             self.left_frame_index.set(li)
             self.right_frame_index.set(ri)
 
-            self.left_slider.set(li)
-            self.right_slider.set(ri)
+            # Programmatically moving the sliders triggers their callbacks.
+            # We suppress callbacks here to prevent recursive lock updates.
+            self._suppress_slider_callbacks = True
+            try:
+                self.left_slider.set(li)
+                self.right_slider.set(ri)
+            finally:
+                self._suppress_slider_callbacks = False
 
             self._update_frame_labels()
             self._refresh_placeholder_canvases()
+
+    # Opens a video file and returns (cap, meta) or (None, None) on failure.
+    def _open_video_capture(self, path):
+        # Create the capture object.
+        cap = cv2.VideoCapture(path)
+
+        # Validate that the capture opened successfully.
+        if not cap.isOpened():
+            return None, None
+
+        # Read metadata from the container.
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        # Guard against weird containers that report 0 frames.
+        if frame_count <= 0 or width <= 0 or height <= 0:
+            cap.release()
+            return None, None
+
+        meta = {
+            "fps": fps,
+            "width": width,
+            "height": height,
+            "frame_count": frame_count,
+        }
+
+        return cap, meta
+    
+
+    # Updates slider max ranges and clamps indices based on lock mode and loaded videos.
+    def _update_slider_ranges(self):
+        # Compute per stream maximum indices.
+        # Index is inclusive, so max = frame_count - 1.
+        self.left_frame_max = (self.metaL["frame_count"] - 1) if self.metaL else 0
+        self.right_frame_max = (self.metaR["frame_count"] - 1) if self.metaR else 0
+
+        # If locked and both videos are loaded, clamp both to the shorter stream.
+        if self.lock_lr.get() and self.metaL and self.metaR:
+            master_max = min(self.left_frame_max, self.right_frame_max)
+
+            # Clamp stored indices to valid range.
+            li = self._clamp(int(self.left_frame_index.get()), 0, master_max)
+            ri = self._clamp(int(self.right_frame_index.get()), 0, master_max)
+
+            # Force both sides to the same master index (left is the master).
+            self.left_frame_index.set(li)
+            self.right_frame_index.set(li)
+
+            # Update both slider ranges to match the clamped master range.
+            self.left_slider.configure(to=master_max)
+            self.right_slider.configure(to=master_max)
+
+            # Updating slider position here should not invoke the slider callbacks.
+            self._suppress_slider_callbacks = True
+            try:
+                self.left_slider.set(li)
+                self.right_slider.set(li)
+            finally:
+                self._suppress_slider_callbacks = False
+        else:
+            # Unlocked mode uses independent ranges.
+            # Each slider range is based on its own stream if loaded, else 0.
+            self.left_slider.configure(to=int(self.left_frame_max))
+            self.right_slider.configure(to=int(self.right_frame_max))
+
+            # Clamp and apply each index independently.
+            li = self._clamp(int(self.left_frame_index.get()), 0, int(self.left_frame_max))
+            ri = self._clamp(int(self.right_frame_index.get()), 0, int(self.right_frame_max))
+
+            self.left_frame_index.set(li)
+            self.right_frame_index.set(ri)
+
+            # Updating slider position here should not invoke the slider callbacks.
+            self._suppress_slider_callbacks = True
+            try:
+                self.left_slider.set(li)
+                self.right_slider.set(ri)
+            finally:
+                self._suppress_slider_callbacks = False
+
+        # Always refresh the numeric labels under the sliders.
+        self._update_frame_labels()
+
+
+    # Seeks to a specific frame index and reads a single frame.
+    def _read_frame_at(self, cap, index):
+        # Seek to the requested frame index.
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(index))
+
+        # Decode a single frame.
+        ok, frame_bgr = cap.read()
+        if not ok:
+            return None
+
+        return frame_bgr
+    
+
+    # Displays a BGR frame on a Tk canvas using Tk's PNG decoder.
+    # This avoids Pillow and avoids PPM decoding quirks in some Tk builds.
+    def _display_bgr_on_canvas(self, canvas, frame_bgr, which):
+        # Fit To Window behavior:
+        # Scale so the frame width matches the canvas width.
+        # Height follows from aspect ratio.
+        if self.fit_to_window.get():
+            # Canvas width can be 1 early in startup, so guard against divide by zero.
+            canvas_w = max(1, canvas.winfo_width())
+
+            # Read frame size.
+            src_h = frame_bgr.shape[0]
+            src_w = frame_bgr.shape[1]
+
+            # Compute scale from width only.
+            scale = canvas_w / float(src_w)
+
+            # Preserve aspect ratio.
+            dst_w = int(round(src_w * scale))
+            dst_h = int(round(src_h * scale))
+
+            # Resize only if the target size is valid and actually changes.
+            if dst_w > 0 and dst_h > 0 and (dst_w != src_w or dst_h != src_h):
+                frame_bgr = cv2.resize(frame_bgr, (dst_w, dst_h), interpolation=cv2.INTER_LINEAR)
+
+        # Encode the frame as PNG in memory.
+        # Tk PhotoImage can decode PNG from base64 string data.
+        ok, png_bytes = cv2.imencode(".png", frame_bgr)
+        if not ok:
+            # If encoding fails, draw an error message instead of crashing the UI.
+            canvas.delete("all")
+            canvas.create_text(
+                10,
+                10,
+                anchor="nw",
+                text="PNG encode failed",
+                fill="white",
+                font=("Segoe UI", 11, "bold"),
+            )
+            return
+
+        # Convert encoded bytes to base64 ASCII string for Tk.
+        png_b64 = base64.b64encode(png_bytes.tobytes()).decode("ascii")
+
+        # Create a Tk PhotoImage from the PNG data.
+        # We do not specify format here because PNG is normally auto detected.
+        # If your Tk build needs it, we can add format="PNG".
+        tk_img = tk.PhotoImage(data=png_b64)
+
+        # Keep a reference so Python does not garbage collect the image.
+        if which == "L":
+            self.tkimg_left = tk_img
+        else:
+            self.tkimg_right = tk_img
+
+        # Clear the canvas and draw the image.
+        canvas.delete("all")
+        canvas.create_image(0, 0, anchor="nw", image=tk_img)
+
+     # Renders current left and right frames based on the current indices.
+    def _render_current_frames(self):
+        # Left side render.
+        if self.capL:
+            li = int(self.left_frame_index.get())
+            frameL = self._read_frame_at(self.capL, li)
+
+            if frameL is None:
+                self._draw_missing_frame(self.left_canvas, "LEFT", li)
+            else:
+                 self._display_bgr_on_canvas(self.left_canvas, frameL, "L")
+
+        # Right side render.
+        if self.capR:
+            ri = int(self.right_frame_index.get())
+            frameR = self._read_frame_at(self.capR, ri)
+
+            if frameR is None:
+                self._draw_missing_frame(self.right_canvas, "RIGHT", ri)
+            else:
+                self._display_bgr_on_canvas(self.right_canvas, frameR, "R")
+
+        # Update the slider frame labels after rendering.
+        self._update_frame_labels()
+
+    # Draws a clear error message on a canvas when a frame cannot be decoded.
+    def _draw_missing_frame(self, canvas, label, frame_index):
+        canvas.delete("all")
+
+        w = max(1, canvas.winfo_width())
+        h = max(1, canvas.winfo_height())
+
+        canvas.create_rectangle(2, 2, w - 2, h - 2, outline="#444444")
+        canvas.create_text(
+            w // 2,
+            h // 2 - 10,
+            text=f"{label} FRAME MISSING",
+            fill="white",
+            font=("Segoe UI", 14, "bold"),
+        )
+        canvas.create_text(
+            w // 2,
+            h // 2 + 18,
+            text=f"Frame {frame_index}",
+            fill="#cccccc",
+            font=("Segoe UI", 11, "normal"),
+        )
+
+    # Returns True only when BOTH captures and metadata exist.
+    def _both_videos_loaded(self):
+        # Require both captures.
+        if self.capL is None:
+            return False
+        if self.capR is None:
+            return False
+
+        # Require both metadata dicts.
+        if self.metaL is None:
+            return False
+        if self.metaR is None:
+            return False
+
+        return True
 
 
 def main():
@@ -563,6 +1041,8 @@ def main():
 
     # ttk theme defaults are OK. If you want a darker theme later, we can style it.
     app = SizeamaticProApp(root)
+
+    root.protocol("WM_DELETE_WINDOW", app.on_app_close)
 
     root.mainloop()
 
