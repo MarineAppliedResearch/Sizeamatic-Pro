@@ -137,6 +137,16 @@ class SizeamaticProApp:
         # None means not loaded or invalid.
         self.cal = None
 
+        # Measurement window state.
+        # Created lazily the first time we have a valid measurement.
+        self.meas_win = None
+        self.meas_vars = {}
+        self.meas_copy_text = None
+
+        # Assumed user click uncertainty in pixels for uncertainty estimation.
+        # This is an explicit assumption used to estimate sigma values in millimeters.
+        self.click_sigma_px = 1.0
+
     # Redraws overlay items for both panes.
     # For now, this draws a single test handle and label in each pane.
     def _redraw_overlays(self):
@@ -494,65 +504,111 @@ class SizeamaticProApp:
         self._update_measurement_status_stub()
 
     # Updates the status bar with a simple "ready" message.
-    # Updates the status bar with real 3D measurements when possible.
     def _update_measurement_status_stub(self):
         l_count = len(self.ptsL)
         r_count = len(self.ptsR)
 
-        # If point counts differ, we cannot form matched pairs by index.
+        # Quick gating messages stay in the status bar.
+        if l_count == 0 and r_count == 0:
+            self._set_status_right("")
+            return
+
         if l_count != r_count:
             self._set_status_right(f"Point pair incomplete: L={l_count} R={r_count}")
             return
 
-        # No points means no measurement.
-        if l_count == 0:
-            self._set_status_right("")
-            return
-
-        # If we are not rectified or calibration is missing, show the gating message.
         if not self.view_rectified.get():
             self._set_status_right("Enable rectified view to measure")
             return
+
         if self.cal is None:
             self._set_status_right("Load calibration to measure")
             return
 
-        # --- Point 0 measurement ---
-        P0, err0 = self._triangulate_point_pair(0)
-        if err0 is not None:
-            self._set_status_right(err0)
+        n = min(l_count, r_count)
+
+        # Compute 3D points as many as we can.
+        pts3d = []
+        err_msg = ""
+
+        for i in range(n):
+            P, err = self._triangulate_point_pair(i)
+            if err is not None:
+                err_msg = f"Point {i} failed: {err}"
+                break
+            pts3d.append(P)
+
+        # If we got nothing, show the error and return.
+        if len(pts3d) == 0:
+            self._set_status_right(err_msg if err_msg else "No valid points")
             return
 
-        X0, Y0, Z0 = P0
-        R0 = (X0 * X0 + Y0 * Y0 + Z0 * Z0) ** 0.5
+        # Build rows for the points table.
+        points_rows = []
+        sigma_px = float(self.click_sigma_px)
 
-        # If we only have one point pair, report point 0.
-        if l_count == 1:
-            self._set_status_right(
-                f"P0: X {self._fmt_mm(X0)}  Y {self._fmt_mm(Y0)}  Z {self._fmt_mm(Z0)}  Range {self._fmt_mm(R0)}"
-            )
-            return
+        for i, (X, Y, Z) in enumerate(pts3d):
+            R = (X * X + Y * Y + Z * Z) ** 0.5
 
-        # --- Point 1 measurement ---
-        P1, err1 = self._triangulate_point_pair(1)
-        if err1 is not None:
-            self._set_status_right(err1)
-            return
+            # Assumption-free quality metric.
+            erms = self._reprojection_rms_px(i)
+            erms_str = f"{erms:.2f}" if erms is not None else ""
 
-        X1, Y1, Z1 = P1
-        R1 = (X1 * X1 + Y1 * Y1 + Z1 * Z1) ** 0.5
+            # Assumption-based uncertainty in mm.
+            sig = self._estimate_point_sigma_mm(i, sigma_px)
+            if sig is None:
+                sZ_str = ""
+                sR_str = ""
+            else:
+                sZ, sR = sig
+                sZ_str = f"{sZ:.1f}"
+                sR_str = f"{sR:.1f}"
 
-        # --- Line delta + length ---
-        dX = X1 - X0
-        dY = Y1 - Y0
-        dZ = Z1 - Z0
-        L = (dX * dX + dY * dY + dZ * dZ) ** 0.5
+            points_rows.append((
+                str(i),
+                f"{X:.1f}",
+                f"{Y:.1f}",
+                f"{Z:.1f}",
+                f"{R:.1f}",
+                erms_str,
+                sZ_str,
+                sR_str,
+            ))
 
-        self._set_status_right(
-            f"P0 Z {self._fmt_mm(Z0)}  P1 Z {self._fmt_mm(Z1)}  "
-            f"dX {self._fmt_mm(dX)}  dY {self._fmt_mm(dY)}  dZ {self._fmt_mm(dZ)}  "
-            f"Len {self._fmt_mm(L)}"
-        )
+        # Build rows for the segments table.
+        seg_rows = []
+        if len(pts3d) >= 2:
+            for i in range(1, len(pts3d)):
+                X0, Y0, Z0 = pts3d[i - 1]
+                X1, Y1, Z1 = pts3d[i]
+                dX = X1 - X0
+                dY = Y1 - Y0
+                dZ = Z1 - Z0
+                L = (dX * dX + dY * dY + dZ * dZ) ** 0.5
+
+                # Segment sigma length estimate.
+                seg_est = self._estimate_segment_sigma_len_mm(i - 1, i, sigma_px)
+                if seg_est is None:
+                    sL_str = ""
+                else:
+                    _L0, sL = seg_est
+                    sL_str = f"{sL:.1f}"
+
+                seg_rows.append((
+                    f"{i-1}-{i}",
+                    f"{dX:.1f}",
+                    f"{dY:.1f}",
+                    f"{dZ:.1f}",
+                    f"{L:.1f}",
+                    sL_str,
+                ))
+
+            self._set_status_right(f"Measured {len(pts3d)} pts, {len(seg_rows)} segs")
+        else:
+            self._set_status_right("Measured 1 point")
+
+        # Update popup window (creates it on first valid measurement).
+        self._update_measurement_window(points_rows, seg_rows, err_msg)
 
     # -------------------------------------------------------------------------
     # Menu bar
@@ -677,6 +733,200 @@ class SizeamaticProApp:
 
         # Show a short confirmation in the center status area.
         self._set_status_mid("Points cleared")
+
+    # Triangulates directly from pixel coordinates (rectified) into XYZ millimeters.
+    def _triangulate_from_pixels(self, xL, yL, xR, yR):
+        ptsL = np.array([[xL], [yL]], dtype=np.float64)
+        ptsR = np.array([[xR], [yR]], dtype=np.float64)
+
+        Xh = cv2.triangulatePoints(self.cal["PL"], self.cal["PR"], ptsL, ptsR)
+
+        W = float(Xh[3, 0])
+        if abs(W) < 1e-9:
+            return None
+
+        X = float(Xh[0, 0]) / W
+        Y = float(Xh[1, 0]) / W
+        Z = float(Xh[2, 0]) / W
+        return (X, Y, Z)
+
+
+    # Projects a 3D point (X,Y,Z) into pixel coords using a 3x4 projection matrix P.
+    def _project_point(self, P, X, Y, Z):
+        # Build homogeneous 3D point.
+        Xh = np.array([[X], [Y], [Z], [1.0]], dtype=np.float64)
+
+        # Project to homogeneous image coordinates.
+        ph = P @ Xh
+
+        w = float(ph[2, 0])
+        if abs(w) < 1e-12:
+            return None
+
+        u = float(ph[0, 0]) / w
+        v = float(ph[1, 0]) / w
+        return (u, v)
+
+
+    # Computes reprojection RMS (px) for point index i using current clicked pixels.
+    def _reprojection_rms_px(self, index):
+        # Require a valid triangulated 3D point.
+        P, err = self._triangulate_point_pair(index)
+        if err is not None:
+            return None
+
+        X, Y, Z = P
+
+        # Read clicked pixels.
+        xL, yL = self.ptsL[index]
+        xR, yR = self.ptsR[index]
+
+        # Project back into both images.
+        pL = self._project_point(self.cal["PL"], X, Y, Z)
+        pR = self._project_point(self.cal["PR"], X, Y, Z)
+        if pL is None or pR is None:
+            return None
+
+        uL, vL = pL
+        uR, vR = pR
+
+        # Compute pixel residual magnitudes.
+        eL = ((uL - xL) ** 2 + (vL - yL) ** 2) ** 0.5
+        eR = ((uR - xR) ** 2 + (vR - yR) ** 2) ** 0.5
+
+        # RMS across left and right.
+        erms = ((eL * eL + eR * eR) / 2.0) ** 0.5
+        return float(erms)
+
+
+    # Estimates sigma(Z) and sigma(Range) in mm for a point using finite differences.
+    # Assumes isotropic click uncertainty sigma_px in each image coordinate.
+    def _estimate_point_sigma_mm(self, index, sigma_px):
+        # Pull clicked pixels.
+        xL, yL = self.ptsL[index]
+        xR, yR = self.ptsR[index]
+
+        # Baseline triangulation.
+        P0 = self._triangulate_from_pixels(xL, yL, xR, yR)
+        if P0 is None:
+            return None
+
+        X0, Y0, Z0 = P0
+        R0 = (X0 * X0 + Y0 * Y0 + Z0 * Z0) ** 0.5
+
+        # Perturbation set: ±sigma in each coordinate independently.
+        # This is cheap and provides a practical sensitivity-based sigma.
+        perturbs = [
+            (xL + sigma_px, yL, xR, yR),
+            (xL - sigma_px, yL, xR, yR),
+            (xL, yL + sigma_px, xR, yR),
+            (xL, yL - sigma_px, xR, yR),
+            (xL, yL, xR + sigma_px, yR),
+            (xL, yL, xR - sigma_px, yR),
+            (xL, yL, xR, yR + sigma_px),
+            (xL, yL, xR, yR - sigma_px),
+        ]
+
+        # Collect Z and Range results for each perturbation.
+        Zs = []
+        Rs = []
+
+        for (pxL, pyL, pxR, pyR) in perturbs:
+            Pp = self._triangulate_from_pixels(pxL, pyL, pxR, pyR)
+            if Pp is None:
+                continue
+
+            Xp, Yp, Zp = Pp
+            Rp = (Xp * Xp + Yp * Yp + Zp * Zp) ** 0.5
+
+            Zs.append(Zp)
+            Rs.append(Rp)
+
+        # If too many perturbations failed, give up.
+        if len(Zs) < 4:
+            return None
+
+        # Use sample standard deviation as sigma estimate.
+        sZ = float(np.std(np.array(Zs, dtype=np.float64), ddof=1))
+        sR = float(np.std(np.array(Rs, dtype=np.float64), ddof=1))
+
+        return (sZ, sR)
+
+
+    # Estimates sigma(length) in mm for segment (i-1 -> i) using endpoint perturbations.
+    # We perturb each endpoint independently and observe how length changes.
+    def _estimate_segment_sigma_len_mm(self, i0, i1, sigma_px):
+        # Require endpoints exist.
+        if i0 < 0 or i1 < 0:
+            return None
+        if i0 >= len(self.ptsL) or i1 >= len(self.ptsL):
+            return None
+        if i0 >= len(self.ptsR) or i1 >= len(self.ptsR):
+            return None
+
+        # Baseline 3D endpoints.
+        P0 = self._triangulate_from_pixels(*self.ptsL[i0], *self.ptsR[i0])
+        P1 = self._triangulate_from_pixels(*self.ptsL[i1], *self.ptsR[i1])
+        if P0 is None or P1 is None:
+            return None
+
+        X0, Y0, Z0 = P0
+        X1, Y1, Z1 = P1
+
+        # Baseline length.
+        dX = X1 - X0
+        dY = Y1 - Y0
+        dZ = Z1 - Z0
+        L0 = (dX * dX + dY * dY + dZ * dZ) ** 0.5
+
+        # Build perturbations for each endpoint, same as point sigma.
+        def _endpoint_perturbs(idx):
+            xL, yL = self.ptsL[idx]
+            xR, yR = self.ptsR[idx]
+            return [
+                (xL + sigma_px, yL, xR, yR),
+                (xL - sigma_px, yL, xR, yR),
+                (xL, yL + sigma_px, xR, yR),
+                (xL, yL - sigma_px, xR, yR),
+                (xL, yL, xR + sigma_px, yR),
+                (xL, yL, xR - sigma_px, yR),
+                (xL, yL, xR, yR + sigma_px),
+                (xL, yL, xR, yR - sigma_px),
+            ]
+
+        Ls = []
+
+        # Perturb endpoint 0, keep endpoint 1 baseline.
+        for (pxL, pyL, pxR, pyR) in _endpoint_perturbs(i0):
+            P0p = self._triangulate_from_pixels(pxL, pyL, pxR, pyR)
+            if P0p is None:
+                continue
+
+            X0p, Y0p, Z0p = P0p
+            dX = X1 - X0p
+            dY = Y1 - Y0p
+            dZ = Z1 - Z0p
+            Lp = (dX * dX + dY * dY + dZ * dZ) ** 0.5
+            Ls.append(Lp)
+
+        # Perturb endpoint 1, keep endpoint 0 baseline.
+        for (pxL, pyL, pxR, pyR) in _endpoint_perturbs(i1):
+            P1p = self._triangulate_from_pixels(pxL, pyL, pxR, pyR)
+            if P1p is None:
+                continue
+
+            X1p, Y1p, Z1p = P1p
+            dX = X1p - X0
+            dY = Y1p - Y0
+            dZ = Z1p - Z0
+            Lp = (dX * dX + dY * dY + dZ * dZ) ** 0.5
+            Ls.append(Lp)
+
+        if len(Ls) < 6:
+            return None
+
+        sL = float(np.std(np.array(Ls, dtype=np.float64), ddof=1))
+        return (L0, sL)
 
     # Triangulates a matched point pair (same index in left and right) into 3D XYZ in millimeters.
     def _triangulate_point_pair(self, index):
@@ -1489,6 +1739,151 @@ class SizeamaticProApp:
 
     def _set_status_right(self, text):
         self.status_right.config(text=text)
+
+    # Creates the measurement window and table widgets if not already created.
+    # Creates the measurement window the first time we have valid measurements.
+    def _ensure_measurement_window(self):
+        if self.meas_win is not None:
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("Measurement")
+        win.geometry("620x520")
+
+        def _on_close():
+            win.destroy()
+            self.meas_win = None
+            self.points_tree = None
+            self.segs_tree = None
+            self.meas_copy_text = None
+            self.meas_error_var = None
+
+        win.protocol("WM_DELETE_WINDOW", _on_close)
+
+        outer = ttk.Frame(win, padding=(10, 10))
+        outer.grid(row=0, column=0, sticky="nsew")
+
+        win.grid_rowconfigure(0, weight=1)
+        win.grid_columnconfigure(0, weight=1)
+
+        outer.grid_rowconfigure(1, weight=1)
+        outer.grid_rowconfigure(3, weight=1)
+        outer.grid_columnconfigure(0, weight=1)
+
+        # Error line (for triangulation failures etc.)
+        self.meas_error_var = tk.StringVar(value="")
+        ttk.Label(outer, textvariable=self.meas_error_var, foreground="red").grid(row=0, column=0, sticky="w", pady=(0, 6))
+
+        # ---------------- Points table ----------------
+        ttk.Label(outer, text="Points (mm)", font=("Segoe UI", 10, "bold")).grid(row=1, column=0, sticky="w")
+
+        points_cols = ("idx", "X", "Y", "Z", "Range", "ReprojRMS", "sZ", "sRange")
+        points_tree = ttk.Treeview(outer, columns=points_cols, show="headings", height=8)
+        points_tree.grid(row=2, column=0, sticky="nsew", pady=(4, 12))
+
+        points_tree.heading("idx", text="#")
+        points_tree.heading("X", text="X")
+        points_tree.heading("Y", text="Y")
+        points_tree.heading("Z", text="Z")
+        points_tree.heading("Range", text="Range")
+
+        points_tree.column("idx", width=40, anchor="center")
+        points_tree.column("X", width=120, anchor="e")
+        points_tree.column("Y", width=120, anchor="e")
+        points_tree.column("Z", width=120, anchor="e")
+        points_tree.column("Range", width=140, anchor="e")
+
+        points_tree.heading("ReprojRMS", text="Reproj RMS (px)")
+        points_tree.heading("sZ", text="σZ")
+        points_tree.heading("sRange", text="σRange")
+
+        points_tree.column("ReprojRMS", width=120, anchor="e")
+        points_tree.column("sZ", width=90, anchor="e")
+        points_tree.column("sRange", width=110, anchor="e")
+
+        # ---------------- Segments table ----------------
+        ttk.Label(outer, text="Segments (mm)", font=("Segoe UI", 10, "bold")).grid(row=3, column=0, sticky="w")
+
+        seg_cols = ("seg", "dX", "dY", "dZ", "Len", "sLen")
+        segs_tree = ttk.Treeview(outer, columns=seg_cols, show="headings", height=8)
+        segs_tree.grid(row=4, column=0, sticky="nsew", pady=(4, 12))
+
+        segs_tree.heading("seg", text="Seg")
+        segs_tree.heading("dX", text="dX")
+        segs_tree.heading("dY", text="dY")
+        segs_tree.heading("dZ", text="dZ")
+        segs_tree.heading("Len", text="Len")
+
+        segs_tree.column("seg", width=60, anchor="center")
+        segs_tree.column("dX", width=120, anchor="e")
+        segs_tree.column("dY", width=120, anchor="e")
+        segs_tree.column("dZ", width=120, anchor="e")
+        segs_tree.column("Len", width=140, anchor="e")
+
+        segs_tree.heading("sLen", text="σLen")
+        segs_tree.column("sLen", width=110, anchor="e")
+
+        # ---------------- Copy box ----------------
+        ttk.Label(outer, text="Copy", font=("Segoe UI", 10, "bold")).grid(row=5, column=0, sticky="w")
+
+        txt = tk.Text(outer, height=7, width=1, wrap="none")
+        txt.grid(row=6, column=0, sticky="nsew")
+        outer.grid_rowconfigure(6, weight=0)
+
+        txt.configure(state="disabled")
+
+        self.meas_win = win
+        self.points_tree = points_tree
+        self.segs_tree = segs_tree
+        self.meas_copy_text = txt
+
+
+    # Updates the measurement window from computed points and segments.
+    def _update_measurement_window(self, points_rows, seg_rows, error_msg):
+        self._ensure_measurement_window()
+
+        # Update error message line.
+        self.meas_error_var.set(error_msg if error_msg else "")
+
+        if not error_msg:
+            self.meas_error_var.set(f"Assumed click σ = {self.click_sigma_px:.1f} px")
+
+        # Clear existing rows.
+        for item in self.points_tree.get_children():
+            self.points_tree.delete(item)
+        for item in self.segs_tree.get_children():
+            self.segs_tree.delete(item)
+
+        # Insert point rows.
+        for row in points_rows:
+            # row: (idx, X, Y, Z, Range) already formatted strings
+            self.points_tree.insert("", "end", values=row)
+
+        # Insert segment rows.
+        for row in seg_rows:
+            # row: (seg, dX, dY, dZ, Len) already formatted strings
+            self.segs_tree.insert("", "end", values=row)
+
+        # Build copy block (tab separated, easy to paste into Excel).
+        lines = []
+        lines.append("Points")
+        lines.append("idx\tX(mm)\tY(mm)\tZ(mm)\tRange(mm)\tReprojRMS(px)\tSigmaZ(mm)\tSigmaRange(mm)")
+        for idx, X, Y, Z, R, erms, sZ, sR in points_rows:
+            lines.append(f"{idx}\t{X}\t{Y}\t{Z}\t{R}\t{erms}\t{sZ}\t{sR}")
+
+        if seg_rows:
+            lines.append("")
+            lines.append("Segments")
+            lines.append("seg\tdX(mm)\tdY(mm)\tdZ(mm)\tLen(mm)\tSigmaLen(mm)")
+            for seg, dX, dY, dZ, L, sL in seg_rows:
+                lines.append(f"{seg}\t{dX}\t{dY}\t{dZ}\t{L}\t{sL}")
+
+        copy_block = "\n".join(lines)
+
+        self.meas_copy_text.configure(state="normal")
+        self.meas_copy_text.delete("1.0", "end")
+        self.meas_copy_text.insert("1.0", copy_block)
+        self.meas_copy_text.configure(state="disabled")
 
     def _update_frame_labels(self):
         # Frame max is currently 0 because no video is loaded.
