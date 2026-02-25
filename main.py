@@ -94,6 +94,10 @@ class SizeamaticProApp:
         # Example: if right is 12 frames ahead of left, offset = +12.
         self.lock_offset_frames = 0
 
+        # Debounce handle for resize redraw.
+        # Resize events can fire dozens of times per second while dragging the window.
+        self._resize_after_id = None
+
     # Closes OpenCV windows and releases captures before exiting.
     def on_app_close(self):
         # Stop playback loop.
@@ -115,6 +119,37 @@ class SizeamaticProApp:
 
         # Close the Tk app.
         self.root.destroy()
+
+    # Called when either canvas is resized.
+    # We debounce redraw to avoid decoding and encoding on every resize event.
+    def on_canvas_resized(self, _event):
+        # If Fit To Window is off, resizing the window does not change the image size.
+        # In that case, we can ignore resize events entirely.
+        if not self.fit_to_window.get():
+            return
+
+        # Cancel any pending redraw so we only redraw once after resizing settles.
+        if self._resize_after_id is not None:
+            self.root.after_cancel(self._resize_after_id)
+            self._resize_after_id = None
+
+        # Schedule a redraw shortly in the future.
+        # 50 ms is short enough to feel responsive but avoids resize storm spam.
+        self._resize_after_id = self.root.after(50, self._redraw_after_resize)
+
+    # Runs after the debounce delay to redraw the current frames.
+    def _redraw_after_resize(self):
+        # Clear the pending handle first.
+        self._resize_after_id = None
+
+        # If no videos are loaded yet, keep the placeholders.
+        if not self.capL and not self.capR:
+            self._refresh_placeholder_canvases()
+            return
+
+        # Otherwise, redraw the current decoded frames.
+        # This will re run the Fit To Window scaling logic.
+        self._render_current_frames()
 
     # -------------------------------------------------------------------------
     # Menu bar
@@ -229,8 +264,44 @@ class SizeamaticProApp:
         self.left_header = ttk.Label(self.left_frame, text="Left", font=("Segoe UI", 10, "bold"))
         self.left_header.grid(row=0, column=0, sticky="w", pady=(0, 6))
 
-        self.left_canvas = tk.Canvas(self.left_frame, bg="black", highlightthickness=1, highlightbackground="#333333")
-        self.left_canvas.grid(row=1, column=0, sticky="nsew")
+        # Left: replace the single canvas with a viewport that contains two stacked canvases.
+        # Bottom canvas draws video, top canvas draws overlays later.
+
+        # Create a container frame in the exact grid cell where the old canvas lived.
+        self.left_viewport = ttk.Frame(self.left_frame)
+        self.left_viewport.grid(row=1, column=0, sticky="nsew")
+
+        # Allow row 1 (the video area) to grow when the window grows.
+        self.left_frame.grid_rowconfigure(1, weight=1)
+
+        # Allow column 0 (the only column) to grow when the window grows.
+        self.left_frame.grid_columnconfigure(0, weight=1)
+
+        # Make the viewport frame expand to fill its parent cell.
+        self.left_viewport.grid_rowconfigure(0, weight=1)
+        self.left_viewport.grid_columnconfigure(0, weight=1)
+
+        # Bottom canvas: this is where we draw the video image.
+        self.left_video_canvas = tk.Canvas(
+            self.left_viewport,
+            bg="black",                    # Fill background when no frame is drawn.
+            highlightthickness=1,          # Thin border for visibility.
+            highlightbackground="#333333", # Border color.
+        )
+        self.left_video_canvas.grid(row=0, column=0, sticky="nsew")  # Fill the viewport.
+
+        # Top canvas: overlays live here (points, lines, labels).
+        # We do NOT draw video here, so we can change video rendering later without touching overlays.
+        self.left_overlay_canvas = tk.Canvas(
+            self.left_viewport,
+            bg="black",          # Tk requires a valid color; we fake transparency later.
+            highlightthickness=0,
+            bd=0,
+        )
+
+        # Use place so the overlay canvas always covers the video canvas exactly.
+        # relwidth/relheight = 1 makes it track the viewport size automatically.
+        self.left_overlay_canvas.place(x=0, y=0, relwidth=1.0, relheight=1.0)
 
         # Slider row: slider + label
         self.left_slider_row = ttk.Frame(self.left_frame)
@@ -257,8 +328,38 @@ class SizeamaticProApp:
         self.right_header = ttk.Label(self.right_frame, text="Right", font=("Segoe UI", 10, "bold"))
         self.right_header.grid(row=0, column=0, sticky="w", pady=(0, 6))
 
-        self.right_canvas = tk.Canvas(self.right_frame, bg="black", highlightthickness=1, highlightbackground="#333333")
-        self.right_canvas.grid(row=1, column=0, sticky="nsew")
+        # Right: same stacked canvas setup as left.
+
+        self.right_viewport = ttk.Frame(self.right_frame)
+        self.right_viewport.grid(row=1, column=0, sticky="nsew")
+
+        # Let the right pane's video row expand with window size.
+        self.right_frame.grid_rowconfigure(1, weight=1)
+
+        # Let the right pane's single column expand with window size.
+        self.right_frame.grid_columnconfigure(0, weight=1)
+
+        # Let the viewport expand inside that growing area.
+        self.right_viewport.grid_rowconfigure(0, weight=1)
+        self.right_viewport.grid_columnconfigure(0, weight=1)
+
+        # Bottom canvas draws video frames.
+        self.right_video_canvas = tk.Canvas(
+            self.right_viewport,
+            bg="black",
+            highlightthickness=1,
+            highlightbackground="#333333",
+        )
+        self.right_video_canvas.grid(row=0, column=0, sticky="nsew")
+
+        # Top canvas draws overlay shapes and handles later.
+        self.right_overlay_canvas = tk.Canvas(
+            self.right_viewport,
+            bg="black",
+            highlightthickness=0,
+            bd=0,
+        )
+        self.right_overlay_canvas.place(x=0, y=0, relwidth=1.0, relheight=1.0)
 
         self.right_slider_row = ttk.Frame(self.right_frame)
         self.right_slider_row.grid(row=2, column=0, sticky="ew", pady=(8, 0))
@@ -280,13 +381,17 @@ class SizeamaticProApp:
         self.panes.add(self.left_frame, weight=1)
         self.panes.add(self.right_frame, weight=1)
 
-        # ---- Bind canvas resize to redraw placeholder ----
-        self.left_canvas.bind("<Configure>", lambda e: self._refresh_placeholder_canvases())
-        self.right_canvas.bind("<Configure>", lambda e: self._refresh_placeholder_canvases())
+        # When the canvas size changes, we need to redraw the current frames.
+        # We debounce because resize events fire rapidly while dragging the window.
+        self.left_video_canvas.bind("<Configure>", self.on_canvas_resized)
+        self.right_video_canvas.bind("<Configure>", self.on_canvas_resized)
+
+        self.left_overlay_canvas.bind("<Configure>", self.on_canvas_resized)
+        self.right_overlay_canvas.bind("<Configure>", self.on_canvas_resized)
 
         # ---- Mouse bindings placeholders (for future overlays) ----
-        self.left_canvas.bind("<Button-1>", lambda e: self.on_canvas_click("L", e))
-        self.right_canvas.bind("<Button-1>", lambda e: self.on_canvas_click("R", e))
+        self.left_overlay_canvas.bind("<Button-1>", lambda e: self.on_canvas_click("L", e))
+        self.right_overlay_canvas.bind("<Button-1>", lambda e: self.on_canvas_click("R", e))
 
     # -------------------------------------------------------------------------
     # Status bar
@@ -796,12 +901,16 @@ class SizeamaticProApp:
         self.left_frame_label.config(text=f"Frame: {li}/{lmax}")
         self.right_frame_label.config(text=f"Frame: {ri}/{rmax}")
 
+    # Draw placeholders only when we do not have video content to display.
     def _refresh_placeholder_canvases(self):
-        # Draw a simple placeholder pattern so we can see resizing and overlays.
-        self._draw_placeholder(self.left_canvas, "LEFT", self.view_rectified.get())
-        self._draw_placeholder(self.right_canvas, "RIGHT", self.view_rectified.get())
+        # If either capture is loaded, we should be showing real frames, not placeholders.
+        if self.capL or self.capR:
+            self._render_current_frames()
+            return
 
-        # Keep frame labels consistent.
+        self._draw_placeholder(self.left_overlay_canvas, "LEFT", self.view_rectified.get())
+        self._draw_placeholder(self.right_overlay_canvas, "RIGHT", self.view_rectified.get())
+
         self._update_frame_labels()
 
     def _draw_placeholder(self, canvas, label, rectified):
@@ -1057,7 +1166,10 @@ class SizeamaticProApp:
 
         # Encode the frame as PNG in memory.
         # Tk PhotoImage can decode PNG from base64 string data.
-        ok, png_bytes = cv2.imencode(".png", frame_bgr)
+        # Encode as PNG with compression disabled for speed.
+        # We are not writing to disk, so smaller size is not useful here.
+        encode_params = [cv2.IMWRITE_PNG_COMPRESSION, 0]
+        ok, png_bytes = cv2.imencode(".png", frame_bgr, encode_params)
         if not ok:
             # If encoding fails, draw an error message instead of crashing the UI.
             canvas.delete("all")
@@ -1097,9 +1209,9 @@ class SizeamaticProApp:
             frameL = self._read_frame_at(self.capL, li)
 
             if frameL is None:
-                self._draw_missing_frame(self.left_canvas, "LEFT", li)
+                self._draw_missing_frame(self.left_overlay_canvas, "LEFT", li)
             else:
-                 self._display_bgr_on_canvas(self.left_canvas, frameL, "L")
+                self._display_bgr_on_canvas(self.left_overlay_canvas, frameL, "L")
 
         # Right side render.
         if self.capR:
@@ -1107,9 +1219,9 @@ class SizeamaticProApp:
             frameR = self._read_frame_at(self.capR, ri)
 
             if frameR is None:
-                self._draw_missing_frame(self.right_canvas, "RIGHT", ri)
+                self._draw_missing_frame(self.right_overlay_canvas, "RIGHT", ri)
             else:
-                self._display_bgr_on_canvas(self.right_canvas, frameR, "R")
+                self._display_bgr_on_canvas(self.right_overlay_canvas, frameR, "R")
 
         # Update the slider frame labels after rendering.
         self._update_frame_labels()
