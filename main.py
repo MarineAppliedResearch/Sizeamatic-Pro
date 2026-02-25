@@ -98,6 +98,64 @@ class SizeamaticProApp:
         # Resize events can fire dozens of times per second while dragging the window.
         self._resize_after_id = None
 
+        # Test overlay points (image pixel coordinates).
+        # We keep these as floats so later scaling math is easy.
+        self.test_pt_L = (100.0, 100.0)
+        self.test_pt_R = (100.0, 100.0)
+
+        # Overlay handle radius in pixels (screen space after scaling).
+        self.handle_radius_px = 8
+
+    # Redraws overlay items for both panes.
+    # For now, this draws a single test handle and label in each pane.
+    def _redraw_overlays(self):
+        # Left overlay items.
+        self._draw_test_overlay(self.left_overlay_canvas, "L")
+
+        # Right overlay items.
+        self._draw_test_overlay(self.right_overlay_canvas, "R")
+
+    # Draws a single test handle plus a "0" label.
+    def _draw_test_overlay(self, canvas, which):
+        # Clear existing overlay items only.
+        canvas.delete("overlay")
+
+        # Choose which test point to draw.
+        if which == "L":
+            x, y = self.test_pt_L
+        else:
+            x, y = self.test_pt_R
+
+        # Map image pixel coordinates to screen coordinates using the same scale as the video.
+        scale = self._get_pane_scale(which, canvas)
+
+        sx = x * scale
+        sy = y * scale
+
+        r = self.handle_radius_px
+
+        # Draw a big clickable-looking handle.
+        canvas.create_oval(
+            sx - r,
+            sy - r,
+            sx + r,
+            sy + r,
+            outline="#00ff66",
+            width=2,
+            fill="",
+            tags=("overlay",),
+        )
+
+        # Draw the point index label near the handle.
+        canvas.create_text(
+            sx + r + 6,
+            sy - r - 6,
+            text="0",
+            fill="#00ff66",
+            font=("Segoe UI", 11, "bold"),
+            tags=("overlay",),
+        )
+
     # Closes OpenCV windows and releases captures before exiting.
     def on_app_close(self):
         # Stop playback loop.
@@ -1172,7 +1230,7 @@ class SizeamaticProApp:
         ok, png_bytes = cv2.imencode(".png", frame_bgr, encode_params)
         if not ok:
             # If encoding fails, draw an error message instead of crashing the UI.
-            canvas.delete("all")
+            canvas.delete("frame")
             canvas.create_text(
                 10,
                 10,
@@ -1197,9 +1255,11 @@ class SizeamaticProApp:
         else:
             self.tkimg_right = tk_img
 
-        # Clear the canvas and draw the image.
-        canvas.delete("all")
-        canvas.create_image(0, 0, anchor="nw", image=tk_img)
+        # Clear the canvas video and draw the video image.
+        canvas.delete("frame")
+
+        # tag what we've drawn as frame, so we can refer to it later
+        canvas.create_image(0, 0, anchor="nw", image=tk_img, tags=("frame",))
 
      # Renders current left and right frames based on the current indices.
     def _render_current_frames(self):
@@ -1226,27 +1286,70 @@ class SizeamaticProApp:
         # Update the slider frame labels after rendering.
         self._update_frame_labels()
 
+        # Draw overlay over frame
+        self._redraw_overlays()
+
+    # Computes the current image->screen scale factor for the given pane.
+    # Fit To Window scales by width only, so we match that here.
+    def _get_pane_scale(self, which, canvas):
+        # Default scale is 1.0 (native pixel mapping).
+        if not self.fit_to_window.get():
+            return 1.0
+
+        # We need source image width to compute scale.
+        # If meta is missing, fall back to 1.0.
+        if which == "L":
+            if not self.metaL:
+                return 1.0
+            src_w = float(self.metaL["width"])
+        else:
+            if not self.metaR:
+                return 1.0
+            src_w = float(self.metaR["width"])
+
+        # Canvas width is the target width under Fit To Window.
+        canvas_w = float(max(1, canvas.winfo_width()))
+
+        # Scale by width only.
+        return canvas_w / src_w
+
     # Draws a clear error message on a canvas when a frame cannot be decoded.
     def _draw_missing_frame(self, canvas, label, frame_index):
-        canvas.delete("all")
+        # Only delete the frame layer so overlay items can persist on top.
+        canvas.delete("frame")
 
+        # Canvas size is needed to center the message.
         w = max(1, canvas.winfo_width())
         h = max(1, canvas.winfo_height())
 
-        canvas.create_rectangle(2, 2, w - 2, h - 2, outline="#444444")
+        # Draw a border rectangle tagged as frame content.
+        canvas.create_rectangle(
+            2,
+            2,
+            w - 2,
+            h - 2,
+            outline="#444444",
+            tags=("frame",),
+        )
+
+        # Draw the main missing frame text tagged as frame content.
         canvas.create_text(
             w // 2,
             h // 2 - 10,
             text=f"{label} FRAME MISSING",
             fill="white",
             font=("Segoe UI", 14, "bold"),
+            tags=("frame",),
         )
+
+        # Draw the frame index text tagged as frame content.
         canvas.create_text(
             w // 2,
             h // 2 + 18,
             text=f"Frame {frame_index}",
             fill="#cccccc",
             font=("Segoe UI", 11, "normal"),
+            tags=("frame",),
         )
 
     # Returns True only when BOTH captures and metadata exist.
