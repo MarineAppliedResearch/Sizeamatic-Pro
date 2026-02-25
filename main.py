@@ -117,6 +117,19 @@ class SizeamaticProApp:
         self.drag_which = None
         self.drag_index = None
 
+        # Per pane view state for zoom and pan.
+        # zoom is unitless scale multiplier applied on top of fit-to-window scaling.
+        # off_x/off_y are screen-pixel offsets applied after scaling.
+        self.viewL = {"zoom": 1.0, "off_x": 0.0, "off_y": 0.0}
+        self.viewR = {"zoom": 1.0, "off_x": 0.0, "off_y": 0.0}
+
+        # Zoom limits.
+        self.zoom_min = 1.0
+        self.zoom_max = 10.0
+
+        # Zoom factor per mouse wheel notch.
+        self.zoom_step = 1.10
+
     # Redraws overlay items for both panes.
     # For now, this draws a single test handle and label in each pane.
     def _redraw_overlays(self):
@@ -142,10 +155,8 @@ class SizeamaticProApp:
                 x0, y0 = pts[i - 1]
                 x1, y1 = pts[i]
 
-                sx0 = x0 * scale
-                sy0 = y0 * scale
-                sx1 = x1 * scale
-                sy1 = y1 * scale
+                sx0, sy0 = self._image_to_screen(which, canvas, x0, y0)
+                sx1, sy1 = self._image_to_screen(which, canvas, x1, y1)
 
                 canvas.create_line(
                     sx0,
@@ -161,8 +172,9 @@ class SizeamaticProApp:
         r = int(self.handle_radius_px)
 
         for i, (x, y) in enumerate(pts):
-            sx = x * scale
-            sy = y * scale
+
+            # Translate to screen coordinates
+            sx, sy = self._image_to_screen(which, canvas, x, y)
 
             # Handle oval:
             # Tag it as "handle" so _get_handle_index_under_cursor can recognize it.
@@ -187,6 +199,42 @@ class SizeamaticProApp:
                 font=("Segoe UI", 11, "bold"),
                 tags=("overlay",),
             )
+
+        # Mouse wheel zoom for a pane, anchored under the cursor.
+    def on_mouse_wheel(self, which, event):
+        canvas = self.left_overlay_canvas if which == "L" else self.right_overlay_canvas
+
+        # Require metadata so we know how to map coords.
+        if self._get_image_size(which) is None:
+            return
+
+        view = self._get_view(which)
+
+        # Convert cursor position to image coords before zoom changes.
+        ix, iy = self._screen_to_image(which, canvas, event.x, event.y)
+
+        # Wheel direction (Windows: event.delta is typically ±120 per notch).
+        if event.delta > 0:
+            new_zoom = float(view["zoom"]) * float(self.zoom_step)
+        else:
+            new_zoom = float(view["zoom"]) / float(self.zoom_step)
+
+        # Clamp zoom.
+        new_zoom = max(float(self.zoom_min), min(float(self.zoom_max), new_zoom))
+        view["zoom"] = new_zoom
+
+        # After zoom changes, compute new total scale.
+        S_new = self._get_total_scale(which, canvas)
+
+        # Keep the same image point under the cursor.
+        # event.x/event.y are in canvas coords, so subtract the display rect origin first.
+        dx, dy, _dw, _dh = self._get_display_rect(which, canvas)
+
+        view["off_x"] = (float(event.x) - float(dx)) - float(ix) * S_new
+        view["off_y"] = (float(event.y) - float(dy)) - float(iy) * S_new
+
+        # Redraw everything using the new transform.
+        self._render_current_frames()
 
     # Closes OpenCV windows and releases captures before exiting.
     def on_app_close(self):
@@ -241,7 +289,76 @@ class SizeamaticProApp:
         # This will re run the Fit To Window scaling logic.
         self._render_current_frames()
 
-    # Converts screen coordinates (canvas pixels) to image pixel coordinates.
+    # Returns the view dict for a pane.
+    def _get_view(self, which):
+        if which == "L":
+            return self.viewL
+        return self.viewR
+
+    # Returns the source image width/height for a pane.
+    def _get_image_size(self, which):
+        if which == "L":
+            if not self.metaL:
+                return None
+            return int(self.metaL["width"]), int(self.metaL["height"])
+        else:
+            if not self.metaR:
+                return None
+            return int(self.metaR["width"]), int(self.metaR["height"])
+
+    # Computes the base fit-to-window scale (by width only).
+    def _get_fit_scale(self, which, canvas):
+        # If Fit To Window is off, base scale is 1.
+        if not self.fit_to_window.get():
+            return 1.0
+
+        size = self._get_image_size(which)
+        if size is None:
+            return 1.0
+
+        img_w, _img_h = size
+
+        # Use the actual draw rect width, not the full canvas width.
+        _dx, _dy, dw, _dh = self._get_display_rect(which, canvas)
+        return float(dw) / float(img_w)
+
+    # Computes the total scale used for both video and overlays: S = fit_scale * zoom.
+    def _get_total_scale(self, which, canvas):
+        view = self._get_view(which)
+        fit_scale = self._get_fit_scale(which, canvas)
+        return fit_scale * float(view["zoom"])
+
+    # Converts image pixel coords to screen coords for a pane.
+    def _image_to_screen(self, which, canvas, ix, iy):
+        view = self._get_view(which)
+
+        # Display rect defines where the video lives inside the canvas.
+        dx, dy, _dw, _dh = self._get_display_rect(which, canvas)
+
+        # Total scale includes Fit To Window scale and zoom.
+        S = self._get_total_scale(which, canvas)
+
+        # off_x/off_y are pan offsets in screen pixels relative to the display rect.
+        sx = float(dx) + float(ix) * S + float(view["off_x"])
+        sy = float(dy) + float(iy) * S + float(view["off_y"])
+        return sx, sy
+
+    # Converts screen coords to image pixel coords for a pane.
+    def _screen_to_image(self, which, canvas, sx, sy):
+        view = self._get_view(which)
+
+        dx, dy, _dw, _dh = self._get_display_rect(which, canvas)
+
+        S = self._get_total_scale(which, canvas)
+        if S <= 0.0:
+            S = 1.0
+
+        # Convert screen->image by undoing display rect origin and offsets first.
+        ix = (float(sx) - float(dx) - float(view["off_x"])) / S
+        iy = (float(sy) - float(dy) - float(view["off_y"])) / S
+        return ix, iy
+
+    """ # Converts screen coordinates (canvas pixels) to image pixel coordinates.
     # This must invert the same scale used to draw the video and overlays.
     def _screen_to_image(self, which, canvas, sx, sy):
         # Scale maps image->screen. We invert it to map screen->image.
@@ -255,7 +372,7 @@ class SizeamaticProApp:
         ix = float(sx) / scale
         iy = float(sy) / scale
 
-        return ix, iy
+        return ix, iy """
 
     # Returns the point list for a pane.
     def _get_points_list(self, which):
@@ -669,6 +786,10 @@ class SizeamaticProApp:
         self.right_overlay_canvas.bind("<Button-1>", lambda e: self.on_overlay_left_down("R", e))
         self.right_overlay_canvas.bind("<B1-Motion>", lambda e: self.on_overlay_left_drag("R", e))
         self.right_overlay_canvas.bind("<ButtonRelease-1>", lambda e: self.on_overlay_left_up("R", e))
+
+        # Mouse wheel zoom for each pane (Windows uses <MouseWheel> with event.delta).
+        self.left_overlay_canvas.bind("<MouseWheel>", lambda e: self.on_mouse_wheel("L", e))
+        self.right_overlay_canvas.bind("<MouseWheel>", lambda e: self.on_mouse_wheel("R", e))
 
        
 
@@ -1423,66 +1544,91 @@ class SizeamaticProApp:
     # Displays a BGR frame on a Tk canvas using Tk's PNG decoder.
     # This avoids Pillow and avoids PPM decoding quirks in some Tk builds.
     def _display_bgr_on_canvas(self, canvas, frame_bgr, which):
-        # Fit To Window behavior:
-        # Scale so the frame width matches the canvas width.
-        # Height follows from aspect ratio.
-        if self.fit_to_window.get():
-            # Canvas width can be 1 early in startup, so guard against divide by zero.
-            canvas_w = max(1, canvas.winfo_width())
+        # Compute where the video should be drawn inside this canvas.
+        dx, dy, dw, dh = self._get_display_rect(which, canvas)
 
-            # Read frame size.
-            src_h = frame_bgr.shape[0]
-            src_w = frame_bgr.shape[1]
-
-            # Compute scale from width only.
-            scale = canvas_w / float(src_w)
-
-            # Preserve aspect ratio.
-            dst_w = int(round(src_w * scale))
-            dst_h = int(round(src_h * scale))
-
-            # Resize only if the target size is valid and actually changes.
-            if dst_w > 0 and dst_h > 0 and (dst_w != src_w or dst_h != src_h):
-                frame_bgr = cv2.resize(frame_bgr, (dst_w, dst_h), interpolation=cv2.INTER_LINEAR)
-
-        # Encode the frame as PNG in memory.
-        # Tk PhotoImage can decode PNG from base64 string data.
-        # Encode as PNG with compression disabled for speed.
-        # We are not writing to disk, so smaller size is not useful here.
-        encode_params = [cv2.IMWRITE_PNG_COMPRESSION, 0]
-        ok, png_bytes = cv2.imencode(".png", frame_bgr, encode_params)
-        if not ok:
-            # If encoding fails, draw an error message instead of crashing the UI.
-            canvas.delete("frame")
-            canvas.create_text(
-                10,
-                10,
-                anchor="nw",
-                text="PNG encode failed",
-                fill="white",
-                font=("Segoe UI", 11, "bold"),
-            )
+        # If we have no metadata yet, just show a simple fit-by-width render.
+        size = self._get_image_size(which)
+        if size is None:
+            # Fall back: draw the full frame scaled to the display width, preserve aspect.
+            h, w = frame_bgr.shape[0], frame_bgr.shape[1]
+            if dw > 0 and w > 0:
+                scale = float(dw) / float(w)
+                out_w = int(round(w * scale))
+                out_h = int(round(h * scale))
+                if out_w > 0 and out_h > 0:
+                    frame_bgr = cv2.resize(frame_bgr, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
             return
 
-        # Convert encoded bytes to base64 ASCII string for Tk.
-        png_b64 = base64.b64encode(png_bytes.tobytes()).decode("ascii")
+        # Total scale for this pane.
+        view = self._get_view(which)
+        S = self._get_total_scale(which, canvas)
+        if S <= 0.0:
+            S = 1.0
 
-        # Create a Tk PhotoImage from the PNG data.
-        # We do not specify format here because PNG is normally auto detected.
-        # If your Tk build needs it, we can add format="PNG".
+        # Compute visible ROI in IMAGE coords for the display rect (dw x dh).
+        # We treat the display rect as the screen coordinate region for mapping.
+        off_x = float(view["off_x"])
+        off_y = float(view["off_y"])
+
+        ix0 = (0.0 - off_x) / S
+        iy0 = (0.0 - off_y) / S
+        ix1 = (float(dw) - off_x) / S
+        iy1 = (float(dh) - off_y) / S
+
+        x0 = min(ix0, ix1)
+        x1 = max(ix0, ix1)
+        y0 = min(iy0, iy1)
+        y1 = max(iy0, iy1)
+
+        img_w, img_h = size
+
+        # Clamp ROI to image bounds.
+        x0 = max(0.0, min(float(img_w), x0))
+        x1 = max(0.0, min(float(img_w), x1))
+        y0 = max(0.0, min(float(img_h), y0))
+        y1 = max(0.0, min(float(img_h), y1))
+
+        rx0 = int(x0)
+        ry0 = int(y0)
+        rx1 = int(x1 + 0.9999)
+        ry1 = int(y1 + 0.9999)
+
+        # If ROI is invalid, draw a black frame layer.
+        if rx1 <= rx0 or ry1 <= ry0:
+            canvas.delete("frame")
+            canvas.create_rectangle(0, 0, int(canvas.winfo_width()), int(canvas.winfo_height()), fill="black", outline="", tags=("frame",))
+            return
+
+        # Crop and scale to the display rect size (preserves aspect because dw/dh preserves it).
+        crop = frame_bgr[ry0:ry1, rx0:rx1]
+        crop = cv2.resize(crop, (int(dw), int(dh)), interpolation=cv2.INTER_LINEAR)
+
+        # Encode to PNG for Tk PhotoImage.
+        encode_params = [cv2.IMWRITE_PNG_COMPRESSION, 0]
+        ok, png_bytes = cv2.imencode(".png", crop, encode_params)
+        if not ok:
+            self._draw_missing_frame(canvas, "ENCODE", 0)
+            return
+
+        png_b64 = base64.b64encode(png_bytes.tobytes()).decode("ascii")
         tk_img = tk.PhotoImage(data=png_b64)
 
-        # Keep a reference so Python does not garbage collect the image.
         if which == "L":
             self.tkimg_left = tk_img
         else:
             self.tkimg_right = tk_img
 
-        # Clear the canvas video and draw the video image.
+        # Replace only frame items: first clear frame layer.
         canvas.delete("frame")
 
-        # tag what we've drawn as frame, so we can refer to it later
-        canvas.create_image(0, 0, anchor="nw", image=tk_img, tags=("frame",))
+        # Draw a black background so letterbox areas look clean.
+        cw = int(max(1, canvas.winfo_width()))
+        ch = int(max(1, canvas.winfo_height()))
+        canvas.create_rectangle(0, 0, cw, ch, fill="black", outline="", tags=("frame",))
+
+        # Draw the image inside the display rect.
+        canvas.create_image(int(dx), int(dy), anchor="nw", image=tk_img, tags=("frame",))
 
      # Renders current left and right frames based on the current indices.
     def _render_current_frames(self):
@@ -1535,6 +1681,43 @@ class SizeamaticProApp:
 
         # Scale by width only.
         return canvas_w / src_w
+    
+    # Computes the on-canvas rectangle where the video should be drawn while preserving aspect ratio.
+    # Returns (dx, dy, dw, dh) in SCREEN pixels.
+    def _get_display_rect(self, which, canvas):
+        # Canvas size in screen pixels.
+        cw = int(max(1, canvas.winfo_width()))
+        ch = int(max(1, canvas.winfo_height()))
+
+        # If we do not know the image size yet, fall back to full canvas.
+        size = self._get_image_size(which)
+        if size is None:
+            return 0, 0, cw, ch
+
+        img_w, img_h = size
+
+        # If Fit To Window is off, draw at native size anchored at top-left.
+        # Clamp to canvas so we do not exceed widget bounds.
+        if not self.fit_to_window.get():
+            dw = min(cw, int(img_w))
+            dh = min(ch, int(img_h))
+            return 0, 0, dw, dh
+
+        # Fit To Window means: fit by width, but preserve aspect.
+        # Compute the height implied by fitting the image width to the canvas width.
+        dw = cw
+        dh = int(round(dw * (float(img_h) / float(img_w))))
+
+        # If that height does not fit, instead fit by height (still preserving aspect).
+        if dh > ch:
+            dh = ch
+            dw = int(round(dh * (float(img_w) / float(img_h))))
+
+        # Center the draw rect within the canvas (letterboxing).
+        dx = (cw - dw) // 2
+        dy = (ch - dh) // 2
+
+        return dx, dy, dw, dh
 
     # Draws a clear error message on a canvas when a frame cannot be decoded.
     def _draw_missing_frame(self, canvas, label, frame_index):
