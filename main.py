@@ -494,28 +494,65 @@ class SizeamaticProApp:
         self._update_measurement_status_stub()
 
     # Updates the status bar with a simple "ready" message.
+    # Updates the status bar with real 3D measurements when possible.
     def _update_measurement_status_stub(self):
         l_count = len(self.ptsL)
         r_count = len(self.ptsR)
 
-        # If counts differ, we are missing a matching point on one side.
+        # If point counts differ, we cannot form matched pairs by index.
         if l_count != r_count:
             self._set_status_right(f"Point pair incomplete: L={l_count} R={r_count}")
             return
 
-        # If we have at least one matched point, we will later compute depth.
-        if l_count >= 1:
-            if l_count == 1:
-                self._set_status_right("Ready: depth from point 0 (needs triangulation)")
-                return
-
-        # If we have at least two matched points, we will later compute length.
-        if l_count >= 2:
-            self._set_status_right("Ready: length from points 0-1 (needs triangulation)")
+        # No points means no measurement.
+        if l_count == 0:
+            self._set_status_right("")
             return
 
-        # No points set.
-        self._set_status_right("")
+        # If we are not rectified or calibration is missing, show the gating message.
+        if not self.view_rectified.get():
+            self._set_status_right("Enable rectified view to measure")
+            return
+        if self.cal is None:
+            self._set_status_right("Load calibration to measure")
+            return
+
+        # --- Point 0 measurement ---
+        P0, err0 = self._triangulate_point_pair(0)
+        if err0 is not None:
+            self._set_status_right(err0)
+            return
+
+        X0, Y0, Z0 = P0
+        R0 = (X0 * X0 + Y0 * Y0 + Z0 * Z0) ** 0.5
+
+        # If we only have one point pair, report point 0.
+        if l_count == 1:
+            self._set_status_right(
+                f"P0: X {self._fmt_mm(X0)}  Y {self._fmt_mm(Y0)}  Z {self._fmt_mm(Z0)}  Range {self._fmt_mm(R0)}"
+            )
+            return
+
+        # --- Point 1 measurement ---
+        P1, err1 = self._triangulate_point_pair(1)
+        if err1 is not None:
+            self._set_status_right(err1)
+            return
+
+        X1, Y1, Z1 = P1
+        R1 = (X1 * X1 + Y1 * Y1 + Z1 * Z1) ** 0.5
+
+        # --- Line delta + length ---
+        dX = X1 - X0
+        dY = Y1 - Y0
+        dZ = Z1 - Z0
+        L = (dX * dX + dY * dY + dZ * dZ) ** 0.5
+
+        self._set_status_right(
+            f"P0 Z {self._fmt_mm(Z0)}  P1 Z {self._fmt_mm(Z1)}  "
+            f"dX {self._fmt_mm(dX)}  dY {self._fmt_mm(dY)}  dZ {self._fmt_mm(dZ)}  "
+            f"Len {self._fmt_mm(L)}"
+        )
 
     # -------------------------------------------------------------------------
     # Menu bar
@@ -640,6 +677,54 @@ class SizeamaticProApp:
 
         # Show a short confirmation in the center status area.
         self._set_status_mid("Points cleared")
+
+    # Triangulates a matched point pair (same index in left and right) into 3D XYZ in millimeters.
+    def _triangulate_point_pair(self, index):
+        # Measurements require rectified coordinates and rectified projection matrices.
+        if not self.view_rectified.get():
+            return None, "Enable rectified view to measure"
+
+        # Calibration must be loaded and must contain PL and PR.
+        if self.cal is None:
+            return None, "Load calibration to measure"
+
+        # We need a matched point on both sides.
+        if index < 0:
+            return None, "Invalid point index"
+        if index >= len(self.ptsL) or index >= len(self.ptsR):
+            return None, "Point pair incomplete"
+
+        # Read the point coordinates in IMAGE pixel coords.
+        # These coordinates must correspond to the rectified view.
+        xL, yL = self.ptsL[index]
+        xR, yR = self.ptsR[index]
+
+        # Build 2x1 arrays for OpenCV triangulation.
+        # cv2.triangulatePoints expects float arrays shaped (2, N).
+        ptsL = np.array([[xL], [yL]], dtype=np.float64)
+        ptsR = np.array([[xR], [yR]], dtype=np.float64)
+
+        # Triangulate in homogeneous coordinates.
+        # Output shape is (4, N). For N=1, we have one 4-vector.
+        Xh = cv2.triangulatePoints(self.cal["PL"], self.cal["PR"], ptsL, ptsR)
+
+        # Convert homogeneous (X, Y, Z, W) to Euclidean (X/W, Y/W, Z/W).
+        W = float(Xh[3, 0])
+        if abs(W) < 1e-9:
+            return None, "Triangulation unstable (W≈0)"
+
+        X = float(Xh[0, 0]) / W
+        Y = float(Xh[1, 0]) / W
+        Z = float(Xh[2, 0]) / W
+
+        # Units are millimeters if your calibration translation was in millimeters.
+        return (X, Y, Z), None
+
+
+    # Formats a float millimeter value for display.
+    def _fmt_mm(self, v):
+        # Use one decimal place to keep it readable, but still precise enough.
+        return f"{v:.1f} mm"
 
     # -------------------------------------------------------------------------
     # Viewer panes
