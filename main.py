@@ -98,63 +98,95 @@ class SizeamaticProApp:
         # Resize events can fire dozens of times per second while dragging the window.
         self._resize_after_id = None
 
-        # Test overlay points (image pixel coordinates).
-        # We keep these as floats so later scaling math is easy.
-        self.test_pt_L = (100.0, 100.0)
-        self.test_pt_R = (100.0, 100.0)
+        # Per pane point lists stored in IMAGE PIXEL coordinates.
+        # These are the authoritative coordinates for measurement.
+        self.ptsL = []
+        self.ptsR = []
 
-        # Overlay handle radius in pixels (screen space after scaling).
+        # Current cap for points per pane.
+        # We start with 2 for a line, but later we can raise this for curves.
+        self.max_points_per_pane = 2
+
+        # Handle radius in SCREEN pixels (after scaling).
+        # Handles are large so you can click them directly without hit test math.
         self.handle_radius_px = 8
+
+        # Drag state for moving an existing handle.
+        # drag_index is the point index we are moving (0, 1, ...).
+        self.drag_active = False
+        self.drag_which = None
+        self.drag_index = None
 
     # Redraws overlay items for both panes.
     # For now, this draws a single test handle and label in each pane.
     def _redraw_overlays(self):
-        # Left overlay items.
-        self._draw_test_overlay(self.left_overlay_canvas, "L")
+        # Draw left overlay.
+        self._draw_overlay_for_pane("L", self.left_overlay_canvas, self.ptsL)
 
-        # Right overlay items.
-        self._draw_test_overlay(self.right_overlay_canvas, "R")
+        # Draw right overlay.
+        self._draw_overlay_for_pane("R", self.right_overlay_canvas, self.ptsR)
 
-    # Draws a single test handle plus a "0" label.
-    def _draw_test_overlay(self, canvas, which):
-        # Clear existing overlay items only.
+    # Draws handles, labels, and connecting segments for one pane.
+    # Points are stored in IMAGE pixel coordinates and mapped to SCREEN coords using the same scale as the video.
+    def _draw_overlay_for_pane(self, which, canvas, pts):
+        # Clear only overlay items so the video frame stays intact.
         canvas.delete("overlay")
 
-        # Choose which test point to draw.
-        if which == "L":
-            x, y = self.test_pt_L
-        else:
-            x, y = self.test_pt_R
-
-        # Map image pixel coordinates to screen coordinates using the same scale as the video.
+        # Compute image->screen scale so overlay tracks the displayed video.
         scale = self._get_pane_scale(which, canvas)
 
-        sx = x * scale
-        sy = y * scale
+        # Draw line segments first so handles sit on top.
+        # For N points, draw segments (0-1), (1-2), ...
+        if len(pts) >= 2:
+            for i in range(1, len(pts)):
+                x0, y0 = pts[i - 1]
+                x1, y1 = pts[i]
 
-        r = self.handle_radius_px
+                sx0 = x0 * scale
+                sy0 = y0 * scale
+                sx1 = x1 * scale
+                sy1 = y1 * scale
 
-        # Draw a big clickable-looking handle.
-        canvas.create_oval(
-            sx - r,
-            sy - r,
-            sx + r,
-            sy + r,
-            outline="#00ff66",
-            width=2,
-            fill="",
-            tags=("overlay",),
-        )
+                canvas.create_line(
+                    sx0,
+                    sy0,
+                    sx1,
+                    sy1,
+                    width=2,
+                    fill="#00ff66",
+                    tags=("overlay",),
+                )
 
-        # Draw the point index label near the handle.
-        canvas.create_text(
-            sx + r + 6,
-            sy - r - 6,
-            text="0",
-            fill="#00ff66",
-            font=("Segoe UI", 11, "bold"),
-            tags=("overlay",),
-        )
+        # Draw handles and index labels.
+        r = int(self.handle_radius_px)
+
+        for i, (x, y) in enumerate(pts):
+            sx = x * scale
+            sy = y * scale
+
+            # Handle oval:
+            # Tag it as "handle" so _get_handle_index_under_cursor can recognize it.
+            # Tag idx:<n> so we can identify which point index was clicked.
+            canvas.create_oval(
+                sx - r,
+                sy - r,
+                sx + r,
+                sy + r,
+                outline="#00ff66",
+                width=2,
+                fill="",
+                tags=("overlay", "handle", f"idx:{i}"),
+            )
+
+            # Index label near the handle.
+            canvas.create_text(
+                sx + r + 6,
+                sy - r - 6,
+                text=str(i),
+                fill="#00ff66",
+                font=("Segoe UI", 11, "bold"),
+                tags=("overlay",),
+            )
 
     # Closes OpenCV windows and releases captures before exiting.
     def on_app_close(self):
@@ -208,6 +240,158 @@ class SizeamaticProApp:
         # Otherwise, redraw the current decoded frames.
         # This will re run the Fit To Window scaling logic.
         self._render_current_frames()
+
+    # Converts screen coordinates (canvas pixels) to image pixel coordinates.
+    # This must invert the same scale used to draw the video and overlays.
+    def _screen_to_image(self, which, canvas, sx, sy):
+        # Scale maps image->screen. We invert it to map screen->image.
+        scale = self._get_pane_scale(which, canvas)
+
+        # Guard against divide by zero.
+        if scale <= 0.0:
+            scale = 1.0
+
+        # Convert to image pixel coords.
+        ix = float(sx) / scale
+        iy = float(sy) / scale
+
+        return ix, iy
+
+    # Returns the point list for a pane.
+    def _get_points_list(self, which):
+        if which == "L":
+            return self.ptsL
+        return self.ptsR
+    
+    # Attempts to extract a handle index from the canvas item under the cursor.
+    # Returns an integer index if the current item is a handle, else returns None.
+    def _get_handle_index_under_cursor(self, canvas):
+        # "current" is the canvas item under the mouse pointer at event time.
+        items = canvas.find_withtag("current")
+        if not items:
+            return None
+
+        item_id = items[0]
+
+        # Read the item's tags and look for the "handle" marker and an "idx:<n>" tag.
+        tags = canvas.gettags(item_id)
+
+        # Only treat this as a draggable point if it is tagged as a handle.
+        if "handle" not in tags:
+            return None
+
+        # Parse an index tag formatted like "idx:0", "idx:1", etc.
+        for t in tags:
+            if t.startswith("idx:"):
+                try:
+                    return int(t.split(":", 1)[1])
+                except ValueError:
+                    return None
+
+        return None
+    
+    # Left mouse button pressed on overlay.
+    def on_overlay_left_down(self, which, event):
+        # Choose the correct overlay canvas for this pane.
+        canvas = self.left_overlay_canvas if which == "L" else self.right_overlay_canvas
+
+        # If the user clicked a handle, start dragging that handle.
+        idx = self._get_handle_index_under_cursor(canvas)
+        if idx is not None:
+            # Begin drag mode.
+            self.drag_active = True
+            self.drag_which = which
+            self.drag_index = idx
+            return
+
+        # Otherwise, treat this as a "place a new point" click.
+        pts = self._get_points_list(which)
+
+        # If we are already at the point cap, ignore clicks on empty space.
+        # This is important because later we will raise the cap for curves.
+        if len(pts) >= int(self.max_points_per_pane):
+            return
+
+        # Convert the click from screen coords to image coords.
+        ix, iy = self._screen_to_image(which, canvas, event.x, event.y)
+
+        # Append as the next point.
+        pts.append((ix, iy))
+
+        # Trigger overlay redraw and measurement stub.
+        self._on_points_changed()
+
+    # Mouse moved while left button is held.
+    def on_overlay_left_drag(self, which, event):
+        # Only drag if we are actively dragging a handle.
+        if not self.drag_active:
+            return
+
+        # Only respond if the drag belongs to this pane.
+        if self.drag_which != which:
+            return
+
+        canvas = self.left_overlay_canvas if which == "L" else self.right_overlay_canvas
+        pts = self._get_points_list(which)
+
+        # Validate index.
+        if self.drag_index is None:
+            return
+        if self.drag_index < 0 or self.drag_index >= len(pts):
+            return
+
+        # Convert cursor position to image coords.
+        ix, iy = self._screen_to_image(which, canvas, event.x, event.y)
+
+        # Update the dragged point.
+        pts[self.drag_index] = (ix, iy)
+
+        # Redraw overlays and update measurement stub continuously while dragging.
+        self._on_points_changed()
+
+    # Left mouse button released.
+    def on_overlay_left_up(self, which, _event):
+        # End drag mode cleanly.
+        if self.drag_active and self.drag_which == which:
+            self.drag_active = False
+            self.drag_which = None
+            self.drag_index = None
+
+    
+
+    # Called whenever points are added, moved, or deleted.
+    # This is the single place that triggers overlay redraw and measurement refresh.
+    def _on_points_changed(self):
+        # Redraw overlays (function will be updated next step to draw real points/lines).
+        # For now, keep calling it so the pipeline is correct.
+        self._redraw_overlays()
+
+        # Update measurement status text (stub for now).
+        self._update_measurement_status_stub()
+
+    # Updates the status bar with a simple "ready" message.
+    def _update_measurement_status_stub(self):
+        l_count = len(self.ptsL)
+        r_count = len(self.ptsR)
+
+        # If counts differ, we are missing a matching point on one side.
+        if l_count != r_count:
+            self._set_status_right(f"Point pair incomplete: L={l_count} R={r_count}")
+            return
+
+        # If we have at least one matched point, we will later compute depth.
+        if l_count >= 1:
+            if l_count == 1:
+                self._set_status_right("Ready: depth from point 0 (needs triangulation)")
+                return
+
+        # If we have at least two matched points, we will later compute length.
+        if l_count >= 2:
+            self._set_status_right("Ready: length from points 0-1 (needs triangulation)")
+            return
+
+        # No points set.
+        self._set_status_right("")
 
     # -------------------------------------------------------------------------
     # Menu bar
@@ -301,8 +485,37 @@ class SizeamaticProApp:
         )
         self.lock_check.grid(row=0, column=7, padx=(0, 12))
 
+        # Clears all measurement points in both panes.
+        # This is the only delete mechanism for now (simple and safe).
+        self.btn_clear_points = ttk.Button(
+            self.toolbar,
+            text="Clear Points",
+            command=self.on_clear_points,
+        )
+        self.btn_clear_points.grid(row=0, column=8, padx=(0, 12))
+
         # ---- Spacer (keeps toolbar left packed, leaves room to add more) ----
         ttk.Frame(self.toolbar).grid(row=0, column=20, sticky="ew")
+
+    # Clears all measurement points in both panes.
+    def on_clear_points(self):
+        # Clear both point lists to keep pairing consistent.
+        self.ptsL.clear()
+        self.ptsR.clear()
+
+        # Cancel any active drag state.
+        self.drag_active = False
+        self.drag_which = None
+        self.drag_index = None
+
+        # Redraw overlays to remove handles and lines.
+        self._redraw_overlays()
+
+        # Update measurement status text.
+        self._update_measurement_status_stub()
+
+        # Show a short confirmation in the center status area.
+        self._set_status_mid("Points cleared")
 
     # -------------------------------------------------------------------------
     # Viewer panes
@@ -447,9 +660,17 @@ class SizeamaticProApp:
         self.left_overlay_canvas.bind("<Configure>", self.on_canvas_resized)
         self.right_overlay_canvas.bind("<Configure>", self.on_canvas_resized)
 
-        # ---- Mouse bindings placeholders (for future overlays) ----
-        self.left_overlay_canvas.bind("<Button-1>", lambda e: self.on_canvas_click("L", e))
-        self.right_overlay_canvas.bind("<Button-1>", lambda e: self.on_canvas_click("R", e))
+        # Left overlay canvas receives user input.
+        self.left_overlay_canvas.bind("<Button-1>", lambda e: self.on_overlay_left_down("L", e))
+        self.left_overlay_canvas.bind("<B1-Motion>", lambda e: self.on_overlay_left_drag("L", e))
+        self.left_overlay_canvas.bind("<ButtonRelease-1>", lambda e: self.on_overlay_left_up("L", e))
+
+        # Right overlay canvas receives user input.
+        self.right_overlay_canvas.bind("<Button-1>", lambda e: self.on_overlay_left_down("R", e))
+        self.right_overlay_canvas.bind("<B1-Motion>", lambda e: self.on_overlay_left_drag("R", e))
+        self.right_overlay_canvas.bind("<ButtonRelease-1>", lambda e: self.on_overlay_left_up("R", e))
+
+       
 
     # -------------------------------------------------------------------------
     # Status bar
@@ -460,16 +681,18 @@ class SizeamaticProApp:
         self.status.grid(row=3, column=0, sticky="ew")
         self.status.grid_columnconfigure(1, weight=1)
 
-        # Left: file/cal/view state
-        self.status_left = ttk.Label(self.status, text="", anchor="w")
+        # Left: file/cal/view state.
+        # width is in characters, used to stop the label from resizing the window.
+        self.status_left = ttk.Label(self.status, text="", anchor="w", width=90)
         self.status_left.grid(row=0, column=0, sticky="w")
 
-        # Middle: warnings / messages
-        self.status_mid = ttk.Label(self.status, text="", anchor="center")
+        # Middle: warnings / messages.
+        # sticky="ew" lets it stretch inside the fixed grid column.
+        self.status_mid = ttk.Label(self.status, text="", anchor="center", width=40)
         self.status_mid.grid(row=0, column=1, sticky="ew")
 
-        # Right: measurement results
-        self.status_right = ttk.Label(self.status, text="", anchor="e")
+        # Right: measurement results.
+        self.status_right = ttk.Label(self.status, text="", anchor="e", width=60)
         self.status_right.grid(row=0, column=2, sticky="e")
 
     # -------------------------------------------------------------------------
