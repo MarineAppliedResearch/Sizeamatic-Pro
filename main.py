@@ -2,11 +2,14 @@
 #
 
 
+import os
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 import cv2
 import base64
+
+import numpy as np
 
 
 class SizeamaticProApp:
@@ -129,6 +132,10 @@ class SizeamaticProApp:
 
         # Zoom factor per mouse wheel notch.
         self.zoom_step = 1.10
+
+        # Calibration bundle loaded from NPZ files.
+        # None means not loaded or invalid.
+        self.cal = None
 
     # Redraws overlay items for both panes.
     # For now, this draws a single test handle and label in each pane.
@@ -922,14 +929,97 @@ class SizeamaticProApp:
         self._set_status_mid("Loaded right video")
         self._refresh_status_left()
 
+    # Called when the user decides to load a new calibration folder.
     def on_load_calibration_folder(self):
         folder = filedialog.askdirectory(title="Load Calibration Folder")
         if not folder:
             return
 
+        # Store the folder path for status display.
         self.calibration_folder = folder
-        self._set_status_mid("Loaded calibration folder (UI only)")
+
+        # Build expected file paths.
+        intr_path = os.path.join(folder, "calibration_intrinsics.npz")
+        extr_path = os.path.join(folder, "calibration_extrinsics.npz")
+        rect_path = os.path.join(folder, "calibration_rectification.npz")
+        maps_path = os.path.join(folder, "calibration_maps.npz")
+
+        # Verify required files exist.
+        missing = []
+        for p in [intr_path, extr_path, rect_path, maps_path]:
+            if not os.path.isfile(p):
+                missing.append(os.path.basename(p))
+
+        # Handle the case where a calibration file doesn't exist
+        if missing:
+            self.cal = None
+            self.view_rectified.set(False)
+            self._set_status_mid(f"Missing calibration files: {', '.join(missing)}")
+            self._refresh_status_left()
+            return
+
+        try:
+            intr = np.load(intr_path)
+            rect = np.load(rect_path)
+            maps = np.load(maps_path)
+
+            # Pull required matrices/maps.
+            PL = rect["PL"]
+            PR = rect["PR"]
+            Q = rect["Q"]
+
+            mapLx = maps["mapLx"]
+            mapLy = maps["mapLy"]
+            mapRx = maps["mapRx"]
+            mapRy = maps["mapRy"]
+
+            # Intrinsics file stores expected calibration resolution.
+            cal_w = int(intr["image_width"])
+            cal_h = int(intr["image_height"])
+
+        except Exception as e:
+            self.cal = None
+            self.view_rectified.set(False)
+            self._set_status_mid(f"Failed to load calibration: {e}")
+            self._refresh_status_left()
+            return
+
+        # If we have a loaded video, enforce resolution match now.
+        # Rectification maps must match the decoded frame size.
+        if self.metaL:
+            if self.metaL["width"] != cal_w or self.metaL["height"] != cal_h:
+                self.cal = None
+                self.view_rectified.set(False)
+                self._set_status_mid("Calibration resolution does not match LEFT video")
+                self._refresh_status_left()
+                return
+
+        if self.metaR:
+            if self.metaR["width"] != cal_w or self.metaR["height"] != cal_h:
+                self.cal = None
+                self.view_rectified.set(False)
+                self._set_status_mid("Calibration resolution does not match RIGHT video")
+                self._refresh_status_left()
+                return
+
+        # Store calibration bundle.
+        self.cal = {
+            "PL": PL,
+            "PR": PR,
+            "Q": Q,
+            "mapLx": mapLx,
+            "mapLy": mapLy,
+            "mapRx": mapRx,
+            "mapRy": mapRy,
+            "w": cal_w,
+            "h": cal_h,
+        }
+
+        self._set_status_mid("Calibration loaded")
         self._refresh_status_left()
+
+        # Trigger redraw so rectified mode can be enabled immediately.
+        self._render_current_frames()
 
         # In real wiring, you will enable "Show Rectified" only after maps load.
         # For now, we leave it togglable to test UI.
@@ -938,10 +1028,34 @@ class SizeamaticProApp:
     # Stub handlers (view toggles)
     # -------------------------------------------------------------------------
 
+    # Toggle whether the user is watching recitfied stereo video, or raw stereo video
     def on_toggle_view_rectified(self):
-        # In real wiring, this would switch frame pipeline raw vs rectified.
+        # If user turned rectified on, ensure calibration is ready.
+        if self.view_rectified.get():
+            if self.cal is None:
+                # Force it off and warn.
+                self.view_rectified.set(False)
+                self._set_status_mid("Rectified view requires calibration")
+                self._refresh_status_left()
+                return
+
+            # If videos are loaded, ensure sizes match calibration.
+            if self.metaL:
+                if self.metaL["width"] != self.cal["w"] or self.metaL["height"] != self.cal["h"]:
+                    self.view_rectified.set(False)
+                    self._set_status_mid("Rectified view disabled: LEFT video resolution mismatch")
+                    self._refresh_status_left()
+                    return
+
+            if self.metaR:
+                if self.metaR["width"] != self.cal["w"] or self.metaR["height"] != self.cal["h"]:
+                    self.view_rectified.set(False)
+                    self._set_status_mid("Rectified view disabled: RIGHT video resolution mismatch")
+                    self._refresh_status_left()
+                    return
+
         self._refresh_status_left()
-        self._refresh_placeholder_canvases()
+        self._render_current_frames()
 
     # Toggles fit-to-window rendering and redraws the current frames.
     def on_toggle_fit_to_window(self):
@@ -1637,6 +1751,10 @@ class SizeamaticProApp:
             li = int(self.left_frame_index.get())
             frameL = self._read_frame_at(self.capL, li)
 
+            # Do Stereo Rectification on this frame if show rectified is set
+            if self.view_rectified.get() and self.cal is not None:
+                frameL = cv2.remap(frameL, self.cal["mapLx"], self.cal["mapLy"], interpolation=cv2.INTER_LINEAR)
+
             if frameL is None:
                 self._draw_missing_frame(self.left_overlay_canvas, "LEFT", li)
             else:
@@ -1646,6 +1764,10 @@ class SizeamaticProApp:
         if self.capR:
             ri = int(self.right_frame_index.get())
             frameR = self._read_frame_at(self.capR, ri)
+
+            # Do Stereo Rectification on this frame if show rectified is set
+            if self.view_rectified.get() and self.cal is not None:
+                frameR = cv2.remap(frameR, self.cal["mapRx"], self.cal["mapRy"], interpolation=cv2.INTER_LINEAR)
 
             if frameR is None:
                 self._draw_missing_frame(self.right_overlay_canvas, "RIGHT", ri)
