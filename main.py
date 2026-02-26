@@ -153,6 +153,157 @@ class SizeamaticProApp:
         self.cal_tree = None
         self.cal_copy_text = None
 
+        # Anaglyph preview state (OpenCV window, independent playback).
+        self.anaglyph_active = False
+        self.anaglyph_playing = False
+        self.anaglyph_after_id = None
+        self.anaglyph_index = 0
+        self.anaglyph_window_name = "Sizeamatic Pro - Anaglyph 3D"
+
+    # Starts or stops the anaglyph preview window.
+    def on_toggle_anaglyph_preview(self):
+        # Require both videos loaded.
+        if not self._both_videos_loaded():
+            self._set_status_mid("Load both videos to use anaglyph preview")
+            return
+
+        # Toggle behavior.
+        if self.anaglyph_active:
+            self._stop_anaglyph_preview()
+            return
+
+        self._start_anaglyph_preview()
+
+
+    # Starts the anaglyph preview window and playback loop.
+    def _start_anaglyph_preview(self):
+        # Start at current left timeline index for convenience.
+        self.anaglyph_index = int(self.left_frame_index.get())
+
+        # Start paused by default so the user can hit space to play.
+        self.anaglyph_active = True
+        self.anaglyph_playing = False
+
+        # Create a window now (first frame will appear on next tick).
+        cv2.namedWindow(self.anaglyph_window_name, cv2.WINDOW_NORMAL)
+
+        self._set_status_mid("Anaglyph preview opened (Space: play/pause, A/D: step, Q: quit)")
+        self._anaglyph_tick()
+
+
+    # Stops the anaglyph preview and closes the OpenCV window.
+    def _stop_anaglyph_preview(self):
+        # Cancel any scheduled Tk after tick.
+        if self.anaglyph_after_id is not None:
+            self.root.after_cancel(self.anaglyph_after_id)
+            self.anaglyph_after_id = None
+
+        # Reset flags.
+        self.anaglyph_active = False
+        self.anaglyph_playing = False
+
+        # Close OpenCV window.
+        try:
+            cv2.destroyWindow(self.anaglyph_window_name)
+        except Exception:
+            pass
+
+        self._set_status_mid("Anaglyph preview closed")
+
+
+    # One tick of the anaglyph preview loop.
+    def _anaglyph_tick(self):
+        # If preview was stopped, exit.
+        if not self.anaglyph_active:
+            return
+
+        # If window was closed by the user, stop.
+        try:
+            vis = cv2.getWindowProperty(self.anaglyph_window_name, cv2.WND_PROP_VISIBLE)
+            if vis < 1:
+                self._stop_anaglyph_preview()
+                return
+        except Exception:
+            # If OpenCV throws here, stop cleanly.
+            self._stop_anaglyph_preview()
+            return
+
+        # Clamp index to the shorter stream.
+        max_i = int(min(self.left_frame_max, self.right_frame_max))
+        if self.anaglyph_index < 0:
+            self.anaglyph_index = 0
+        if self.anaglyph_index > max_i:
+            self.anaglyph_index = max_i
+
+        # Read frames at the anaglyph index.
+        frameL = self._read_frame_at(self.capL, self.anaglyph_index)
+        frameR = self._read_frame_at(self.capR, self.anaglyph_index)
+
+        # If either frame fails, show a black frame and keep going.
+        if frameL is None or frameR is None:
+            blank = np.zeros((int(self.metaL["height"]), int(self.metaL["width"]), 3), dtype=np.uint8)
+            cv2.imshow(self.anaglyph_window_name, blank)
+        else:
+            # Prefer rectified view if enabled and calibration is loaded.
+            if self.view_rectified.get() and self.cal is not None:
+                frameL = cv2.remap(frameL, self.cal["mapLx"], self.cal["mapLy"], interpolation=cv2.INTER_LINEAR)
+                frameR = cv2.remap(frameR, self.cal["mapRx"], self.cal["mapRy"], interpolation=cv2.INTER_LINEAR)
+
+            # Build anaglyph and show it.
+            ana = self._make_anaglyph_red_cyan(frameL, frameR)
+            cv2.imshow(self.anaglyph_window_name, ana)
+
+        # Handle key controls in the OpenCV window.
+        # Space toggles play/pause. A/D step. Q or ESC closes.
+        key = cv2.waitKey(1) & 0xFF
+
+        if key == ord("q") or key == 27:
+            self._stop_anaglyph_preview()
+            return
+
+        if key == 32:
+            self.anaglyph_playing = not self.anaglyph_playing
+
+        if key == ord("a"):
+            self.anaglyph_playing = False
+            self.anaglyph_index -= 1
+
+        if key == ord("d"):
+            self.anaglyph_playing = False
+            self.anaglyph_index += 1
+
+        # Advance if playing.
+        if self.anaglyph_playing:
+            self.anaglyph_index += 1
+            if self.anaglyph_index > max_i:
+                self.anaglyph_index = max_i
+                self.anaglyph_playing = False
+
+        # Schedule next tick (25 fps target).
+        self.anaglyph_after_id = self.root.after(40, self._anaglyph_tick)
+
+
+    # Creates a red/cyan anaglyph from BGR frames.
+    # Output is BGR for cv2.imshow.
+    def _make_anaglyph_red_cyan(self, frameL_bgr, frameR_bgr):
+        # Convert both to grayscale for a simple, robust anaglyph.
+        gL = cv2.cvtColor(frameL_bgr, cv2.COLOR_BGR2GRAY)
+        gR = cv2.cvtColor(frameR_bgr, cv2.COLOR_BGR2GRAY)
+
+        # Build output channels:
+        #   Red from left, Cyan (G+B) from right.
+        out = np.zeros_like(frameL_bgr)
+
+        # OpenCV uses BGR order:
+        #   out[:,:,2] is red
+        #   out[:,:,1] is green
+        #   out[:,:,0] is blue
+        out[:, :, 2] = gL
+        out[:, :, 1] = gR
+        out[:, :, 0] = gR
+
+        return out
+
     # Opens (or focuses) the calibration summary window.
     def on_show_calibration_summary(self):
         if self.cal is None:
@@ -485,6 +636,10 @@ class SizeamaticProApp:
         if self.play_after_id is not None:
             self.root.after_cancel(self.play_after_id)
             self.play_after_id = None
+
+        # Close the anaglyph viewer if it is running.
+        if self.anaglyph_active:
+            self._stop_anaglyph_preview()
 
         # Release capture objects if open.
         if self.capL:
@@ -862,6 +1017,9 @@ class SizeamaticProApp:
             variable=self.view_rectified,
             command=self.on_toggle_view_rectified,
         )
+
+        view_menu.add_command(label="Anaglyph 3D Preview…", command=self.on_toggle_anaglyph_preview)
+
         view_menu.add_separator()
         view_menu.add_checkbutton(
             label="Fit To Window",
