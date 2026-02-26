@@ -10,6 +10,7 @@ import cv2
 import base64
 
 import numpy as np
+import math
 
 
 class SizeamaticProApp:
@@ -146,6 +147,230 @@ class SizeamaticProApp:
         # Assumed user click uncertainty in pixels for uncertainty estimation.
         # This is an explicit assumption used to estimate sigma values in millimeters.
         self.click_sigma_px = 1.0
+
+        # Calibration summary window state (created on demand).
+        self.cal_win = None
+        self.cal_tree = None
+        self.cal_copy_text = None
+
+    # Opens (or focuses) the calibration summary window.
+    def on_show_calibration_summary(self):
+        if self.cal is None:
+            self._set_status_mid("Load calibration first")
+            return
+
+        self._ensure_calibration_window()
+        self._update_calibration_window()
+
+
+    # Creates the calibration summary window if it does not exist.
+    def _ensure_calibration_window(self):
+        if self.cal_win is not None:
+            try:
+                self.cal_win.lift()
+                return
+            except Exception:
+                self.cal_win = None
+
+        win = tk.Toplevel(self.root)
+        win.title("Calibration Summary")
+        win.geometry("700x600")
+
+        def _on_close():
+            win.destroy()
+            self.cal_win = None
+            self.cal_tree = None
+            self.cal_copy_text = None
+
+        win.protocol("WM_DELETE_WINDOW", _on_close)
+
+        outer = ttk.Frame(win, padding=(10, 10))
+        outer.grid(row=0, column=0, sticky="nsew")
+
+        win.grid_rowconfigure(0, weight=1)
+        win.grid_columnconfigure(0, weight=1)
+        outer.grid_rowconfigure(1, weight=1)
+        outer.grid_columnconfigure(0, weight=1)
+
+        ttk.Label(outer, text="Calibration Summary", font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w")
+
+        cols = ("Item", "Value")
+        tree = ttk.Treeview(outer, columns=cols, show="headings", height=18)
+        tree.grid(row=1, column=0, sticky="nsew", pady=(8, 10))
+
+        tree.heading("Item", text="Item")
+        tree.heading("Value", text="Value")
+        tree.column("Item", width=320, anchor="w")
+        tree.column("Value", width=340, anchor="w")
+
+        ttk.Label(outer, text="Copy", font=("Segoe UI", 10, "bold")).grid(row=2, column=0, sticky="w")
+
+        txt = tk.Text(outer, height=10, width=1, wrap="none")
+        txt.grid(row=3, column=0, sticky="nsew")
+        txt.configure(state="disabled")
+
+        outer.grid_rowconfigure(3, weight=0)
+
+        self.cal_win = win
+        self.cal_tree = tree
+        self.cal_copy_text = txt
+
+
+    # Helper for inserting a row.
+    def _cal_add_row(self, label, value):
+        self.cal_tree.insert("", "end", values=(label, value))
+
+
+    # Computes map out-of-bounds percent.
+    def _map_oob_percent(self, mapx, mapy, w, h):
+        # mapx/mapy are float maps from rectified pixel -> source pixel.
+        # Out-of-bounds means sampling outside the source image.
+        oob = (mapx < 0) | (mapx >= (w - 1)) | (mapy < 0) | (mapy >= (h - 1))
+        return 100.0 * float(np.count_nonzero(oob)) / float(oob.size)
+
+
+    # Updates the calibration summary contents from self.cal.
+    def _update_calibration_window(self):
+        if self.cal is None or self.cal_tree is None:
+            return
+
+        # Clear existing.
+        for item in self.cal_tree.get_children():
+            self.cal_tree.delete(item)
+
+        c = self.cal
+        w = int(c["w"])
+        h = int(c["h"])
+
+        lines = []
+
+        # ---- Overview ----
+        self._cal_add_row("Image size", f"{w}×{h}")
+        lines.append(f"Image size:\t{w}x{h}")
+
+        # Baseline and translation components (mm).
+        T = np.array(c["T"], dtype=np.float64).reshape(-1)
+        Tx, Ty, Tz = float(T[0]), float(T[1]), float(T[2])
+        baseline = float(np.linalg.norm(T))
+
+        self._cal_add_row("Baseline ||T|| (mm)", f"{baseline:.2f}")
+        self._cal_add_row("T (mm)", f"Tx {Tx:.2f}  Ty {Ty:.2f}  Tz {Tz:.2f}")
+        lines.append(f"Baseline_mm:\t{baseline:.2f}")
+        lines.append(f"T_mm:\t{Tx:.2f}\t{Ty:.2f}\t{Tz:.2f}")
+
+        # Relative rotation magnitude and axis.
+        Rm = np.array(c["R"], dtype=np.float64)
+        # Angle from trace formula.
+        tr = float(np.trace(Rm))
+        cosang = (tr - 1.0) / 2.0
+        cosang = max(-1.0, min(1.0, cosang))
+        ang = math.degrees(math.acos(cosang))
+
+        rvec, _ = cv2.Rodrigues(Rm)
+        rvec = rvec.reshape(-1)
+        rmag = float(np.linalg.norm(rvec))
+        if rmag > 1e-12:
+            axis = rvec / rmag
+            axis_str = f"{axis[0]:.3f}, {axis[1]:.3f}, {axis[2]:.3f}"
+        else:
+            axis_str = "0, 0, 0"
+
+        self._cal_add_row("Relative rotation angle (deg)", f"{ang:.4f}")
+        self._cal_add_row("Rotation axis (unit)", axis_str)
+        lines.append(f"Rot_angle_deg:\t{ang:.4f}")
+        lines.append(f"Rot_axis:\t{axis_str}")
+
+        # Stereo RMS (if present).
+        if c.get("stereo_rms", None) is not None:
+            self._cal_add_row("Stereo RMS", f"{float(c['stereo_rms']):.6f}")
+            lines.append(f"Stereo_RMS:\t{float(c['stereo_rms']):.6f}")
+
+        # ---- Intrinsics ----
+        mtxL = np.array(c["mtxL"], dtype=np.float64)
+        mtxR = np.array(c["mtxR"], dtype=np.float64)
+
+        fxL, fyL = float(mtxL[0, 0]), float(mtxL[1, 1])
+        cxL, cyL = float(mtxL[0, 2]), float(mtxL[1, 2])
+        fxR, fyR = float(mtxR[0, 0]), float(mtxR[1, 1])
+        cxR, cyR = float(mtxR[0, 2]), float(mtxR[1, 2])
+
+        self._cal_add_row("Left intrinsics", f"fx {fxL:.2f}  fy {fyL:.2f}  cx {cxL:.2f}  cy {cyL:.2f}")
+        self._cal_add_row("Right intrinsics", f"fx {fxR:.2f}  fy {fyR:.2f}  cx {cxR:.2f}  cy {cyR:.2f}")
+        lines.append(f"L_fx_fy_cx_cy:\t{fxL:.2f}\t{fyL:.2f}\t{cxL:.2f}\t{cyL:.2f}")
+        lines.append(f"R_fx_fy_cx_cy:\t{fxR:.2f}\t{fyR:.2f}\t{cxR:.2f}\t{cyR:.2f}")
+
+        # FOV estimates.
+        fovxL = math.degrees(2.0 * math.atan(w / (2.0 * fxL)))
+        fovyL = math.degrees(2.0 * math.atan(h / (2.0 * fyL)))
+        fovxR = math.degrees(2.0 * math.atan(w / (2.0 * fxR)))
+        fovyR = math.degrees(2.0 * math.atan(h / (2.0 * fyR)))
+
+        self._cal_add_row("Left FOV (deg)", f"FOVx {fovxL:.2f}  FOVy {fovyL:.2f}")
+        self._cal_add_row("Right FOV (deg)", f"FOVx {fovxR:.2f}  FOVy {fovyR:.2f}")
+        lines.append(f"L_FOVx_FOVy_deg:\t{fovxL:.2f}\t{fovyL:.2f}")
+        lines.append(f"R_FOVx_FOVy_deg:\t{fovxR:.2f}\t{fovyR:.2f}")
+
+        # Distortion coefficients (show all).
+        distL = np.array(c["distL"], dtype=np.float64).reshape(-1)
+        distR = np.array(c["distR"], dtype=np.float64).reshape(-1)
+        self._cal_add_row("Left distortion", " ".join([f"{v:.6g}" for v in distL]))
+        self._cal_add_row("Right distortion", " ".join([f"{v:.6g}" for v in distR]))
+
+        # ---- Rectification ----
+        PL = np.array(c["PL"], dtype=np.float64)
+        PR = np.array(c["PR"], dtype=np.float64)
+        fx_rect_L = float(PL[0, 0])
+        fx_rect_R = float(PR[0, 0])
+        self._cal_add_row("Rectified fx (PL, PR)", f"{fx_rect_L:.2f}, {fx_rect_R:.2f}")
+
+        # ROIs and overlap.
+        roiL = c.get("roiL", None)
+        roiR = c.get("roiR", None)
+        if roiL is not None and roiR is not None:
+            roiL = np.array(roiL).reshape(-1).astype(int)
+            roiR = np.array(roiR).reshape(-1).astype(int)
+            self._cal_add_row("roiL", f"{tuple(roiL)}")
+            self._cal_add_row("roiR", f"{tuple(roiR)}")
+
+            # Intersection area percent of full image.
+            x0 = max(roiL[0], roiR[0])
+            y0 = max(roiL[1], roiR[1])
+            x1 = min(roiL[0] + roiL[2], roiR[0] + roiR[2])
+            y1 = min(roiL[1] + roiL[3], roiR[1] + roiR[3])
+            iw = max(0, x1 - x0)
+            ih = max(0, y1 - y0)
+            inter = iw * ih
+            pct = 100.0 * float(inter) / float(w * h)
+            self._cal_add_row("ROI overlap (% image)", f"{pct:.2f}%")
+            lines.append(f"ROI_overlap_pct:\t{pct:.2f}")
+
+        # ---- Map validity ----
+        oobL = self._map_oob_percent(c["mapLx"], c["mapLy"], w, h)
+        oobR = self._map_oob_percent(c["mapRx"], c["mapRy"], w, h)
+        self._cal_add_row("Map out-of-bounds L", f"{oobL:.3f}%")
+        self._cal_add_row("Map out-of-bounds R", f"{oobR:.3f}%")
+        lines.append(f"Map_OOB_L_pct:\t{oobL:.3f}")
+        lines.append(f"Map_OOB_R_pct:\t{oobR:.3f}")
+
+        # ---- Warnings ----
+        warnings = []
+        if baseline < 1.0:
+            warnings.append("Baseline is very small")
+        if abs(fx_rect_L - fx_rect_R) > 1e-3:
+            warnings.append("Rectified fx differs between PL and PR")
+        if oobL > 1.0 or oobR > 1.0:
+            warnings.append("High map out-of-bounds percentage")
+
+        if warnings:
+            self._cal_add_row("Warnings", "; ".join(warnings))
+            lines.append(f"Warnings:\t{'; '.join(warnings)}")
+
+        # Update copy box (tab separated).
+        copy_block = "\n".join(lines)
+        self.cal_copy_text.configure(state="normal")
+        self.cal_copy_text.delete("1.0", "end")
+        self.cal_copy_text.insert("1.0", copy_block)
+        self.cal_copy_text.configure(state="disabled")
 
     # Redraws overlay items for both panes.
     # For now, this draws a single test handle and label in each pane.
@@ -653,6 +878,10 @@ class SizeamaticProApp:
             variable=self.show_epipolar,
             command=self.on_toggle_show_epipolar,
         )
+
+        view_menu.add_separator()
+        view_menu.add_command(label="Calibration Summary…", command=self.on_show_calibration_summary)
+
         menubar.add_cascade(label="View", menu=view_menu)
 
         self.root.config(menu=menubar)
@@ -1297,6 +1526,7 @@ class SizeamaticProApp:
             intr = np.load(intr_path)
             rect = np.load(rect_path)
             maps = np.load(maps_path)
+            extr = np.load(extr_path)
 
             # Pull required matrices/maps.
             PL = rect["PL"]
@@ -1307,6 +1537,25 @@ class SizeamaticProApp:
             mapLy = maps["mapLy"]
             mapRx = maps["mapRx"]
             mapRy = maps["mapRy"]
+
+            # Intrinsics
+            mtxL = intr["mtxL"]
+            distL = intr["distL"]
+            mtxR = intr["mtxR"]
+            distR = intr["distR"]
+
+            # Extrinsics
+            R = extr["R"]
+            T = extr["T"]
+            E = extr["E"]
+            F = extr["F"]
+            stereo_rms = float(extr["stereo_rms"]) if "stereo_rms" in extr.files else None
+
+            # Rectification
+            RL = rect["RL"] if "RL" in rect.files else None
+            RR = rect["RR"] if "RR" in rect.files else None
+            roiL = rect["roiL"] if "roiL" in rect.files else None
+            roiR = rect["roiR"] if "roiR" in rect.files else None
 
             # Intrinsics file stores expected calibration resolution.
             cal_w = int(intr["image_width"])
@@ -1339,15 +1588,37 @@ class SizeamaticProApp:
 
         # Store calibration bundle.
         self.cal = {
+            # Sizes
+            "w": cal_w,
+            "h": cal_h,
+
+            # Intrinsics
+            "mtxL": mtxL,
+            "distL": distL,
+            "mtxR": mtxR,
+            "distR": distR,
+
+            # Extrinsics
+            "R": R,
+            "T": T,
+            "E": E,
+            "F": F,
+            "stereo_rms": stereo_rms,
+
+            # Rectification
+            "RL": RL,
+            "RR": RR,
             "PL": PL,
             "PR": PR,
             "Q": Q,
+            "roiL": roiL,
+            "roiR": roiR,
+
+            # Maps
             "mapLx": mapLx,
             "mapLy": mapLy,
             "mapRx": mapRx,
             "mapRy": mapRy,
-            "w": cal_w,
-            "h": cal_h,
         }
 
         self._set_status_mid("Calibration loaded")
