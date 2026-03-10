@@ -146,7 +146,7 @@ class SizeamaticProApp:
 
         # Assumed user click uncertainty in pixels for uncertainty estimation.
         # This is an explicit assumption used to estimate sigma values in millimeters.
-        self.click_sigma_px = 1.0
+        self.click_sigma_px = 2.0
 
         # Calibration summary window state (created on demand).
         self.cal_win = None
@@ -803,16 +803,53 @@ class SizeamaticProApp:
                     return None
 
         return None
+
+     # Finds the nearest handle to a screen-space click in the given pane.
+    # Returns the point index if the click is close enough to a handle, else None.
+    def _get_nearest_handle_index(self, which, canvas, sx, sy):
+        # Read the point list for this pane.
+        pts = self._get_points_list(which)
+        if not pts:
+            return None
+
+        # Use a slightly generous hit radius so handles are easy to grab.
+        hit_r = float(self.handle_radius_px) * 2.0
+        hit_r2 = hit_r * hit_r
+
+        best_idx = None
+        best_d2 = None
+
+        # Compare the click against each handle center in screen coordinates.
+        for i, (ix, iy) in enumerate(pts):
+            hx, hy = self._image_to_screen(which, canvas, ix, iy)
+
+            dx = float(sx) - float(hx)
+            dy = float(sy) - float(hy)
+            d2 = dx * dx + dy * dy
+
+            # Keep the closest handle that falls inside the hit radius.
+            if d2 <= hit_r2:
+                if best_d2 is None or d2 < best_d2:
+                    best_idx = i
+                    best_d2 = d2
+
+        return best_idx
     
     # Left mouse button pressed on overlay.
     def on_overlay_left_down(self, which, event):
         # Choose the correct overlay canvas for this pane.
         canvas = self.left_overlay_canvas if which == "L" else self.right_overlay_canvas
 
-        # If the user clicked a handle, start dragging that handle.
+        # First try the exact canvas-item hit test under the cursor.
         idx = self._get_handle_index_under_cursor(canvas)
+
+        # If that fails, fall back to a nearest-handle search in screen space.
+        # This makes points easier to grab even if the user misses the oval outline.
+        if idx is None:
+            idx = self._get_nearest_handle_index(which, canvas, event.x, event.y)
+
+        # If we found a handle by either method, begin dragging it.
         if idx is not None:
-            # Begin drag mode.
             self.drag_active = True
             self.drag_which = which
             self.drag_index = idx
@@ -829,8 +866,26 @@ class SizeamaticProApp:
         # Convert the click from screen coords to image coords.
         ix, iy = self._screen_to_image(which, canvas, event.x, event.y)
 
-        # Append as the next point.
+        # Record the new point on the pane the user clicked.
         pts.append((ix, iy))
+
+        # If the opposite pane does not yet have this index, try to auto-create the mate.
+        # This lets the user click one side first, then get an initial correspondence guess
+        # on the other side instead of solving disparity entirely by hand.
+        new_idx = len(pts) - 1
+
+        # Select the opposite pane's point list.
+        other_which = "R" if which == "L" else "L"
+        other_pts = self._get_points_list(other_which)
+
+        # Only auto-create a mate if the opposite pane does not already have one.
+        if new_idx >= len(other_pts):
+            # Ask the scanline matcher for an initial guess in the opposite image.
+            mate = self._guess_mate_point_on_scanline(which, ix, iy)
+
+            # If matching succeeded, append the guessed mate at the same pair index.
+            if mate is not None:
+                other_pts.append(mate)
 
         # Trigger overlay redraw and measurement stub.
         self._on_points_changed()
@@ -1133,6 +1188,88 @@ class SizeamaticProApp:
 
         # Show a short confirmation in the center status area.
         self._set_status_mid("Points cleared")
+
+    # Finds a likely matching point on the opposite rectified frame using a small patch search.
+    def _guess_mate_point_on_scanline(self, which_src, x_src, y_src):
+        # Measurement assistance only works in rectified view.
+        if not self.view_rectified.get():
+            return None
+
+        # Calibration must be loaded so we know we are using the rectified workflow.
+        if self.cal is None:
+            return None
+
+        # Select source and target frames based on which pane was clicked.
+        if which_src == "L":
+            src = self.current_frameL
+            dst = self.current_frameR
+        else:
+            src = self.current_frameR
+            dst = self.current_frameL
+
+        # Both cached frames must exist.
+        if src is None or dst is None:
+            return None
+
+        # Convert to grayscale for patch matching.
+        src_gray = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
+        dst_gray = cv2.cvtColor(dst, cv2.COLOR_BGR2GRAY)
+
+        # Round the clicked location to integer pixel coordinates.
+        x_src = int(round(x_src))
+        y_src = int(round(y_src))
+
+        # Define a small square template around the clicked source point.
+        patch_r = 7
+        x0 = x_src - patch_r
+        x1 = x_src + patch_r + 1
+        y0 = y_src - patch_r
+        y1 = y_src + patch_r + 1
+
+        # Reject clicks too close to the border for a full template patch.
+        if x0 < 0 or y0 < 0 or x1 > src_gray.shape[1] or y1 > src_gray.shape[0]:
+            return None
+
+        # Extract the source template patch centered on the clicked point.
+        templ = src_gray[y0:y1, x0:x1]
+
+        # Search only along the same rectified scanline neighborhood in the target image.
+        # This keeps the search local and avoids asking the matcher to solve the whole image.
+        search_half_width = 120
+        sx0 = max(0, x_src - search_half_width)
+        sx1 = min(dst_gray.shape[1], x_src + search_half_width + 1)
+
+        # Build a target strip centered on the same Y row.
+        # Keep the strip tall enough for the template to slide across it.
+        tx0 = sx0
+        tx1 = sx1
+        ty0 = y_src - patch_r
+        ty1 = y_src + patch_r + 1
+
+        # Reject if the target strip would fall outside the image.
+        if ty0 < 0 or ty1 > dst_gray.shape[0]:
+            return None
+
+        # The target strip must be at least as wide as the template.
+        if (tx1 - tx0) < templ.shape[1]:
+            return None
+
+        # Extract the target strip from the opposite image.
+        strip = dst_gray[ty0:ty1, tx0:tx1]
+
+        # Match the template against the strip and look for the best score.
+        result = cv2.matchTemplate(strip, templ, cv2.TM_CCOEFF_NORMED)
+        _min_val, _max_val, _min_loc, max_loc = cv2.minMaxLoc(result)
+
+        # Recover the matched X position in full-image coordinates.
+        # matchTemplate returns the template's top-left corner, so shift back to center.
+        best_x = tx0 + max_loc[0] + patch_r
+
+        # Keep the matched point on the same rectified scanline as the source point.
+        best_y = y_src
+
+        # Return the guessed mate point in image pixel coordinates.
+        return (float(best_x), float(best_y))
 
     # Triangulates directly from pixel coordinates (rectified) into XYZ millimeters.
     def _triangulate_from_pixels(self, xL, yL, xR, yR):
@@ -2702,8 +2839,17 @@ class SizeamaticProApp:
                 frameL = cv2.remap(frameL, self.cal["mapLx"], self.cal["mapLy"], interpolation=cv2.INTER_LINEAR)
 
             if frameL is None:
+                # Clear the cached left frame because there is no valid image to match against.
+                self.current_frameL = None
+
+                # Draw the missing-frame placeholder on the left pane.
                 self._draw_missing_frame(self.left_overlay_canvas, "LEFT", li)
             else:
+                # Cache the exact left image currently being displayed.
+                # If rectified view is enabled, this is the rectified frame.
+                self.current_frameL = frameL
+
+                # Display the current left frame on the left pane.
                 self._display_bgr_on_canvas(self.left_overlay_canvas, frameL, "L")
 
         # Right side render.
@@ -2716,8 +2862,17 @@ class SizeamaticProApp:
                 frameR = cv2.remap(frameR, self.cal["mapRx"], self.cal["mapRy"], interpolation=cv2.INTER_LINEAR)
 
             if frameR is None:
+                # Clear the cached right frame because there is no valid image to match against.
+                self.current_frameR = None
+
+                # Draw the missing-frame placeholder on the right pane.
                 self._draw_missing_frame(self.right_overlay_canvas, "RIGHT", ri)
             else:
+                # Cache the exact right image currently being displayed.
+                # If rectified view is enabled, this is the rectified frame.
+                self.current_frameR = frameR
+
+                # Display the current right frame on the right pane.
                 self._display_bgr_on_canvas(self.right_overlay_canvas, frameR, "R")
 
         # Update the slider frame labels after rendering.
