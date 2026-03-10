@@ -944,12 +944,25 @@ class SizeamaticProApp:
                 sZ_str = f"{sZ:.1f}"
                 sR_str = f"{sR:.1f}"
 
+            # Read the clicked left and right pixels for this point.
+            xL, yL = self.ptsL[i]
+            xR, yR = self.ptsR[i]
+
+            # Compute disparity, which drives stereo depth.
+            disp = xL - xR
+
+            # Compute rectified Y mismatch between left and right clicks.
+            dy = yR - yL
+
+            # Store the formatted point row for the UI table and copy block.
             points_rows.append((
                 str(i),
                 f"{X:.1f}",
                 f"{Y:.1f}",
                 f"{Z:.1f}",
                 f"{R:.1f}",
+                f"{disp:.2f}",
+                f"{dy:.2f}",
                 erms_str,
                 sZ_str,
                 sR_str,
@@ -1123,8 +1136,16 @@ class SizeamaticProApp:
 
     # Triangulates directly from pixel coordinates (rectified) into XYZ millimeters.
     def _triangulate_from_pixels(self, xL, yL, xR, yR):
-        ptsL = np.array([[xL], [yL]], dtype=np.float64)
-        ptsR = np.array([[xR], [yR]], dtype=np.float64)
+
+        # In a rectified stereo pair, corresponding points should lie on the same scanline.
+        # Manual clicks may differ slightly in Y between left and right, even when the user
+        # picked the same physical feature. Average the two Y values so we do not feed that
+        # vertical click mismatch directly into triangulation.
+        y = 0.5 * (float(yL) + float(yR))
+
+        # Build 2x1 pixel coordinate arrays for left and right using the shared rectified Y.
+        ptsL = np.array([[xL], [y]], dtype=np.float64)
+        ptsR = np.array([[xR], [y]], dtype=np.float64)
 
         Xh = cv2.triangulatePoints(self.cal["PL"], self.cal["PR"], ptsL, ptsR)
 
@@ -1336,10 +1357,15 @@ class SizeamaticProApp:
         xL, yL = self.ptsL[index]
         xR, yR = self.ptsR[index]
 
-        # Build 2x1 arrays for OpenCV triangulation.
-        # cv2.triangulatePoints expects float arrays shaped (2, N).
-        ptsL = np.array([[xL], [yL]], dtype=np.float64)
-        ptsR = np.array([[xR], [yR]], dtype=np.float64)
+        # In rectified view, a true correspondence should have the same Y value in both images.
+        # The user may click a few pixels high or low on one side, so we average left and right Y
+        # here to reduce vertical click noise before triangulating.
+        y = 0.5 * (float(yL) + float(yR))
+
+        # Build 2x1 arrays for OpenCV triangulation using the shared rectified Y coordinate.
+        # This keeps the triangulation aligned with the rectified epipolar geometry.
+        ptsL = np.array([[xL], [y]], dtype=np.float64)
+        ptsR = np.array([[xR], [y]], dtype=np.float64)
 
         # Triangulate in homogeneous coordinates.
         # Output shape is (4, N). For N=1, we have one 4-vector.
@@ -2206,29 +2232,36 @@ class SizeamaticProApp:
         # ---------------- Points table ----------------
         ttk.Label(outer, text="Points (mm)", font=("Segoe UI", 10, "bold")).grid(row=1, column=0, sticky="w")
 
-        points_cols = ("idx", "X", "Y", "Z", "Range", "ReprojRMS", "sZ", "sRange")
+        # Add raw stereo diagnostics to the points table.
+        points_cols = ("idx", "X", "Y", "Z", "Range", "Disp", "dY", "ReprojRMS", "sZ", "sRange")
+
+        # Create the points table widget.
         points_tree = ttk.Treeview(outer, columns=points_cols, show="headings", height=8)
         points_tree.grid(row=2, column=0, sticky="nsew", pady=(4, 12))
 
+        # Label each point column.
         points_tree.heading("idx", text="#")
         points_tree.heading("X", text="X")
         points_tree.heading("Y", text="Y")
         points_tree.heading("Z", text="Z")
         points_tree.heading("Range", text="Range")
-
-        points_tree.column("idx", width=40, anchor="center")
-        points_tree.column("X", width=120, anchor="e")
-        points_tree.column("Y", width=120, anchor="e")
-        points_tree.column("Z", width=120, anchor="e")
-        points_tree.column("Range", width=140, anchor="e")
-
+        points_tree.heading("Disp", text="Disp (px)")
+        points_tree.heading("dY", text="dY (px)")
         points_tree.heading("ReprojRMS", text="Reproj RMS (px)")
         points_tree.heading("sZ", text="σZ")
         points_tree.heading("sRange", text="σRange")
 
-        points_tree.column("ReprojRMS", width=120, anchor="e")
-        points_tree.column("sZ", width=90, anchor="e")
-        points_tree.column("sRange", width=110, anchor="e")
+        # Set point column widths and alignment.
+        points_tree.column("idx", width=40, anchor="center")
+        points_tree.column("X", width=85, anchor="e")
+        points_tree.column("Y", width=85, anchor="e")
+        points_tree.column("Z", width=85, anchor="e")
+        points_tree.column("Range", width=95, anchor="e")
+        points_tree.column("Disp", width=85, anchor="e")
+        points_tree.column("dY", width=75, anchor="e")
+        points_tree.column("ReprojRMS", width=105, anchor="e")
+        points_tree.column("sZ", width=80, anchor="e")
+        points_tree.column("sRange", width=95, anchor="e")
 
         # ---------------- Segments table ----------------
         ttk.Label(outer, text="Segments (mm)", font=("Segoe UI", 10, "bold")).grid(row=3, column=0, sticky="w")
@@ -2296,9 +2329,13 @@ class SizeamaticProApp:
         # Build copy block (tab separated, easy to paste into Excel).
         lines = []
         lines.append("Points")
-        lines.append("idx\tX(mm)\tY(mm)\tZ(mm)\tRange(mm)\tReprojRMS(px)\tSigmaZ(mm)\tSigmaRange(mm)")
-        for idx, X, Y, Z, R, erms, sZ, sR in points_rows:
-            lines.append(f"{idx}\t{X}\t{Y}\t{Z}\t{R}\t{erms}\t{sZ}\t{sR}")
+
+        # Include disparity and vertical mismatch in the copy header.
+        lines.append("idx\tX(mm)\tY(mm)\tZ(mm)\tRange(mm)\tDisp(px)\tdY(px)\tReprojRMS(px)\tSigmaZ(mm)\tSigmaRange(mm)")
+
+        # Copy each point row in the same order as the table.
+        for idx, X, Y, Z, R, disp, dy, erms, sZ, sR in points_rows:
+            lines.append(f"{idx}\t{X}\t{Y}\t{Z}\t{R}\t{disp}\t{dy}\t{erms}\t{sZ}\t{sR}")
 
         if seg_rows:
             lines.append("")
