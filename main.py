@@ -121,6 +121,11 @@ class SizeamaticProApp:
         self.drag_which = None
         self.drag_index = None
 
+        # Track an alternate drag mode used for explicit local refinement.
+        self.refine_drag_active = False
+        self.refine_drag_which = None
+        self.refine_drag_index = None
+
         # Per pane view state for zoom and pan.
         # zoom is unitless scale multiplier applied on top of fit-to-window scaling.
         # off_x/off_y are screen-pixel offsets applied after scaling.
@@ -146,7 +151,7 @@ class SizeamaticProApp:
 
         # Assumed user click uncertainty in pixels for uncertainty estimation.
         # This is an explicit assumption used to estimate sigma values in millimeters.
-        self.click_sigma_px = 2.0
+        self.click_sigma_px = 3.0
 
         # Calibration summary window state (created on demand).
         self.cal_win = None
@@ -919,14 +924,112 @@ class SizeamaticProApp:
         self._on_points_changed()
 
     # Left mouse button released.
+    # Left mouse button released.
     def on_overlay_left_up(self, which, _event):
-        # End drag mode cleanly.
-        if self.drag_active and self.drag_which == which:
-            self.drag_active = False
-            self.drag_which = None
-            self.drag_index = None
+        # Only finish a drag if this pane owns the active drag.
+        if not self.drag_active or self.drag_which != which:
+            return
 
-    
+        # Clear drag state now that the drag is finished.
+        self.drag_active = False
+        self.drag_which = None
+        self.drag_index = None
+
+        # Redraw overlays and recompute measurements using the user placed point.
+        self._on_points_changed()
+
+    # Right mouse button pressed on overlay.
+    def on_overlay_right_down(self, which, event):
+        # Choose the correct overlay canvas for this pane.
+        canvas = self.left_overlay_canvas if which == "L" else self.right_overlay_canvas
+
+        # Start refine drag only when the user clicked an existing handle.
+        idx = self._get_handle_index_under_cursor(canvas)
+        if idx is None:
+            idx = self._get_nearest_handle_index(which, canvas, event.x, event.y)
+        if idx is None:
+            return
+
+        # Only refine points that already have a mate on the opposite pane.
+        pts = self._get_points_list(which)
+        other_which = "R" if which == "L" else "L"
+        other_pts = self._get_points_list(other_which)
+        if idx >= len(pts) or idx >= len(other_pts):
+            return
+
+        # Begin explicit refine-drag mode for this paired point.
+        self.refine_drag_active = True
+        self.refine_drag_which = which
+        self.refine_drag_index = idx
+
+
+    # Mouse moved while right button is held.
+    def on_overlay_right_drag(self, which, event):
+        # Only drag if we are actively doing a refine drag.
+        if not self.refine_drag_active:
+            return
+
+        # Only respond if this pane owns the active refine drag.
+        if self.refine_drag_which != which:
+            return
+
+        canvas = self.left_overlay_canvas if which == "L" else self.right_overlay_canvas
+        pts = self._get_points_list(which)
+
+        # Validate the dragged point index.
+        if self.refine_drag_index is None:
+            return
+        if self.refine_drag_index < 0 or self.refine_drag_index >= len(pts):
+            return
+
+        # Convert cursor position to image coords and preview the manual placement.
+        ix, iy = self._screen_to_image(which, canvas, event.x, event.y)
+        pts[self.refine_drag_index] = (ix, iy)
+
+        # Redraw overlays and update measurement preview while dragging.
+        self._on_points_changed()
+
+
+    # Right mouse button released.
+    def on_overlay_right_up(self, which, _event):
+        # Only finish a refine drag if this pane owns it.
+        if not self.refine_drag_active or self.refine_drag_which != which:
+            return
+
+        # Keep the point index before clearing refine-drag state.
+        idx = self.refine_drag_index
+
+        # Refine only if this point still has a mate on the opposite pane.
+        if idx is not None:
+            pts = self._get_points_list(which)
+            other_which = "R" if which == "L" else "L"
+            other_pts = self._get_points_list(other_which)
+
+            if idx < len(pts) and idx < len(other_pts):
+                # Read the current point being refined and its mate on the opposite pane.
+                x_cur, y_cur = pts[idx]
+                x_other, y_other = other_pts[idx]
+
+                # Refine near the user placed X so the matcher stays local.
+                refined = self._guess_mate_point_on_scanline(
+                    other_which,
+                    x_other,
+                    y_other,
+                    x_hint=x_cur,
+                    search_half_width=8,
+                )
+
+                # If refinement succeeded, replace the point with the refined result.
+                if refined is not None:
+                    pts[idx] = refined
+
+        # Clear refine-drag state now that the gesture is complete.
+        self.refine_drag_active = False
+        self.refine_drag_which = None
+        self.refine_drag_index = None
+
+        # Redraw overlays and recompute measurements using the refined point.
+        self._on_points_changed()
 
     # Called whenever points are added, moved, or deleted.
     # This is the single place that triggers overlay redraw and measurement refresh.
@@ -1190,7 +1293,7 @@ class SizeamaticProApp:
         self._set_status_mid("Points cleared")
 
     # Finds a likely matching point on the opposite rectified frame using a small patch search.
-    def _guess_mate_point_on_scanline(self, which_src, x_src, y_src):
+    def _guess_mate_point_on_scanline(self, which_src, x_src, y_src, x_hint=None, search_half_width=120):
         # Measurement assistance only works in rectified view.
         if not self.view_rectified.get():
             return None
@@ -1233,11 +1336,19 @@ class SizeamaticProApp:
         # Extract the source template patch centered on the clicked point.
         templ = src_gray[y0:y1, x0:x1]
 
+        # Choose the target X position around which we search.
+        # For an initial auto-match, this defaults to the source X.
+        # For post-drag refinement, the caller can provide the current mate X instead.
+        if x_hint is None:
+            x_center = x_src
+        else:
+            x_center = int(round(x_hint))
+
         # Search only along the same rectified scanline neighborhood in the target image.
-        # This keeps the search local and avoids asking the matcher to solve the whole image.
-        search_half_width = 120
-        sx0 = max(0, x_src - search_half_width)
-        sx1 = min(dst_gray.shape[1], x_src + search_half_width + 1)
+        # A wide window is useful for initial guessing, while a narrow window is useful
+        # for refining a point the user already dragged near the correct feature.
+        sx0 = max(0, x_center - int(search_half_width))
+        sx1 = min(dst_gray.shape[1], x_center + int(search_half_width) + 1)
 
         # Build a target strip centered on the same Y row.
         # Keep the strip tall enough for the template to slide across it.
@@ -1261,9 +1372,33 @@ class SizeamaticProApp:
         result = cv2.matchTemplate(strip, templ, cv2.TM_CCOEFF_NORMED)
         _min_val, _max_val, _min_loc, max_loc = cv2.minMaxLoc(result)
 
+        # Read the best integer match location in strip coordinates.
+        best_ix = int(max_loc[0])
+
+        # Start with no subpixel offset from the integer winner.
+        sub_dx = 0.0
+
+        # Refine only if the winner has one score sample on each side.
+        if best_ix > 0 and best_ix < (result.shape[1] - 1):
+            # Read the local correlation scores around the winning position.
+            s0 = float(result[0, best_ix - 1])
+            s1 = float(result[0, best_ix])
+            s2 = float(result[0, best_ix + 1])
+
+            # Fit a local parabola and estimate the fractional peak location.
+            denom = (s0 - 2.0 * s1 + s2)
+            if abs(denom) > 1e-12:
+                sub_dx = 0.5 * (s0 - s2) / denom
+
+                # Clamp the refinement so noisy scores cannot jump too far.
+                if sub_dx < -1.0:
+                    sub_dx = -1.0
+                elif sub_dx > 1.0:
+                    sub_dx = 1.0
+
         # Recover the matched X position in full-image coordinates.
         # matchTemplate returns the template's top-left corner, so shift back to center.
-        best_x = tx0 + max_loc[0] + patch_r
+        best_x = tx0 + best_ix + sub_dx + patch_r
 
         # Keep the matched point on the same rectified scanline as the source point.
         best_y = y_src
@@ -1669,15 +1804,25 @@ class SizeamaticProApp:
         self.left_overlay_canvas.bind("<Configure>", self.on_canvas_resized)
         self.right_overlay_canvas.bind("<Configure>", self.on_canvas_resized)
 
-        # Left overlay canvas receives user input.
+        # Left overlay canvas receives manual left-button input.
         self.left_overlay_canvas.bind("<Button-1>", lambda e: self.on_overlay_left_down("L", e))
         self.left_overlay_canvas.bind("<B1-Motion>", lambda e: self.on_overlay_left_drag("L", e))
         self.left_overlay_canvas.bind("<ButtonRelease-1>", lambda e: self.on_overlay_left_up("L", e))
 
-        # Right overlay canvas receives user input.
+        # Left overlay canvas also receives explicit right-button refine input.
+        self.left_overlay_canvas.bind("<Button-3>", lambda e: self.on_overlay_right_down("L", e))
+        self.left_overlay_canvas.bind("<B3-Motion>", lambda e: self.on_overlay_right_drag("L", e))
+        self.left_overlay_canvas.bind("<ButtonRelease-3>", lambda e: self.on_overlay_right_up("L", e))
+
+        # Right overlay canvas receives manual left-button input.
         self.right_overlay_canvas.bind("<Button-1>", lambda e: self.on_overlay_left_down("R", e))
         self.right_overlay_canvas.bind("<B1-Motion>", lambda e: self.on_overlay_left_drag("R", e))
         self.right_overlay_canvas.bind("<ButtonRelease-1>", lambda e: self.on_overlay_left_up("R", e))
+
+        # Right overlay canvas also receives explicit right-button refine input.
+        self.right_overlay_canvas.bind("<Button-3>", lambda e: self.on_overlay_right_down("R", e))
+        self.right_overlay_canvas.bind("<B3-Motion>", lambda e: self.on_overlay_right_drag("R", e))
+        self.right_overlay_canvas.bind("<ButtonRelease-3>", lambda e: self.on_overlay_right_up("R", e))
 
         # Mouse wheel zoom for each pane (Windows uses <MouseWheel> with event.delta).
         self.left_overlay_canvas.bind("<MouseWheel>", lambda e: self.on_mouse_wheel("L", e))
