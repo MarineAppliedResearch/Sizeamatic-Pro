@@ -1,3 +1,49 @@
+# -----------------------------------------------------------------------------
+# anaglyph_preview.py
+#
+# Author: Isaac Travers
+# Created: 2026-05-18
+# Project: Sizeamatic Pro
+#
+# Purpose:
+#   Provides the red/cyan anaglyph preview feature for Sizeamatic Pro.
+#
+#   This module manages the OpenCV preview window, preview playback state, frame
+#   stepping controls, and red/cyan anaglyph image generation used to visually
+#   inspect the current stereo video pair.
+#
+# Contents:
+#   - Anaglyph preview active and playback state.
+#   - OpenCV preview window creation and cleanup.
+#   - Preview tick/update loop.
+#   - Keyboard controls for play, pause, stepping, and closing.
+#   - Optional rectified frame display when calibration is loaded.
+#   - Red/cyan anaglyph frame generation.
+#
+# Design Notes:
+#   The View menu command remains in the main application class because it is
+#   part of the main GUI menu wiring. This module owns the preview state and
+#   implementation details for the anaglyph preview feature itself.
+#
+#   Functions in this module receive the main application object when they need
+#   access to video captures, frame indexes, calibration maps, frame reading
+#   helpers, Tkinter scheduling, or status bar updates.
+#
+# Assumptions:
+#   - Both left and right videos are loaded before the preview is started.
+#   - The main application provides readable left and right video captures.
+#   - If rectified view is enabled, the loaded calibration dictionary contains
+#     mapLx, mapLy, mapRx, and mapRy remap arrays.
+#   - The preview is a visual inspection aid and does not change measurement
+#     points, measurement results, calibration values, or video state.
+#
+# Dependencies:
+#   - OpenCV is used for the preview window, frame display, keyboard handling,
+#     frame remapping, and grayscale conversion.
+#   - NumPy is used to allocate and combine image channels.
+#
+
+
 # OpenCV is used for stereo triangulation, template matching, projection, and
 # other image-space measurement operations.
 import cv2
@@ -92,7 +138,6 @@ def stop_anaglyph_preview(app):
 
     # Update the main application status bar.
     app._set_status_mid("Anaglyph preview closed")
-
 
 
 # -----------------------------------------------------------------------------
@@ -253,4 +298,3 @@ def make_anaglyph_red_cyan(frameL_bgr, frameR_bgr):
 
     # Return a BGR image that can be displayed directly with cv2.imshow.
     return out
-
