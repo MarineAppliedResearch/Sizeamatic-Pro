@@ -14,6 +14,8 @@ import math
 
 # Local Imports
 import stereo_matching
+import measurement_window  # measurement_window contains the Tkinter measurement results window and update helpers.
+import anaglyph_preview  # Manages the anaglyph_preview functionality
 
 
 class SizeamaticProApp:
@@ -157,11 +159,11 @@ class SizeamaticProApp:
         self.cal_copy_text = None
 
         # Anaglyph preview state (OpenCV window, independent playback).
-        self.anaglyph_active = False
-        self.anaglyph_playing = False
-        self.anaglyph_after_id = None
-        self.anaglyph_index = 0
-        self.anaglyph_window_name = "Sizeamatic Pro - Anaglyph 3D"
+        anaglyph_preview.anaglyph_active = False
+        anaglyph_preview.anaglyph_playing = False
+        anaglyph_preview.anaglyph_after_id = None
+        anaglyph_preview.anaglyph_index = 0
+        anaglyph_preview.anaglyph_window_name = "Sizeamatic Pro - Anaglyph 3D"
 
     # Starts or stops the anaglyph preview window.
     def on_toggle_anaglyph_preview(self):
@@ -171,141 +173,13 @@ class SizeamaticProApp:
             return
 
         # Toggle behavior.
-        if self.anaglyph_active:
-            self._stop_anaglyph_preview()
+        if anaglyph_preview.anaglyph_active:
+            anaglyph_preview.stop_anaglyph_preview(self)
             return
 
-        self._start_anaglyph_preview()
+        anaglyph_preview.start_anaglyph_preview(self)
 
 
-    # Starts the anaglyph preview window and playback loop.
-    def _start_anaglyph_preview(self):
-        # Start at current left timeline index for convenience.
-        self.anaglyph_index = int(self.left_frame_index.get())
-
-        # Start paused by default so the user can hit space to play.
-        self.anaglyph_active = True
-        self.anaglyph_playing = False
-
-        # Create a window now (first frame will appear on next tick).
-        cv2.namedWindow(self.anaglyph_window_name, cv2.WINDOW_NORMAL)
-
-        self._set_status_mid("Anaglyph preview opened (Space: play/pause, A/D: step, Q: quit)")
-        self._anaglyph_tick()
-
-
-    # Stops the anaglyph preview and closes the OpenCV window.
-    def _stop_anaglyph_preview(self):
-        # Cancel any scheduled Tk after tick.
-        if self.anaglyph_after_id is not None:
-            self.root.after_cancel(self.anaglyph_after_id)
-            self.anaglyph_after_id = None
-
-        # Reset flags.
-        self.anaglyph_active = False
-        self.anaglyph_playing = False
-
-        # Close OpenCV window.
-        try:
-            cv2.destroyWindow(self.anaglyph_window_name)
-        except Exception:
-            pass
-
-        self._set_status_mid("Anaglyph preview closed")
-
-
-    # One tick of the anaglyph preview loop.
-    def _anaglyph_tick(self):
-        # If preview was stopped, exit.
-        if not self.anaglyph_active:
-            return
-
-        # If window was closed by the user, stop.
-        try:
-            vis = cv2.getWindowProperty(self.anaglyph_window_name, cv2.WND_PROP_VISIBLE)
-            if vis < 1:
-                self._stop_anaglyph_preview()
-                return
-        except Exception:
-            # If OpenCV throws here, stop cleanly.
-            self._stop_anaglyph_preview()
-            return
-
-        # Clamp index to the shorter stream.
-        max_i = int(min(self.left_frame_max, self.right_frame_max))
-        if self.anaglyph_index < 0:
-            self.anaglyph_index = 0
-        if self.anaglyph_index > max_i:
-            self.anaglyph_index = max_i
-
-        # Read frames at the anaglyph index.
-        frameL = self._read_frame_at(self.capL, self.anaglyph_index)
-        frameR = self._read_frame_at(self.capR, self.anaglyph_index)
-
-        # If either frame fails, show a black frame and keep going.
-        if frameL is None or frameR is None:
-            blank = np.zeros((int(self.metaL["height"]), int(self.metaL["width"]), 3), dtype=np.uint8)
-            cv2.imshow(self.anaglyph_window_name, blank)
-        else:
-            # Prefer rectified view if enabled and calibration is loaded.
-            if self.view_rectified.get() and self.cal is not None:
-                frameL = cv2.remap(frameL, self.cal["mapLx"], self.cal["mapLy"], interpolation=cv2.INTER_LINEAR)
-                frameR = cv2.remap(frameR, self.cal["mapRx"], self.cal["mapRy"], interpolation=cv2.INTER_LINEAR)
-
-            # Build anaglyph and show it.
-            ana = self._make_anaglyph_red_cyan(frameL, frameR)
-            cv2.imshow(self.anaglyph_window_name, ana)
-
-        # Handle key controls in the OpenCV window.
-        # Space toggles play/pause. A/D step. Q or ESC closes.
-        key = cv2.waitKey(1) & 0xFF
-
-        if key == ord("q") or key == 27:
-            self._stop_anaglyph_preview()
-            return
-
-        if key == 32:
-            self.anaglyph_playing = not self.anaglyph_playing
-
-        if key == ord("a"):
-            self.anaglyph_playing = False
-            self.anaglyph_index -= 1
-
-        if key == ord("d"):
-            self.anaglyph_playing = False
-            self.anaglyph_index += 1
-
-        # Advance if playing.
-        if self.anaglyph_playing:
-            self.anaglyph_index += 1
-            if self.anaglyph_index > max_i:
-                self.anaglyph_index = max_i
-                self.anaglyph_playing = False
-
-        # Schedule next tick (25 fps target).
-        self.anaglyph_after_id = self.root.after(40, self._anaglyph_tick)
-
-
-    # Creates a red/cyan anaglyph from BGR frames.
-    # Output is BGR for cv2.imshow.
-    def _make_anaglyph_red_cyan(self, frameL_bgr, frameR_bgr):
-        # Convert both to grayscale for a simple, robust anaglyph.
-        gL = cv2.cvtColor(frameL_bgr, cv2.COLOR_BGR2GRAY)
-        gR = cv2.cvtColor(frameR_bgr, cv2.COLOR_BGR2GRAY)
-
-        # Build output channels:
-        #   Red from left, Cyan (G+B) from right.
-        out = np.zeros_like(frameL_bgr)
-
-        # OpenCV uses BGR order:
-        #   out[:,:,2] is red
-        #   out[:,:,1] is green
-        #   out[:,:,0] is blue
-        out[:, :, 2] = gL
-        out[:, :, 1] = gR
-        out[:, :, 0] = gR
-
-        return out
 
     # Opens (or focuses) the calibration summary window.
     def on_show_calibration_summary(self):
@@ -641,8 +515,8 @@ class SizeamaticProApp:
             self.play_after_id = None
 
         # Close the anaglyph viewer if it is running.
-        if self.anaglyph_active:
-            self._stop_anaglyph_preview()
+        if anaglyph_preview.anaglyph_active:
+            anaglyph_preview.stop_anaglyph_preview()
 
         # Release capture objects if open.
         if self.capL:
@@ -1158,7 +1032,7 @@ class SizeamaticProApp:
             self._set_status_right("Measured 1 point")
 
         # Update popup window (creates it on first valid measurement).
-        self._update_measurement_window(points_rows, seg_rows, err_msg)
+        measurement_window.update_measurement_window(self, points_rows, seg_rows, err_msg)
 
     # -------------------------------------------------------------------------
     # Menu bar
@@ -2119,161 +1993,7 @@ class SizeamaticProApp:
     def _set_status_right(self, text):
         self.status_right.config(text=text)
 
-    # Creates the measurement window and table widgets if not already created.
-    # Creates the measurement window the first time we have valid measurements.
-    def _ensure_measurement_window(self):
-        if self.meas_win is not None:
-            return
-
-        win = tk.Toplevel(self.root)
-        win.title("Measurement")
-        win.geometry("620x520")
-
-        def _on_close():
-            win.destroy()
-            self.meas_win = None
-            self.points_tree = None
-            self.segs_tree = None
-            self.meas_copy_text = None
-            self.meas_error_var = None
-
-        win.protocol("WM_DELETE_WINDOW", _on_close)
-
-        outer = ttk.Frame(win, padding=(10, 10))
-        outer.grid(row=0, column=0, sticky="nsew")
-
-        win.grid_rowconfigure(0, weight=1)
-        win.grid_columnconfigure(0, weight=1)
-
-        outer.grid_rowconfigure(1, weight=1)
-        outer.grid_rowconfigure(3, weight=1)
-        outer.grid_columnconfigure(0, weight=1)
-
-        # Error line (for triangulation failures etc.)
-        self.meas_error_var = tk.StringVar(value="")
-        ttk.Label(outer, textvariable=self.meas_error_var, foreground="red").grid(row=0, column=0, sticky="w", pady=(0, 6))
-
-        # ---------------- Points table ----------------
-        ttk.Label(outer, text="Points (mm)", font=("Segoe UI", 10, "bold")).grid(row=1, column=0, sticky="w")
-
-        # Add raw stereo diagnostics to the points table.
-        points_cols = ("idx", "X", "Y", "Z", "Range", "Disp", "dY", "ReprojRMS", "sZ", "sRange")
-
-        # Create the points table widget.
-        points_tree = ttk.Treeview(outer, columns=points_cols, show="headings", height=8)
-        points_tree.grid(row=2, column=0, sticky="nsew", pady=(4, 12))
-
-        # Label each point column.
-        points_tree.heading("idx", text="#")
-        points_tree.heading("X", text="X")
-        points_tree.heading("Y", text="Y")
-        points_tree.heading("Z", text="Z")
-        points_tree.heading("Range", text="Range")
-        points_tree.heading("Disp", text="Disp (px)")
-        points_tree.heading("dY", text="dY (px)")
-        points_tree.heading("ReprojRMS", text="Reproj RMS (px)")
-        points_tree.heading("sZ", text="σZ")
-        points_tree.heading("sRange", text="σRange")
-
-        # Set point column widths and alignment.
-        points_tree.column("idx", width=40, anchor="center")
-        points_tree.column("X", width=85, anchor="e")
-        points_tree.column("Y", width=85, anchor="e")
-        points_tree.column("Z", width=85, anchor="e")
-        points_tree.column("Range", width=95, anchor="e")
-        points_tree.column("Disp", width=85, anchor="e")
-        points_tree.column("dY", width=75, anchor="e")
-        points_tree.column("ReprojRMS", width=105, anchor="e")
-        points_tree.column("sZ", width=80, anchor="e")
-        points_tree.column("sRange", width=95, anchor="e")
-
-        # ---------------- Segments table ----------------
-        ttk.Label(outer, text="Segments (mm)", font=("Segoe UI", 10, "bold")).grid(row=3, column=0, sticky="w")
-
-        seg_cols = ("seg", "dX", "dY", "dZ", "Len", "sLen")
-        segs_tree = ttk.Treeview(outer, columns=seg_cols, show="headings", height=8)
-        segs_tree.grid(row=4, column=0, sticky="nsew", pady=(4, 12))
-
-        segs_tree.heading("seg", text="Seg")
-        segs_tree.heading("dX", text="dX")
-        segs_tree.heading("dY", text="dY")
-        segs_tree.heading("dZ", text="dZ")
-        segs_tree.heading("Len", text="Len")
-
-        segs_tree.column("seg", width=60, anchor="center")
-        segs_tree.column("dX", width=120, anchor="e")
-        segs_tree.column("dY", width=120, anchor="e")
-        segs_tree.column("dZ", width=120, anchor="e")
-        segs_tree.column("Len", width=140, anchor="e")
-
-        segs_tree.heading("sLen", text="σLen")
-        segs_tree.column("sLen", width=110, anchor="e")
-
-        # ---------------- Copy box ----------------
-        ttk.Label(outer, text="Copy", font=("Segoe UI", 10, "bold")).grid(row=5, column=0, sticky="w")
-
-        txt = tk.Text(outer, height=7, width=1, wrap="none")
-        txt.grid(row=6, column=0, sticky="nsew")
-        outer.grid_rowconfigure(6, weight=0)
-
-        txt.configure(state="disabled")
-
-        self.meas_win = win
-        self.points_tree = points_tree
-        self.segs_tree = segs_tree
-        self.meas_copy_text = txt
-
-
-    # Updates the measurement window from computed points and segments.
-    def _update_measurement_window(self, points_rows, seg_rows, error_msg):
-        self._ensure_measurement_window()
-
-        # Update error message line.
-        self.meas_error_var.set(error_msg if error_msg else "")
-
-        if not error_msg:
-            self.meas_error_var.set(f"Assumed click σ = {self.click_sigma_px:.1f} px")
-
-        # Clear existing rows.
-        for item in self.points_tree.get_children():
-            self.points_tree.delete(item)
-        for item in self.segs_tree.get_children():
-            self.segs_tree.delete(item)
-
-        # Insert point rows.
-        for row in points_rows:
-            # row: (idx, X, Y, Z, Range) already formatted strings
-            self.points_tree.insert("", "end", values=row)
-
-        # Insert segment rows.
-        for row in seg_rows:
-            # row: (seg, dX, dY, dZ, Len) already formatted strings
-            self.segs_tree.insert("", "end", values=row)
-
-        # Build copy block (tab separated, easy to paste into Excel).
-        lines = []
-        lines.append("Points")
-
-        # Include disparity and vertical mismatch in the copy header.
-        lines.append("idx\tX(mm)\tY(mm)\tZ(mm)\tRange(mm)\tDisp(px)\tdY(px)\tReprojRMS(px)\tSigmaZ(mm)\tSigmaRange(mm)")
-
-        # Copy each point row in the same order as the table.
-        for idx, X, Y, Z, R, disp, dy, erms, sZ, sR in points_rows:
-            lines.append(f"{idx}\t{X}\t{Y}\t{Z}\t{R}\t{disp}\t{dy}\t{erms}\t{sZ}\t{sR}")
-
-        if seg_rows:
-            lines.append("")
-            lines.append("Segments")
-            lines.append("seg\tdX(mm)\tdY(mm)\tdZ(mm)\tLen(mm)\tSigmaLen(mm)")
-            for seg, dX, dY, dZ, L, sL in seg_rows:
-                lines.append(f"{seg}\t{dX}\t{dY}\t{dZ}\t{L}\t{sL}")
-
-        copy_block = "\n".join(lines)
-
-        self.meas_copy_text.configure(state="normal")
-        self.meas_copy_text.delete("1.0", "end")
-        self.meas_copy_text.insert("1.0", copy_block)
-        self.meas_copy_text.configure(state="disabled")
+    
 
     def _update_frame_labels(self):
         # Frame max is currently 0 because no video is loaded.
