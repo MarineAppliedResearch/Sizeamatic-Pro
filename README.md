@@ -79,3 +79,19 @@ If you encounter a calibration mismatch, decode issue, or measurement instabilit
 - a screenshot of the Sizeamatic Pro window showing the issue
 
 and include them in your support request.
+
+''' Command To print all methods of main class
+@'
+import ast
+from pathlib import Path
+
+path = Path("main.py")
+tree = ast.parse(path.read_text(encoding="utf-8"))
+
+for node in tree.body:
+    if isinstance(node, ast.ClassDef):
+        print(f"class {node.name}:")
+        for item in node.body:
+            if isinstance(item, ast.FunctionDef):
+                print(f"    def {item.name}(...):")
+'@ | python

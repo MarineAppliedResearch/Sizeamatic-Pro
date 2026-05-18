@@ -12,6 +12,9 @@ import base64
 import numpy as np
 import math
 
+# Local Imports
+import stereo_matching
+
 
 class SizeamaticProApp:
     """
@@ -21,11 +24,6 @@ class SizeamaticProApp:
     def __init__(self, root):
         self.root = root
 
-        # Tkinter is Python, but we still use // per your inline comment rule preference.
-        # However: Python does not support // comments as syntax.
-        # So in Python we must use # for comments.
-        #
-        # I will keep comments compact and frequent using #.
 
         # ---- Window setup ----
         self.root.title("Sizeamatic Pro")
@@ -886,7 +884,7 @@ class SizeamaticProApp:
         # Only auto-create a mate if the opposite pane does not already have one.
         if new_idx >= len(other_pts):
             # Ask the scanline matcher for an initial guess in the opposite image.
-            mate = self._guess_mate_point_on_scanline(which, ix, iy)
+            mate = stereo_matching.guess_mate_point_on_scanline(self, which, ix, iy)
 
             # If matching succeeded, append the guessed mate at the same pair index.
             if mate is not None:
@@ -1011,7 +1009,8 @@ class SizeamaticProApp:
                 x_other, y_other = other_pts[idx]
 
                 # Refine near the user placed X so the matcher stays local.
-                refined = self._guess_mate_point_on_scanline(
+                refined = stereo_matching.guess_mate_point_on_scanline(
+                    self,
                     other_which,
                     x_other,
                     y_other,
@@ -1070,7 +1069,7 @@ class SizeamaticProApp:
         err_msg = ""
 
         for i in range(n):
-            P, err = self._triangulate_point_pair(i)
+            P, err = stereo_matching.triangulate_point_pair(self, i)
             if err is not None:
                 err_msg = f"Point {i} failed: {err}"
                 break
@@ -1089,11 +1088,11 @@ class SizeamaticProApp:
             R = (X * X + Y * Y + Z * Z) ** 0.5
 
             # Assumption-free quality metric.
-            erms = self._reprojection_rms_px(i)
+            erms = stereo_matching.reprojection_rms_px(self, i)
             erms_str = f"{erms:.2f}" if erms is not None else ""
 
             # Assumption-based uncertainty in mm.
-            sig = self._estimate_point_sigma_mm(i, sigma_px)
+            sig = stereo_matching.estimate_point_sigma_mm(self, i, sigma_px)
             if sig is None:
                 sZ_str = ""
                 sR_str = ""
@@ -1138,7 +1137,7 @@ class SizeamaticProApp:
                 L = (dX * dX + dY * dY + dZ * dZ) ** 0.5
 
                 # Segment sigma length estimate.
-                seg_est = self._estimate_segment_sigma_len_mm(i - 1, i, sigma_px)
+                seg_est = stereo_matching.estimate_segment_sigma_len_mm(self, i - 1, i, sigma_px)
                 if seg_est is None:
                     sL_str = ""
                 else:
@@ -1292,368 +1291,11 @@ class SizeamaticProApp:
         # Show a short confirmation in the center status area.
         self._set_status_mid("Points cleared")
 
-    # Finds a likely matching point on the opposite rectified frame using a small patch search.
-    def _guess_mate_point_on_scanline(self, which_src, x_src, y_src, x_hint=None, search_half_width=120):
-        # Measurement assistance only works in rectified view.
-        if not self.view_rectified.get():
-            return None
 
-        # Calibration must be loaded so we know we are using the rectified workflow.
-        if self.cal is None:
-            return None
+    
 
-        # Select source and target frames based on which pane was clicked.
-        if which_src == "L":
-            src = self.current_frameL
-            dst = self.current_frameR
-        else:
-            src = self.current_frameR
-            dst = self.current_frameL
 
-        # Both cached frames must exist.
-        if src is None or dst is None:
-            return None
 
-        # Convert to grayscale for patch matching.
-        src_gray = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
-        dst_gray = cv2.cvtColor(dst, cv2.COLOR_BGR2GRAY)
-
-        # Round the clicked location to integer pixel coordinates.
-        x_src = int(round(x_src))
-        y_src = int(round(y_src))
-
-        # Define a small square template around the clicked source point.
-        patch_r = 7
-        x0 = x_src - patch_r
-        x1 = x_src + patch_r + 1
-        y0 = y_src - patch_r
-        y1 = y_src + patch_r + 1
-
-        # Reject clicks too close to the border for a full template patch.
-        if x0 < 0 or y0 < 0 or x1 > src_gray.shape[1] or y1 > src_gray.shape[0]:
-            return None
-
-        # Extract the source template patch centered on the clicked point.
-        templ = src_gray[y0:y1, x0:x1]
-
-        # Choose the target X position around which we search.
-        # For an initial auto-match, this defaults to the source X.
-        # For post-drag refinement, the caller can provide the current mate X instead.
-        if x_hint is None:
-            x_center = x_src
-        else:
-            x_center = int(round(x_hint))
-
-        # Search only along the same rectified scanline neighborhood in the target image.
-        # A wide window is useful for initial guessing, while a narrow window is useful
-        # for refining a point the user already dragged near the correct feature.
-        sx0 = max(0, x_center - int(search_half_width))
-        sx1 = min(dst_gray.shape[1], x_center + int(search_half_width) + 1)
-
-        # Build a target strip centered on the same Y row.
-        # Keep the strip tall enough for the template to slide across it.
-        tx0 = sx0
-        tx1 = sx1
-        ty0 = y_src - patch_r
-        ty1 = y_src + patch_r + 1
-
-        # Reject if the target strip would fall outside the image.
-        if ty0 < 0 or ty1 > dst_gray.shape[0]:
-            return None
-
-        # The target strip must be at least as wide as the template.
-        if (tx1 - tx0) < templ.shape[1]:
-            return None
-
-        # Extract the target strip from the opposite image.
-        strip = dst_gray[ty0:ty1, tx0:tx1]
-
-        # Match the template against the strip and look for the best score.
-        result = cv2.matchTemplate(strip, templ, cv2.TM_CCOEFF_NORMED)
-        _min_val, _max_val, _min_loc, max_loc = cv2.minMaxLoc(result)
-
-        # Read the best integer match location in strip coordinates.
-        best_ix = int(max_loc[0])
-
-        # Start with no subpixel offset from the integer winner.
-        sub_dx = 0.0
-
-        # Refine only if the winner has one score sample on each side.
-        if best_ix > 0 and best_ix < (result.shape[1] - 1):
-            # Read the local correlation scores around the winning position.
-            s0 = float(result[0, best_ix - 1])
-            s1 = float(result[0, best_ix])
-            s2 = float(result[0, best_ix + 1])
-
-            # Fit a local parabola and estimate the fractional peak location.
-            denom = (s0 - 2.0 * s1 + s2)
-            if abs(denom) > 1e-12:
-                sub_dx = 0.5 * (s0 - s2) / denom
-
-                # Clamp the refinement so noisy scores cannot jump too far.
-                if sub_dx < -1.0:
-                    sub_dx = -1.0
-                elif sub_dx > 1.0:
-                    sub_dx = 1.0
-
-        # Recover the matched X position in full-image coordinates.
-        # matchTemplate returns the template's top-left corner, so shift back to center.
-        best_x = tx0 + best_ix + sub_dx + patch_r
-
-        # Keep the matched point on the same rectified scanline as the source point.
-        best_y = y_src
-
-        # Return the guessed mate point in image pixel coordinates.
-        return (float(best_x), float(best_y))
-
-    # Triangulates directly from pixel coordinates (rectified) into XYZ millimeters.
-    def _triangulate_from_pixels(self, xL, yL, xR, yR):
-
-        # In a rectified stereo pair, corresponding points should lie on the same scanline.
-        # Manual clicks may differ slightly in Y between left and right, even when the user
-        # picked the same physical feature. Average the two Y values so we do not feed that
-        # vertical click mismatch directly into triangulation.
-        y = 0.5 * (float(yL) + float(yR))
-
-        # Build 2x1 pixel coordinate arrays for left and right using the shared rectified Y.
-        ptsL = np.array([[xL], [y]], dtype=np.float64)
-        ptsR = np.array([[xR], [y]], dtype=np.float64)
-
-        Xh = cv2.triangulatePoints(self.cal["PL"], self.cal["PR"], ptsL, ptsR)
-
-        W = float(Xh[3, 0])
-        if abs(W) < 1e-9:
-            return None
-
-        X = float(Xh[0, 0]) / W
-        Y = float(Xh[1, 0]) / W
-        Z = float(Xh[2, 0]) / W
-        return (X, Y, Z)
-
-
-    # Projects a 3D point (X,Y,Z) into pixel coords using a 3x4 projection matrix P.
-    def _project_point(self, P, X, Y, Z):
-        # Build homogeneous 3D point.
-        Xh = np.array([[X], [Y], [Z], [1.0]], dtype=np.float64)
-
-        # Project to homogeneous image coordinates.
-        ph = P @ Xh
-
-        w = float(ph[2, 0])
-        if abs(w) < 1e-12:
-            return None
-
-        u = float(ph[0, 0]) / w
-        v = float(ph[1, 0]) / w
-        return (u, v)
-
-
-    # Computes reprojection RMS (px) for point index i using current clicked pixels.
-    def _reprojection_rms_px(self, index):
-        # Require a valid triangulated 3D point.
-        P, err = self._triangulate_point_pair(index)
-        if err is not None:
-            return None
-
-        X, Y, Z = P
-
-        # Read clicked pixels.
-        xL, yL = self.ptsL[index]
-        xR, yR = self.ptsR[index]
-
-        # Project back into both images.
-        pL = self._project_point(self.cal["PL"], X, Y, Z)
-        pR = self._project_point(self.cal["PR"], X, Y, Z)
-        if pL is None or pR is None:
-            return None
-
-        uL, vL = pL
-        uR, vR = pR
-
-        # Compute pixel residual magnitudes.
-        eL = ((uL - xL) ** 2 + (vL - yL) ** 2) ** 0.5
-        eR = ((uR - xR) ** 2 + (vR - yR) ** 2) ** 0.5
-
-        # RMS across left and right.
-        erms = ((eL * eL + eR * eR) / 2.0) ** 0.5
-        return float(erms)
-
-
-    # Estimates sigma(Z) and sigma(Range) in mm for a point using finite differences.
-    # Assumes isotropic click uncertainty sigma_px in each image coordinate.
-    def _estimate_point_sigma_mm(self, index, sigma_px):
-        # Pull clicked pixels.
-        xL, yL = self.ptsL[index]
-        xR, yR = self.ptsR[index]
-
-        # Baseline triangulation.
-        P0 = self._triangulate_from_pixels(xL, yL, xR, yR)
-        if P0 is None:
-            return None
-
-        X0, Y0, Z0 = P0
-        R0 = (X0 * X0 + Y0 * Y0 + Z0 * Z0) ** 0.5
-
-        # Perturbation set: ±sigma in each coordinate independently.
-        # This is cheap and provides a practical sensitivity-based sigma.
-        perturbs = [
-            (xL + sigma_px, yL, xR, yR),
-            (xL - sigma_px, yL, xR, yR),
-            (xL, yL + sigma_px, xR, yR),
-            (xL, yL - sigma_px, xR, yR),
-            (xL, yL, xR + sigma_px, yR),
-            (xL, yL, xR - sigma_px, yR),
-            (xL, yL, xR, yR + sigma_px),
-            (xL, yL, xR, yR - sigma_px),
-        ]
-
-        # Collect Z and Range results for each perturbation.
-        Zs = []
-        Rs = []
-
-        for (pxL, pyL, pxR, pyR) in perturbs:
-            Pp = self._triangulate_from_pixels(pxL, pyL, pxR, pyR)
-            if Pp is None:
-                continue
-
-            Xp, Yp, Zp = Pp
-            Rp = (Xp * Xp + Yp * Yp + Zp * Zp) ** 0.5
-
-            Zs.append(Zp)
-            Rs.append(Rp)
-
-        # If too many perturbations failed, give up.
-        if len(Zs) < 4:
-            return None
-
-        # Use sample standard deviation as sigma estimate.
-        sZ = float(np.std(np.array(Zs, dtype=np.float64), ddof=1))
-        sR = float(np.std(np.array(Rs, dtype=np.float64), ddof=1))
-
-        return (sZ, sR)
-
-
-    # Estimates sigma(length) in mm for segment (i-1 -> i) using endpoint perturbations.
-    # We perturb each endpoint independently and observe how length changes.
-    def _estimate_segment_sigma_len_mm(self, i0, i1, sigma_px):
-        # Require endpoints exist.
-        if i0 < 0 or i1 < 0:
-            return None
-        if i0 >= len(self.ptsL) or i1 >= len(self.ptsL):
-            return None
-        if i0 >= len(self.ptsR) or i1 >= len(self.ptsR):
-            return None
-
-        # Baseline 3D endpoints.
-        P0 = self._triangulate_from_pixels(*self.ptsL[i0], *self.ptsR[i0])
-        P1 = self._triangulate_from_pixels(*self.ptsL[i1], *self.ptsR[i1])
-        if P0 is None or P1 is None:
-            return None
-
-        X0, Y0, Z0 = P0
-        X1, Y1, Z1 = P1
-
-        # Baseline length.
-        dX = X1 - X0
-        dY = Y1 - Y0
-        dZ = Z1 - Z0
-        L0 = (dX * dX + dY * dY + dZ * dZ) ** 0.5
-
-        # Build perturbations for each endpoint, same as point sigma.
-        def _endpoint_perturbs(idx):
-            xL, yL = self.ptsL[idx]
-            xR, yR = self.ptsR[idx]
-            return [
-                (xL + sigma_px, yL, xR, yR),
-                (xL - sigma_px, yL, xR, yR),
-                (xL, yL + sigma_px, xR, yR),
-                (xL, yL - sigma_px, xR, yR),
-                (xL, yL, xR + sigma_px, yR),
-                (xL, yL, xR - sigma_px, yR),
-                (xL, yL, xR, yR + sigma_px),
-                (xL, yL, xR, yR - sigma_px),
-            ]
-
-        Ls = []
-
-        # Perturb endpoint 0, keep endpoint 1 baseline.
-        for (pxL, pyL, pxR, pyR) in _endpoint_perturbs(i0):
-            P0p = self._triangulate_from_pixels(pxL, pyL, pxR, pyR)
-            if P0p is None:
-                continue
-
-            X0p, Y0p, Z0p = P0p
-            dX = X1 - X0p
-            dY = Y1 - Y0p
-            dZ = Z1 - Z0p
-            Lp = (dX * dX + dY * dY + dZ * dZ) ** 0.5
-            Ls.append(Lp)
-
-        # Perturb endpoint 1, keep endpoint 0 baseline.
-        for (pxL, pyL, pxR, pyR) in _endpoint_perturbs(i1):
-            P1p = self._triangulate_from_pixels(pxL, pyL, pxR, pyR)
-            if P1p is None:
-                continue
-
-            X1p, Y1p, Z1p = P1p
-            dX = X1p - X0
-            dY = Y1p - Y0
-            dZ = Z1p - Z0
-            Lp = (dX * dX + dY * dY + dZ * dZ) ** 0.5
-            Ls.append(Lp)
-
-        if len(Ls) < 6:
-            return None
-
-        sL = float(np.std(np.array(Ls, dtype=np.float64), ddof=1))
-        return (L0, sL)
-
-    # Triangulates a matched point pair (same index in left and right) into 3D XYZ in millimeters.
-    def _triangulate_point_pair(self, index):
-        # Measurements require rectified coordinates and rectified projection matrices.
-        if not self.view_rectified.get():
-            return None, "Enable rectified view to measure"
-
-        # Calibration must be loaded and must contain PL and PR.
-        if self.cal is None:
-            return None, "Load calibration to measure"
-
-        # We need a matched point on both sides.
-        if index < 0:
-            return None, "Invalid point index"
-        if index >= len(self.ptsL) or index >= len(self.ptsR):
-            return None, "Point pair incomplete"
-
-        # Read the point coordinates in IMAGE pixel coords.
-        # These coordinates must correspond to the rectified view.
-        xL, yL = self.ptsL[index]
-        xR, yR = self.ptsR[index]
-
-        # In rectified view, a true correspondence should have the same Y value in both images.
-        # The user may click a few pixels high or low on one side, so we average left and right Y
-        # here to reduce vertical click noise before triangulating.
-        y = 0.5 * (float(yL) + float(yR))
-
-        # Build 2x1 arrays for OpenCV triangulation using the shared rectified Y coordinate.
-        # This keeps the triangulation aligned with the rectified epipolar geometry.
-        ptsL = np.array([[xL], [y]], dtype=np.float64)
-        ptsR = np.array([[xR], [y]], dtype=np.float64)
-
-        # Triangulate in homogeneous coordinates.
-        # Output shape is (4, N). For N=1, we have one 4-vector.
-        Xh = cv2.triangulatePoints(self.cal["PL"], self.cal["PR"], ptsL, ptsR)
-
-        # Convert homogeneous (X, Y, Z, W) to Euclidean (X/W, Y/W, Z/W).
-        W = float(Xh[3, 0])
-        if abs(W) < 1e-9:
-            return None, "Triangulation unstable (W≈0)"
-
-        X = float(Xh[0, 0]) / W
-        Y = float(Xh[1, 0]) / W
-        Z = float(Xh[2, 0]) / W
-
-        # Units are millimeters if your calibration translation was in millimeters.
-        return (X, Y, Z), None
 
 
     # Formats a float millimeter value for display.
