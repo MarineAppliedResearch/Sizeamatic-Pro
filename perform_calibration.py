@@ -28,6 +28,12 @@ from tkinter import filedialog
 # Show temporary status and error popups.
 from tkinter import messagebox
 
+# Import OpenCV
+import cv2
+
+# Import NumPy  because OpenCV image buffers are NumPy arrays.
+import numpy as np
+
 
 # -----------------------------------------------------------------------------
 # ToolTip
@@ -148,10 +154,12 @@ class PerformCalibrationWindow:
         # Store the selected calibration board type.
         self.board_type = tk.StringVar(value="checkerboard")
 
-        # Store checkerboard settings.
-        self.checkerboard_inner_rows = tk.IntVar(value=7)
-        self.checkerboard_inner_columns = tk.IntVar(value=10)
-        self.checkerboard_square_size_mm = tk.DoubleVar(value=25.0)
+        # Store checkerboard board settings.
+        self.checkerboard_paper_size = tk.StringVar(value="Letter")
+        self.checkerboard_orientation = tk.StringVar(value="Landscape")
+        self.checkerboard_inner_rows = tk.IntVar(value=6)
+        self.checkerboard_inner_columns = tk.IntVar(value=9)
+        self.checkerboard_square_size_mm = tk.DoubleVar(value=23.5)
 
         # Store circle grid settings.
         self.circle_grid_rows = tk.IntVar(value=7)
@@ -186,8 +194,8 @@ class PerformCalibrationWindow:
         # Build the window layout and controls.
         self._build_ui()
 
-        # Draw the first board preview.
-        self._draw_board_preview()
+        # Draw the first board preview after Tkinter has calculated widget sizes.
+        self.window.after(100, self._draw_board_preview)
 
 
     # -------------------------------------------------------------------------
@@ -290,7 +298,7 @@ class PerformCalibrationWindow:
         )
 
         # Place the circle grid radio button.
-        circle_grid_radio.grid(row=1, column=0, sticky="w", pady=2)
+        #circle_grid_radio.grid(row=1, column=0, sticky="w", pady=2)
 
         # Add tooltip help for circle grid calibration.
         ToolTip(
@@ -361,6 +369,9 @@ class PerformCalibrationWindow:
 
         # Place the board preview canvas.
         self.preview_canvas.grid(row=0, column=0, sticky="nsew")
+
+        # Redraw the preview whenever the preview canvas changes size.
+        self.preview_canvas.bind("<Configure>", lambda event: self._draw_board_preview())
 
         # Allow the preview image itself to generate the printable board.
         self.preview_canvas.bind("<Button-1>", lambda event: self.on_generate_printable_board())
@@ -472,29 +483,63 @@ class PerformCalibrationWindow:
 
         # Build checkerboard settings when checkerboard is selected.
         if board_type == "checkerboard":
-            self._add_number_setting(
+            self._add_combo_setting(
                 row=0,
-                label_text="Inner corner rows",
-                variable=self.checkerboard_inner_rows,
-                tooltip_text="Number of detected inside corner rows. This is not the number of printed squares.",
-                minimum=2,
-                maximum=80,
+                label_text="Paper size",
+                variable=self.checkerboard_paper_size,
+                values=("Letter", "A4", "Custom"),
+                tooltip_text=(
+                    "Physical paper size used for the printable checkerboard. "
+                    "Letter is 8.5 x 11 inches. A4 is 210 x 297 mm. Custom can "
+                    "be expanded later if a non-standard print size is needed."
+                ),
             )
 
-            self._add_number_setting(
+            self._add_combo_setting(
                 row=1,
-                label_text="Inner corner columns",
-                variable=self.checkerboard_inner_columns,
-                tooltip_text="Number of detected inside corner columns. This is not the number of printed squares.",
-                minimum=2,
-                maximum=80,
+                label_text="Orientation",
+                variable=self.checkerboard_orientation,
+                values=("Landscape", "Portrait"),
+                tooltip_text=(
+                    "Direction the board is placed on the page. Landscape usually "
+                    "fits wider stereo calibration boards better."
+                ),
             )
 
             self._add_number_setting(
                 row=2,
+                label_text="Inner corner rows",
+                variable=self.checkerboard_inner_rows,
+                tooltip_text=(
+                    "Number of inside checkerboard corners OpenCV should detect "
+                    "vertically. This is one less than the number of printed square "
+                    "rows."
+                ),
+                minimum=2,
+                maximum=80,
+            )
+
+            self._add_number_setting(
+                row=3,
+                label_text="Inner corner columns",
+                variable=self.checkerboard_inner_columns,
+                tooltip_text=(
+                    "Number of inside checkerboard corners OpenCV should detect "
+                    "horizontally. This is one less than the number of printed "
+                    "square columns."
+                ),
+                minimum=2,
+                maximum=80,
+            )
+
+            self._add_number_setting(
+                row=4,
                 label_text="Square size mm",
                 variable=self.checkerboard_square_size_mm,
-                tooltip_text="Real world size of one printed checker square in millimeters.",
+                tooltip_text=(
+                    "Real-world size of one printed checker square in millimeters. "
+                    "This value must match the printed board when calibration is run."
+                ),
                 minimum=1.0,
                 maximum=500.0,
                 increment=0.5,
@@ -731,84 +776,108 @@ class PerformCalibrationWindow:
     # -------------------------------------------------------------------------
     # _draw_checkerboard_preview
     #
-    # Draws a simplified checkerboard preview.
+    # Draws the checkerboard preview using the calculated printable page layout.
+    #
+    # This uses the same paper size, orientation, inner corner count, square
+    # size, and board position settings that are used when generating the final
+    # printable checkerboard image.
     # -------------------------------------------------------------------------
 
     def _draw_checkerboard_preview(self, width, height):
 
-        # Convert inner corner count to printed square count.
-        rows = max(2, self.checkerboard_inner_rows.get() + 1)
-        columns = max(2, self.checkerboard_inner_columns.get() + 1)
+        # Calculate the checkerboard page and board settings from the current UI.
+        settings = self._get_checkerboard_board_settings()
 
-        # Calculate the preview square size.
-        square_size = min((width - 40) / columns, (height - 40) / rows)
+        # Get the calculated page size.
+        paper_width_mm = float(settings["paper_width_mm"])
+        paper_height_mm = float(settings["paper_height_mm"])
 
-        # Calculate the board origin.
-        x0 = (width - columns * square_size) / 2
-        y0 = (height - rows * square_size) / 2
+        # Get the calculated checkerboard square layout.
+        square_rows = int(settings["square_rows"])
+        square_columns = int(settings["square_columns"])
 
-        # Draw each checker square.
-        for row in range(rows):
-            for column in range(columns):
+        # Get the physical square size.
+        square_size_mm = float(settings["square_size_mm"])
 
-                # Alternate black and white squares.
-                fill = "black" if (row + column) % 2 == 0 else "white"
+        # Get the calculated checkerboard position on the page.
+        board_x_mm = float(settings["board_x_mm"])
+        board_y_mm = float(settings["board_y_mm"])
 
-                # Calculate this square position.
-                x1 = x0 + column * square_size
-                y1 = y0 + row * square_size
-                x2 = x1 + square_size
-                y2 = y1 + square_size
+        # Leave a small visual margin inside the preview canvas.
+        preview_margin_px = 10
 
-                # Draw this square.
-                self.preview_canvas.create_rectangle(x1, y1, x2, y2, fill=fill, outline="black")
+        # Calculate the scale needed to fit the full page into the preview.
+        scale = min(
+            (width - preview_margin_px * 2) / paper_width_mm,
+            (height - preview_margin_px * 2) / paper_height_mm,
+        )
+
+        # Calculate the preview page size.
+        page_width_px = paper_width_mm * scale
+        page_height_px = paper_height_mm * scale
+
+        # Center the page inside the preview canvas.
+        page_x0 = (width - page_width_px) / 2.0
+        page_y0 = (height - page_height_px) / 2.0
+        page_x1 = page_x0 + page_width_px
+        page_y1 = page_y0 + page_height_px
+
+        # Draw the white paper area.
+        self.preview_canvas.create_rectangle(
+            page_x0,
+            page_y0,
+            page_x1,
+            page_y1,
+            fill="white",
+            outline="#999999",
+        )
+
+        # Convert board position and square size to preview pixels.
+        board_x_px = page_x0 + board_x_mm * scale
+        board_y_px = page_y0 + board_y_mm * scale
+        square_size_px = square_size_mm * scale
+
+        # Draw each checkerboard square.
+        for row in range(square_rows):
+            for column in range(square_columns):
+
+                # Only draw black squares onto the white page.
+                if (row + column) % 2 == 0:
+
+                    # Calculate this square position.
+                    x1 = board_x_px + column * square_size_px
+                    y1 = board_y_px + row * square_size_px
+                    x2 = x1 + square_size_px
+                    y2 = y1 + square_size_px
+
+                    # Draw the black checker square.
+                    self.preview_canvas.create_rectangle(
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        fill="black",
+                        outline="black",
+                    )
+
+        # Build the small preview metadata line.
+        metadata_text = (
+            f"Inner corners: {settings['inner_columns']} x {settings['inner_rows']}  |  "
+            f"Square: {square_size_mm:.2f} mm"
+        )
+
+        # Draw the metadata preview near the bottom of the page.
+        self.preview_canvas.create_text(
+            page_x0 + 8,
+            page_y1 - 10,
+            text=metadata_text,
+            anchor="sw",
+            fill="black",
+            font=self.bold_font,
+        )
 
 
-    # -------------------------------------------------------------------------
-    # _draw_circle_grid_preview
-    #
-    # Draws a simplified circle grid preview.
-    # -------------------------------------------------------------------------
-
-    def _draw_circle_grid_preview(self, width, height):
-
-        # Get the circle grid dimensions.
-        rows = max(2, self.circle_grid_rows.get())
-        columns = max(2, self.circle_grid_columns.get())
-
-        # Calculate the preview spacing.
-        spacing = min((width - 60) / max(columns - 1, 1), (height - 60) / max(rows - 1, 1))
-
-        # Calculate the circle size.
-        radius = max(4, spacing * 0.22)
-
-        # Calculate the grid origin.
-        x0 = (width - (columns - 1) * spacing) / 2
-        y0 = (height - (rows - 1) * spacing) / 2
-
-        # Draw each circle.
-        for row in range(rows):
-            for column in range(columns):
-
-                # Offset every other row when using an asymmetric circle grid.
-                offset = spacing * 0.5 if self.circle_grid_layout.get() == "asymmetric" and row % 2 == 1 else 0
-
-                # Calculate this circle center.
-                cx = x0 + column * spacing + offset
-                cy = y0 + row * spacing
-
-                # Draw this circle.
-                self.preview_canvas.create_oval(
-                    cx - radius,
-                    cy - radius,
-                    cx + radius,
-                    cy + radius,
-                    fill="black",
-                    outline="black",
-                )
-
-
-        # -------------------------------------------------------------------------
+     # -------------------------------------------------------------------------
     # _draw_charuco_preview
     #
     # Draws the Charuco preview using OpenCV's real Charuco board generator.
@@ -988,22 +1057,30 @@ class PerformCalibrationWindow:
     # -------------------------------------------------------------------------
     # on_generate_printable_board
     #
-    # Handles printable board generation.
+    # Saves a printable calibration board file for the selected board type.
+    #
+    # Checkerboard and Charuco boards are generated as PNG images so the page
+    # layout, board graphics, and printed metadata can be rendered directly with
+    # OpenCV. Circle grid boards are still saved as SVG files because they are
+    # currently generated as simple geometric vector output.
     # -------------------------------------------------------------------------
 
     def on_generate_printable_board(self):
 
-        # Check whether the selected board type needs OpenCV raster generation.
-        is_charuco = self.board_type.get() == "charuco"
+        # Get the selected calibration board type.
+        board_type = self.board_type.get()
 
-        # Use PNG output for Charuco because OpenCV must generate the real ArUco markers.
-        default_extension = ".png" if is_charuco else ".svg"
+        # Check whether the selected board type uses OpenCV PNG output.
+        uses_png_output = board_type in ("checkerboard", "charuco")
+
+        # Use the correct default extension for the selected board type.
+        default_extension = ".png" if uses_png_output else ".svg"
 
         # Use matching file type options for the selected board type.
-        filetypes = [("PNG Files", "*.png"), ("All Files", "*.*")] if is_charuco else [("SVG Files", "*.svg"), ("All Files", "*.*")]
+        filetypes = [("PNG Files", "*.png"), ("All Files", "*.*")] if uses_png_output else [("SVG Files", "*.svg"), ("All Files", "*.*")]
 
         # Build a default filename that matches the selected output format.
-        initial_file = f"{self.board_type.get()}_calibration_board{default_extension}"
+        initial_file = f"{board_type}_calibration_board{default_extension}"
 
         # Ask the user where to save the printable board file.
         file_path = filedialog.asksaveasfilename(
@@ -1018,11 +1095,15 @@ class PerformCalibrationWindow:
         if not file_path:
             return
 
-        # Generate Charuco boards through OpenCV so the ArUco markers are real.
-        if is_charuco:
+        # Generate the checkerboard as a printable PNG image.
+        if board_type == "checkerboard":
+            self._save_checkerboard_board_png(file_path)
+
+        # Generate the Charuco board as a printable PNG image.
+        elif board_type == "charuco":
             self._save_charuco_board_png(file_path)
 
-        # Generate simple geometric boards as SVG files.
+        # Generate the circle grid as an SVG file.
         else:
             svg_text = self._build_board_svg()
 
@@ -1035,7 +1116,205 @@ class PerformCalibrationWindow:
 
         # Print the saved file path for early testing.
         print(f"Printable board saved: {file_path}")
+   
 
+     # -------------------------------------------------------------------------
+    # _save_checkerboard_board_png
+    #
+    # Generates a printable checkerboard calibration board and saves it as a PNG.
+    #
+    # This uses the calculated checkerboard page layout to draw the checkerboard
+    # on the selected paper size, add Sizeamatic Pro calibration metadata in the
+    # bottom margin, and write the printable image to disk.
+    # -------------------------------------------------------------------------
+
+    def _save_checkerboard_board_png(self, file_path):
+
+        # Calculate the checkerboard page and board settings from the current UI.
+        settings = self._get_checkerboard_board_settings()
+
+        # Get the detected inner corner dimensions.
+        inner_rows = int(settings["inner_rows"])
+        inner_columns = int(settings["inner_columns"])
+
+        # Get the printed checkerboard square dimensions.
+        square_rows = int(settings["square_rows"])
+        square_columns = int(settings["square_columns"])
+
+        # Get the physical size of one printed checker square.
+        square_size_mm = float(settings["square_size_mm"])
+
+        # Get the raster output scale.
+        pixels_per_mm = int(settings["pixels_per_mm"])
+
+        # Convert the selected paper size into output image pixels.
+        image_width_px = int(settings["paper_width_mm"] * pixels_per_mm)
+        image_height_px = int(settings["paper_height_mm"] * pixels_per_mm)
+
+        # Convert checkerboard position and square size into pixels.
+        board_x_px = int(settings["board_x_mm"] * pixels_per_mm)
+        board_y_px = int(settings["board_y_mm"] * pixels_per_mm)
+        square_size_px = int(square_size_mm * pixels_per_mm)
+
+        # Create a white printable page image.
+        board_image = np.full(
+            (image_height_px, image_width_px),
+            255,
+            dtype=np.uint8,
+        )
+
+        # Draw each checkerboard square.
+        for row in range(square_rows):
+            for column in range(square_columns):
+
+                # Only draw the black squares onto the white page.
+                if (row + column) % 2 == 0:
+
+                    # Calculate the top left corner of this square.
+                    x1 = board_x_px + column * square_size_px
+                    y1 = board_y_px + row * square_size_px
+
+                    # Calculate the bottom right corner of this square.
+                    x2 = x1 + square_size_px
+                    y2 = y1 + square_size_px
+
+                    # Draw the black checker square.
+                    cv2.rectangle(
+                        board_image,
+                        (x1, y1),
+                        (x2, y2),
+                        0,
+                        thickness=-1,
+                    )
+
+        # Build the first printed settings line.
+        settings_line_1 = (
+            "Sizeamatic Pro  |  OpenCV Checkerboard Calibration Board"
+        )
+
+        # Build the second printed settings line.
+        settings_line_2 = (
+            f"Paper: {self.checkerboard_paper_size.get()}  |  "
+            f"Orientation: {self.checkerboard_orientation.get()}  |  "
+            f"Inner corners: {inner_columns} x {inner_rows}  |  "
+            f"Printed squares: {square_columns} x {square_rows}  |  "
+            f"Square: {square_size_mm:.2f} mm"
+        )
+
+        # Set the text drawing scale.
+        text_scale = 0.6
+
+        # Set the text drawing thickness.
+        text_thickness = 1
+
+        # Set the left edge for the printed settings text.
+        text_x = int(settings["margin_mm"] * pixels_per_mm)
+
+        # Set the vertical positions inside the bottom page margin.
+        line_1_y = image_height_px - int(8.0 * pixels_per_mm)
+        line_2_y = image_height_px - int(4.0 * pixels_per_mm)
+
+        # Draw the title line into the bottom margin.
+        cv2.putText(
+            board_image,
+            settings_line_1,
+            (text_x, line_1_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            text_scale,
+            0,
+            text_thickness,
+            cv2.LINE_AA,
+        )
+
+        # Draw the OpenCV settings line into the bottom margin.
+        cv2.putText(
+            board_image,
+            settings_line_2,
+            (text_x, line_2_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            text_scale,
+            0,
+            text_thickness,
+            cv2.LINE_AA,
+        )
+
+        # Save the rendered checkerboard image.
+        cv2.imwrite(file_path, board_image)
+
+
+    # -------------------------------------------------------------------------
+    # _get_checkerboard_board_settings
+    #
+    # Calculates the printable checkerboard layout from the UI settings.
+    #
+    # This converts paper size, page orientation, inner corner count, and square
+    # size into the printed square count, board position, page size, print
+    # margin, and raster scale needed to generate the checkerboard image.
+    # -------------------------------------------------------------------------
+
+    def _get_checkerboard_board_settings(self):
+
+        # Define supported paper sizes in millimeters.
+        paper_sizes_mm = {
+            "Letter": (215.9, 279.4),
+            "A4": (210.0, 297.0),
+        }
+
+        # Get the selected paper size.
+        paper_size_name = self.checkerboard_paper_size.get()
+
+        # Fall back to Letter if Custom is selected before custom sizing exists.
+        if paper_size_name not in paper_sizes_mm:
+            paper_size_name = "Letter"
+
+        # Get the physical paper size in millimeters.
+        paper_width_mm, paper_height_mm = paper_sizes_mm[paper_size_name]
+
+        # Swap width and height when using landscape orientation.
+        if self.checkerboard_orientation.get() == "Landscape":
+            paper_width_mm, paper_height_mm = paper_height_mm, paper_width_mm
+
+        # Keep the board away from the page edge and leave room for metadata.
+        margin_mm = 15.0
+
+        # Get the detected inner corner dimensions from the UI.
+        inner_rows = int(self.checkerboard_inner_rows.get())
+        inner_columns = int(self.checkerboard_inner_columns.get())
+
+        # Convert detected inner corners to printed checkerboard square count.
+        square_rows = inner_rows + 1
+        square_columns = inner_columns + 1
+
+        # Get the physical size of one printed checker square.
+        square_size_mm = float(self.checkerboard_square_size_mm.get())
+
+        # Calculate the physical board dimensions.
+        board_width_mm = square_columns * square_size_mm
+        board_height_mm = square_rows * square_size_mm
+
+        # Center the checkerboard inside the printable page area.
+        board_x_mm = (paper_width_mm - board_width_mm) / 2.0
+        board_y_mm = (paper_height_mm - board_height_mm) / 2.0
+
+        # Use a fixed raster scale for the generated printable image.
+        pixels_per_mm = 10
+
+        # Return all values needed for checkerboard generation and calibration.
+        return {
+            "paper_width_mm": paper_width_mm,
+            "paper_height_mm": paper_height_mm,
+            "margin_mm": margin_mm,
+            "inner_rows": inner_rows,
+            "inner_columns": inner_columns,
+            "square_rows": square_rows,
+            "square_columns": square_columns,
+            "square_size_mm": square_size_mm,
+            "board_width_mm": board_width_mm,
+            "board_height_mm": board_height_mm,
+            "board_x_mm": board_x_mm,
+            "board_y_mm": board_y_mm,
+            "pixels_per_mm": pixels_per_mm,
+        }
 
      # -------------------------------------------------------------------------
     # _save_charuco_board_png
@@ -1132,12 +1411,14 @@ class PerformCalibrationWindow:
             "Sizeamatic Pro  |  OpenCV Charuco Calibration Board"
         )
 
-        # Build the second printed settings line.
+         # Build the second printed settings line.
         settings_line_2 = (
+            f"Paper: {self.charuco_paper_size.get()}  |  "
+            f"Orientation: {self.charuco_orientation.get()}  |  "
             f"Dictionary: {dictionary_name}  |  "
             f"Squares: {squares_x} x {squares_y}  |  "
-            f"Square size: {square_size_mm:.2f} mm  |  "
-            f"Marker size: {marker_size_mm:.2f} mm"
+            f"Square: {square_size_mm:.2f} mm  |  "
+            f"Marker: {marker_size_mm:.2f} mm"
         )
 
         # Set the text drawing scale.
