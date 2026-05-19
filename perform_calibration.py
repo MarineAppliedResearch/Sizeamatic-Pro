@@ -34,6 +34,15 @@ import cv2
 # Import NumPy  because OpenCV image buffers are NumPy arrays.
 import numpy as np
 
+# Work with calibration image folders and generated run folders.
+from pathlib import Path
+
+# Match left_xxxx and right_xxxx stereo calibration filenames.
+import re
+
+# Save readable calibration run metadata for reports and future debugging.
+import json
+
 
 # -----------------------------------------------------------------------------
 # ToolTip
@@ -451,7 +460,7 @@ class PerformCalibrationWindow:
         # Add the button for starting the calibration process.
         perform_calibration_button = ttk.Button(
             image_frame,
-            text="Sizeamatic Pro - Stereo Calibration",
+            text="Perform Stereo Calibration",
             command=self.on_run_calibration,
             style="Bold.TButton",
         )
@@ -1635,22 +1644,295 @@ class PerformCalibrationWindow:
     # -------------------------------------------------------------------------
     # on_run_calibration
     #
-    # Handles the Perform Calibration button.
+    # Processes the selected stereo calibration image folder.
+    #
+    # This creates a new calibration run folder, finds matching left and right
+    # stereo image pairs, processes each image with the selected OpenCV board
+    # detector, saves annotated detection images, updates the preview during the
+    # run, and writes a simple run summary file.
     # -------------------------------------------------------------------------
 
     def on_run_calibration(self):
 
-        # Print the current calibration settings for early testing.
-        print("Perform Calibration selected")
-        print(f"Board type: {self.board_type.get()}")
-        print(f"Image folder: {self.image_folder.get()}")
+        # Get the selected calibration image folder.
+        image_folder = self.image_folder.get()
 
-        # Show a temporary message until calibration processing is connected.
+        # Stop if the user has not selected an image folder yet.
+        if not image_folder:
+            messagebox.showwarning(
+                "No Image Folder",
+                "Please load a stereo calibration image folder first.",
+                parent=self.window,
+            )
+            return
+
+        
+
+        # Find matching left/right stereo image pairs.
+        stereo_pairs = self._find_stereo_calibration_pairs(image_folder)
+
+        # Stop if no matching stereo pairs were found.
+        if not stereo_pairs:
+            messagebox.showwarning(
+                "No Stereo Pairs Found",
+                (
+                    "No matching stereo calibration image pairs were found.\n\n"
+                    "Expected filenames look like:\n"
+                    "left_3133.jpg\n"
+                    "right_3133.jpg"
+                ),
+                parent=self.window,
+            )
+            return
+        
+        # Create a new output folder for this calibration run.
+        run_folder = self._create_calibration_run_folder(image_folder)
+
+        # Track how many individual images were processed.
+        processed_count = 0
+
+        # Track how many individual images had successful board detections.
+        detected_count = 0
+
+        # Track how many individual images failed detection or processing.
+        failed_count = 0
+
+        # Store per-image processing results for the summary file.
+        image_results = []
+
+        # Store one object point array for each usable stereo pair.
+        object_points_list = []
+
+        # Store detected left image points for each usable stereo pair.
+        left_image_points_list = []
+
+        # Store detected right image points for each usable stereo pair.
+        right_image_points_list = []
+
+        # Store the image size used by OpenCV calibration.
+        image_size = None
+
+        # Process each matched stereo pair in sorted order.
+        for pair in stereo_pairs:
+
+            # Process the left image for this stereo pair.
+            left_result = self._process_single_calibration_image(
+                pair["left_path"],
+                run_folder,
+            )
+
+            # Store the left image result.
+            image_results.append(("left", pair["frame_id"], left_result))
+
+            # Count the left image result.
+            processed_count += 1
+            detected_count += 1 if left_result["found"] else 0
+            failed_count += 0 if left_result["found"] else 1
+
+            # Process the right image for this stereo pair.
+            right_result = self._process_single_calibration_image(
+                pair["right_path"],
+                run_folder,
+            )
+
+            # Store the right image result.
+            image_results.append(("right", pair["frame_id"], right_result))
+
+            # Count the right image result.
+            processed_count += 1
+            detected_count += 1 if right_result["found"] else 0
+            failed_count += 0 if right_result["found"] else 1
+
+            # Use this stereo pair for checkerboard calibration only if both
+            # images had successful detections.
+            if (
+                self.board_type.get() == "checkerboard"
+                and left_result["found"]
+                and right_result["found"]
+            ):
+
+                # Store the image size from the first valid stereo pair.
+                if image_size is None:
+                    image_size = left_result["image_size"]
+
+                # Add one matching object point array for this stereo pair.
+                object_points_list.append(self._build_checkerboard_object_points())
+
+                # Add the left image points for this stereo pair.
+                left_image_points_list.append(left_result["corners"].astype(np.float32))
+
+                # Add the right image points for this stereo pair.
+                right_image_points_list.append(right_result["corners"].astype(np.float32))
+
+            # Use this stereo pair for Charuco calibration when enough matching
+            # Charuco corner IDs were detected in both images.
+            elif self.board_type.get() == "charuco":
+
+                # Build matched object and image points for this Charuco pair.
+                charuco_pair_points = self._build_charuco_stereo_points_for_pair(
+                    left_result,
+                    right_result,
+                )
+
+                # Store this pair only when enough shared Charuco corners exist.
+                if charuco_pair_points is not None:
+
+                    # Store the image size from the first valid stereo pair.
+                    if image_size is None:
+                        image_size = left_result["image_size"]
+
+                    # Add the matched object points for this stereo pair.
+                    object_points_list.append(charuco_pair_points["object_points"])
+
+                    # Add the matched left image points for this stereo pair.
+                    left_image_points_list.append(charuco_pair_points["left_image_points"])
+
+                    # Add the matched right image points for this stereo pair.
+                    right_image_points_list.append(charuco_pair_points["right_image_points"])
+   
+
+        # Store calibration result details if calibration succeeds.
+        calibration_result = None
+
+        # Store calibration error details if calibration fails.
+        calibration_error = None
+
+        # Run stereo calibration when enough valid stereo pairs were collected.
+        if self.board_type.get() in ("checkerboard", "charuco") and object_points_list:
+
+            # Try to run the OpenCV stereo calibration math.
+            try:
+
+                # Run OpenCV stereo calibration and save the expected calibration files.
+                calibration_result = self._run_stereo_calibration(
+                    object_points_list,
+                    left_image_points_list,
+                    right_image_points_list,
+                    image_size,
+                    run_folder,
+                )
+
+                # Save readable metadata for this completed calibration.
+                self._save_calibration_metadata(
+                    run_folder,
+                    image_folder,
+                    image_size,
+                    len(object_points_list),
+                    calibration_result,
+                )
+
+            # Keep the UI alive if OpenCV calibration fails.
+            except Exception as error:
+
+                # Store the calibration error so it can be written into the summary.
+                calibration_error = str(error)
+
+                # Leave calibration_result empty so the UI reports processing only.
+                calibration_result = None
+
+
+        # Build the path to the run summary file.
+        summary_path = run_folder / "calibration_run_summary.txt"
+
+        # Write a simple text summary of the processing run.
+        with open(summary_path, "w", encoding="utf-8") as summary_file:
+
+            # Write the run header.
+            summary_file.write("Sizeametic Pro Calibration Processing Run\n")
+            summary_file.write("========================================\n\n")
+
+            # Write the selected board type.
+            summary_file.write(f"Board type: {self.board_type.get()}\n")
+
+            # Write the selected board settings.
+            summary_file.write(f"Board settings: {self._get_board_settings_summary_text()}\n")
+
+            # Write the source image folder.
+            summary_file.write(f"Image folder: {image_folder}\n")
+
+            # Write the output run folder.
+            summary_file.write(f"Run folder: {run_folder}\n\n")
+
+            # Write the aggregate counts.
+            summary_file.write(f"Stereo pairs found: {len(stereo_pairs)}\n")
+            summary_file.write(f"Images processed: {processed_count}\n")
+            summary_file.write(f"Images detected: {detected_count}\n")
+            summary_file.write(f"Images failed: {failed_count}\n")
+            summary_file.write(f"Valid calibration pairs: {len(object_points_list)}\n\n")
+
+            # Write calibration RMS results when calibration was run.
+            if calibration_result is not None:
+                summary_file.write("Calibration results\n")
+                summary_file.write("-------------------\n")
+                summary_file.write(f"Valid stereo pairs: {calibration_result['valid_pair_count']}\n")
+                summary_file.write(f"Left RMS: {calibration_result['left_rms']}\n")
+                summary_file.write(f"Right RMS: {calibration_result['right_rms']}\n")
+                summary_file.write(f"Stereo RMS: {calibration_result['stereo_rms']}\n\n")
+
+            # Write calibration error details when calibration failed.
+            if calibration_error is not None:
+                summary_file.write("Calibration error\n")
+                summary_file.write("-----------------\n")
+                summary_file.write(f"{calibration_error}\n\n")
+
+            # Write the per-image results header.
+            summary_file.write("Per-image results\n")
+            summary_file.write("-----------------\n")
+
+            # Write each processed image result.
+            for side_name, frame_id, result in image_results:
+
+                # Build the detection status string.
+                status_text = "DETECTED" if result["found"] else "NOT DETECTED"
+
+                # Get the output path text.
+                output_path_text = str(result["output_path"]) if result["output_path"] else "None"
+
+                # Write this image result.
+                summary_file.write(
+                    f"{frame_id} | {side_name} | "
+                    f"{result['image_path'].name} | "
+                    f"{status_text} | "
+                    f"Points: {result['point_count']} | "
+                    f"Output: {output_path_text}\n"
+                )
+
+        # Build the completion message.
+        completion_message = (
+            f"Processed {processed_count} images.\n"
+            f"Detected boards in {detected_count} images.\n"
+            f"Failed detections: {failed_count}\n"
+            f"Valid calibration pairs: {len(object_points_list)}\n"
+        )
+
+        # Add calibration RMS values when calibration was run.
+        if calibration_result is not None:
+            completion_message += (
+                f"\nCalibration completed.\n"
+                f"Left RMS: {calibration_result['left_rms']:.4f}\n"
+                f"Right RMS: {calibration_result['right_rms']:.4f}\n"
+                f"Stereo RMS: {calibration_result['stereo_rms']:.4f}\n"
+            )
+
+        # Add calibration error details when image processing completed but calibration failed.
+        elif calibration_error is not None:
+            completion_message += (
+                "\nImage processing completed, but calibration failed.\n"
+                f"{calibration_error}\n"
+            )
+
+        # Add the output folder location.
+        completion_message += f"\nOutput folder:\n{run_folder}"
+
+        # Show the user where the processed images and calibration files were written.
         messagebox.showinfo(
-            "Perform Calibration",
-            "Calibration processing is not connected yet.",
+            "Calibration Processing Complete",
+            completion_message,
             parent=self.window,
         )
+
+        # Open the run folder so the user can inspect the processed images.
+        os.startfile(run_folder)
 
 
     # -------------------------------------------------------------------------
@@ -1764,7 +2046,1060 @@ class PerformCalibrationWindow:
             "marker_count": marker_count,
             "pixels_per_mm": pixels_per_mm,
         }
+    
 
+    # -------------------------------------------------------------------------
+    # _create_calibration_run_folder
+    #
+    # Creates a new output folder for one calibration processing run.
+    #
+    # This places each run inside the selected calibration image folder using a
+    # numbered run folder name, such as run_001, run_002, and run_003, so the
+    # processed detection images and run summary are kept separate from the raw
+    # calibration images.
+    # -------------------------------------------------------------------------
+
+    def _create_calibration_run_folder(self, image_folder):
+
+        # Convert the selected image folder into a Path object.
+        image_folder = Path(image_folder)
+
+        # Try numbered run folder names until an unused one is found.
+        for run_number in range(1, 1000):
+
+            # Build the candidate run folder path.
+            run_folder = image_folder / f"run_{run_number:03d}"
+
+            # Use the first run folder that does not already exist.
+            if not run_folder.exists():
+
+                # Create the run folder.
+                run_folder.mkdir(parents=True, exist_ok=False)
+
+                # Return the new run folder path.
+                return run_folder
+
+        # Stop if too many run folders already exist.
+        raise RuntimeError("Could not create a new calibration run folder.")
+    
+   
+    # -------------------------------------------------------------------------
+    # _find_stereo_calibration_pairs
+    #
+    # Finds matching left and right calibration images in a folder.
+    #
+    # This searches the selected image folder for files named like left_3133.jpg
+    # and right_3133.jpg, uses the shared numeric ID to match stereo pairs, and
+    # returns the matched image paths in sorted order for calibration processing.
+    # -------------------------------------------------------------------------
+
+    def _find_stereo_calibration_pairs(self, image_folder):
+
+        # Convert the selected image folder into a Path object.
+        image_folder = Path(image_folder)
+
+        # Accept common image file formats.
+        image_extensions = {
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".bmp",
+            ".tif",
+            ".tiff",
+        }
+
+        # Store left images by their shared stereo frame ID.
+        left_images = {}
+
+        # Store right images by their shared stereo frame ID.
+        right_images = {}
+
+        # Match filenames like left_3133.jpg or right_3133.png.
+        filename_pattern = re.compile(r"^(left|right)_(.+)$", re.IGNORECASE)
+
+        # Search every image file directly inside the selected folder.
+        for image_path in image_folder.iterdir():
+
+            # Skip folders and unsupported file types.
+            if not image_path.is_file() or image_path.suffix.lower() not in image_extensions:
+                continue
+
+            # Match the filename stem against the expected stereo naming pattern.
+            match = filename_pattern.match(image_path.stem)
+
+            # Skip files that do not look like left_xxxx or right_xxxx.
+            if not match:
+                continue
+
+            # Get the side name and shared stereo frame ID from the filename.
+            side_name = match.group(1).lower()
+            frame_id = match.group(2)
+
+            # Store left images by frame ID.
+            if side_name == "left":
+                left_images[frame_id] = image_path
+
+            # Store right images by frame ID.
+            elif side_name == "right":
+                right_images[frame_id] = image_path
+
+        # Find only frame IDs that exist on both the left and right side.
+        matched_frame_ids = sorted(set(left_images.keys()) & set(right_images.keys()))
+
+        # Build the matched stereo pair list.
+        stereo_pairs = [
+            {
+                "frame_id": frame_id,
+                "left_path": left_images[frame_id],
+                "right_path": right_images[frame_id],
+            }
+            for frame_id in matched_frame_ids
+        ]
+
+        # Return the matched stereo pairs.
+        return stereo_pairs
+    
+
+    # -------------------------------------------------------------------------
+    # _show_processed_image_preview
+    #
+    # Displays a processed OpenCV image in the board preview canvas.
+    #
+    # This takes an annotated OpenCV image, scales it to fit inside the preview
+    # canvas while preserving aspect ratio, converts it to a Tkinter image, and
+    # draws it in the same preview area used for calibration board previews.
+    # -------------------------------------------------------------------------
+
+    def _show_processed_image_preview(self, image):
+
+        # Stop if the preview canvas has not been created yet.
+        if not hasattr(self, "preview_canvas"):
+            return
+
+        # Clear the current preview canvas.
+        self.preview_canvas.delete("all")
+
+        # Get the current preview canvas size.
+        canvas_width = max(self.preview_canvas.winfo_width(), 300)
+        canvas_height = max(self.preview_canvas.winfo_height(), 260)
+
+        # Get the OpenCV image dimensions.
+        image_height, image_width = image.shape[:2]
+
+        # Stop if the image dimensions are invalid.
+        if image_width <= 0 or image_height <= 0:
+            return
+
+        # Leave a small visual margin inside the preview canvas.
+        preview_margin_px = 10
+
+        # Calculate the scale needed to fit the image inside the preview canvas.
+        scale = min(
+            (canvas_width - preview_margin_px * 2) / image_width,
+            (canvas_height - preview_margin_px * 2) / image_height,
+        )
+
+        # Calculate the displayed image size.
+        display_width = max(1, int(image_width * scale))
+        display_height = max(1, int(image_height * scale))
+
+        # Resize the processed image for preview display.
+        preview_image = cv2.resize(
+            image,
+            (display_width, display_height),
+            interpolation=cv2.INTER_AREA,
+        )
+
+        # Convert BGR OpenCV images to RGB for Tkinter display.
+        if len(preview_image.shape) == 3:
+            preview_image = cv2.cvtColor(preview_image, cv2.COLOR_BGR2RGB)
+
+        # Encode the resized image as PNG bytes.
+        success, png_buffer = cv2.imencode(".png", preview_image)
+
+        # Stop if OpenCV could not encode the preview image.
+        if not success:
+            return
+
+        # Convert the PNG bytes into base64 text for Tkinter PhotoImage.
+        png_base64 = base64.b64encode(png_buffer).decode("ascii")
+
+        # Store the image reference so Tkinter does not garbage collect it.
+        self.processed_preview_image = tk.PhotoImage(data=png_base64)
+
+        # Draw the processed image centered in the preview canvas.
+        self.preview_canvas.create_image(
+            canvas_width / 2,
+            canvas_height / 2,
+            image=self.processed_preview_image,
+            anchor="center",
+        )
+
+        # Let Tkinter update the preview during long processing runs.
+        self.window.update_idletasks()
+
+   
+    # -------------------------------------------------------------------------
+    # _draw_processed_image_text_line
+    #
+    # Draws one readable metadata line onto a processed calibration image.
+    #
+    # This adds outlined text to an OpenCV image so detection results, board
+    # settings, filenames, and image information remain readable over both dark
+    # and light image backgrounds.
+    # -------------------------------------------------------------------------
+
+    def _draw_processed_image_text_line(self, image, text, x, y):
+
+        # Draw a thick white outline behind the text for contrast.
+        cv2.putText(
+            image,
+            text,
+            (x, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (255, 255, 255),
+            4,
+            cv2.LINE_AA,
+        )
+
+        # Draw the black foreground text over the white outline.
+        cv2.putText(
+            image,
+            text,
+            (x, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (0, 0, 0),
+            1,
+            cv2.LINE_AA,
+        )
+
+
+    # -------------------------------------------------------------------------
+    # _get_board_settings_summary_text
+    #
+    # Builds a short settings summary for the selected calibration board type.
+    #
+    # This creates the board-specific metadata text that gets drawn onto
+    # processed calibration images, so saved detection images show which OpenCV
+    # settings were used for checkerboard, circle grid, or Charuco detection.
+    # -------------------------------------------------------------------------
+
+    def _get_board_settings_summary_text(self):
+
+        # Get the currently selected board type.
+        board_type = self.board_type.get()
+
+        # Build the checkerboard settings summary.
+        if board_type == "checkerboard":
+
+            # Calculate the current checkerboard settings.
+            settings = self._get_checkerboard_board_settings()
+
+            # Return the checkerboard settings in OpenCV pattern size order.
+            return (
+                f"Checkerboard | "
+                f"Inner corners: {settings['inner_columns']} x {settings['inner_rows']} | "
+                f"Square: {settings['square_size_mm']:.2f} mm | "
+                f"Paper: {self.checkerboard_paper_size.get()} | "
+                f"Orientation: {self.checkerboard_orientation.get()}"
+            )
+
+        # Build the circle grid settings summary.
+        if board_type == "circle_grid":
+
+            # Return the circle grid settings in OpenCV pattern size order.
+            return (
+                f"Circle Grid | "
+                f"Centers: {self.circle_grid_columns.get()} x {self.circle_grid_rows.get()} | "
+                f"Spacing: {self.circle_grid_spacing_mm.get():.2f} mm | "
+                f"Layout: {self.circle_grid_layout.get()} | "
+                f"Paper: {self.circle_grid_paper_size.get()} | "
+                f"Orientation: {self.circle_grid_orientation.get()}"
+            )
+
+        # Build the Charuco settings summary.
+        if board_type == "charuco":
+
+            # Calculate the current Charuco settings.
+            settings = self._get_charuco_board_settings()
+
+            # Return the Charuco settings in OpenCV board size order.
+            return (
+                f"Charuco | "
+                f"Squares: {settings['squares_x']} x {settings['squares_y']} | "
+                f"Square: {settings['square_size_mm']:.2f} mm | "
+                f"Marker: {settings['marker_size_mm']:.2f} mm | "
+                f"Dictionary: {settings['dictionary']} | "
+                f"Paper: {self.charuco_paper_size.get()} | "
+                f"Orientation: {self.charuco_orientation.get()}"
+            )
+
+        # Return a safe fallback for unknown board types.
+        return f"Board type: {board_type}"
+    
+
+    # -------------------------------------------------------------------------
+    # _detect_checkerboard
+    #
+    # Detects checkerboard inner corners in one calibration image.
+    #
+    # This uses the selected checkerboard settings to run OpenCV checkerboard
+    # detection, refines the detected corner locations when needed, draws the
+    # OpenCV corner overlay onto a copy of the image, and returns the detection
+    # result for later calibration processing.
+    # -------------------------------------------------------------------------
+
+    def _detect_checkerboard(self, image):
+
+        # Calculate the current checkerboard settings.
+        settings = self._get_checkerboard_board_settings()
+
+        # Build the OpenCV checkerboard pattern size in columns x rows order.
+        pattern_size = (
+            int(settings["inner_columns"]),
+            int(settings["inner_rows"]),
+        )
+
+        # Convert the input image to grayscale for checkerboard detection.
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        # Use the newer OpenCV checkerboard detector when available.
+        if hasattr(cv2, "findChessboardCornersSB"):
+
+            # Detect checkerboard corners with the more robust SB detector.
+            found, corners = cv2.findChessboardCornersSB(
+                gray,
+                pattern_size,
+                flags=cv2.CALIB_CB_NORMALIZE_IMAGE,
+            )
+
+        else:
+
+            # Detect checkerboard corners with the classic OpenCV detector.
+            found, corners = cv2.findChessboardCorners(
+                gray,
+                pattern_size,
+                flags=(
+                    cv2.CALIB_CB_ADAPTIVE_THRESH
+                    + cv2.CALIB_CB_NORMALIZE_IMAGE
+                    + cv2.CALIB_CB_FAST_CHECK
+                ),
+            )
+
+            # Refine classic detector corners to subpixel accuracy.
+            if found:
+                corners = cv2.cornerSubPix(
+                    gray,
+                    corners,
+                    winSize=(11, 11),
+                    zeroZone=(-1, -1),
+                    criteria=(
+                        cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
+                        30,
+                        0.001,
+                    ),
+                )
+
+        # Make a copy of the image so drawing does not modify the original.
+        annotated = image.copy()
+
+        # Draw the detected checkerboard corners when detection succeeds.
+        if found:
+            cv2.drawChessboardCorners(
+                annotated,
+                pattern_size,
+                corners,
+                found,
+            )
+
+        # Return the detection result and annotated image.
+        return {
+            "found": bool(found),
+            "corners": corners,
+            "annotated": annotated,
+            "point_count": len(corners) if found and corners is not None else 0,
+            "pattern_size": pattern_size,
+        }
+    
+
+    # -------------------------------------------------------------------------
+    # _detect_charuco
+    #
+    # Detects Charuco corners in one calibration image.
+    #
+    # This rebuilds the same OpenCV CharucoBoard described by the current UI
+    # settings, detects the ArUco markers and interpolated Charuco corners in the
+    # image, draws the detected marker and corner overlay, and returns the
+    # detected corner positions and IDs for later calibration processing.
+    # -------------------------------------------------------------------------
+
+    def _detect_charuco(self, image):
+
+        # Calculate the current Charuco board settings.
+        settings = self._get_charuco_board_settings()
+
+        # Map the UI dictionary names to OpenCV ArUco dictionary constants.
+        dictionary_map = {
+            "DICT_4X4_50": cv2.aruco.DICT_4X4_50,
+            "DICT_5X5_100": cv2.aruco.DICT_5X5_100,
+            "DICT_6X6_250": cv2.aruco.DICT_6X6_250,
+        }
+
+        # Get the selected dictionary name.
+        dictionary_name = settings["dictionary"]
+
+        # Make a copy of the image so drawing does not modify the original.
+        annotated = image.copy()
+
+        # Stop if the selected dictionary is not supported.
+        if dictionary_name not in dictionary_map:
+            return {
+                "found": False,
+                "corners": None,
+                "ids": None,
+                "annotated": annotated,
+                "point_count": 0,
+                "pattern_size": None,
+                "message": f"Unsupported ArUco dictionary: {dictionary_name}",
+            }
+
+        # Stop if the calculated board needs more marker IDs than the dictionary has.
+        if settings["marker_count"] > settings["dictionary_marker_limit"]:
+            return {
+                "found": False,
+                "corners": None,
+                "ids": None,
+                "annotated": annotated,
+                "point_count": 0,
+                "pattern_size": None,
+                "message": (
+                    f"{dictionary_name} is too small for this board. "
+                    f"Board needs {settings['marker_count']} markers, "
+                    f"dictionary has {settings['dictionary_marker_limit']}."
+                ),
+            }
+
+                # Get the calculated board dimensions.
+        squares_x = int(settings["squares_x"])
+        squares_y = int(settings["squares_y"])
+
+        # Stop if the marker is not smaller than the square.
+        if float(settings["marker_size_mm"]) >= float(settings["square_size_mm"]):
+            return {
+                "found": False,
+                "corners": None,
+                "ids": None,
+                "annotated": annotated,
+                "point_count": 0,
+                "pattern_size": None,
+                "message": "Charuco marker size must be smaller than square size.",
+            }
+
+        # Create the same OpenCV Charuco board used by printing and calibration.
+        board = self._build_charuco_board()
+
+        # Create the modern OpenCV Charuco detector.
+        detector = cv2.aruco.CharucoDetector(board)
+
+        # Detect ArUco marker corners and interpolated Charuco corners.
+        charuco_corners, charuco_ids, marker_corners, marker_ids = detector.detectBoard(image)
+
+        # Draw detected ArUco markers when any marker IDs were found.
+        if marker_ids is not None and len(marker_ids) > 0:
+            cv2.aruco.drawDetectedMarkers(
+                annotated,
+                marker_corners,
+                marker_ids,
+            )
+
+        # Count detected Charuco corners.
+        point_count = len(charuco_corners) if charuco_corners is not None else 0
+
+        # Treat the board as found when enough Charuco corners were detected.
+        found = charuco_ids is not None and point_count >= 4
+
+        # Draw detected Charuco corners when enough corners were found.
+        if found:
+            cv2.aruco.drawDetectedCornersCharuco(
+                annotated,
+                charuco_corners,
+                charuco_ids,
+            )
+
+        # Return the detection result and annotated image.
+        return {
+            "found": bool(found),
+            "corners": charuco_corners,
+            "ids": charuco_ids,
+            "marker_corners": marker_corners,
+            "marker_ids": marker_ids,
+            "annotated": annotated,
+            "point_count": point_count,
+            "pattern_size": (squares_x, squares_y),
+        }
+    
+
+    # -------------------------------------------------------------------------
+    # _detect_calibration_board
+    #
+    # Runs board detection for the selected calibration board type.
+    #
+    # This routes one OpenCV image through the checkerboard, circle grid, or
+    # Charuco detector based on the current UI selection, returning a common
+    # detection result format that the calibration processing loop can use for
+    # overlays, previews, saved images, and later calibration point collection.
+    # -------------------------------------------------------------------------
+
+    def _detect_calibration_board(self, image):
+
+        # Get the currently selected calibration board type.
+        board_type = self.board_type.get()
+
+        # Run checkerboard detection.
+        if board_type == "checkerboard":
+            return self._detect_checkerboard(image)
+
+        # Return a temporary circle grid result until circle grid detection is added.
+        if board_type == "circle_grid":
+
+            # Make a copy of the image so the caller always gets an annotated image.
+            annotated = image.copy()
+
+            # Return a consistent no detection result.
+            return {
+                "found": False,
+                "corners": None,
+                "annotated": annotated,
+                "point_count": 0,
+                "pattern_size": None,
+                "message": "Circle grid detection is not connected yet.",
+            }
+
+        # Run Charuco detection.
+        if board_type == "charuco":
+            return self._detect_charuco(image)
+
+        # Make a copy of the image so the caller always gets an annotated image.
+        annotated = image.copy()
+
+        # Return a safe fallback result for unknown board types.
+        return {
+            "found": False,
+            "corners": None,
+            "annotated": annotated,
+            "point_count": 0,
+            "pattern_size": None,
+            "message": f"Unknown board type: {board_type}",
+        }
+    
+
+    # -------------------------------------------------------------------------
+    # _process_single_calibration_image
+    #
+    # Processes one calibration image and saves an annotated output image.
+    #
+    # This loads a left or right calibration image, runs the selected OpenCV board
+    # detector, draws detection status and calibration settings onto the image,
+    # saves the annotated result into the current run folder, and displays the
+    # processed image in the preview canvas.
+    # -------------------------------------------------------------------------
+
+    def _process_single_calibration_image(self, image_path, output_folder):
+
+        # Convert the image path and output folder into Path objects.
+        image_path = Path(image_path)
+        output_folder = Path(output_folder)
+
+        # Load the calibration image.
+        image = cv2.imread(str(image_path))
+
+        # Return a failed result if OpenCV could not read the image.
+        if image is None:
+            return {
+                "image_path": image_path,
+                "output_path": None,
+                "found": False,
+                "corners": None,
+                "point_count": 0,
+                "error": "OpenCV could not read image.",
+            }
+
+        # Get useful image information for the status overlay.
+        height, width = image.shape[:2]
+
+        # Run the selected board detector.
+        result = self._detect_calibration_board(image)
+
+        # Get the annotated image returned by the detector.
+        annotated = result["annotated"]
+
+        # Mark failed detections clearly with a red border.
+        if not result["found"]:
+            cv2.rectangle(
+                annotated,
+                (0, 0),
+                (width - 1, height - 1),
+                (0, 0, 255),
+                6,
+            )
+
+        # Build the detection status text.
+        status_text = "DETECTED" if result["found"] else "NOT DETECTED"
+
+        # Get the number of detected points.
+        point_count = int(result.get("point_count", 0))
+
+        # Build the board settings text.
+        board_settings_text = self._get_board_settings_summary_text()
+
+        # Set the bottom text overlay position.
+        y0 = height - 82
+        line_gap = 24
+
+        # Draw OpenCV and application metadata.
+        self._draw_processed_image_text_line(
+            annotated,
+            f"Sizeamatic Pro | OpenCV {cv2.__version__}",
+            12,
+            y0,
+        )
+
+        # Draw the board settings metadata.
+        self._draw_processed_image_text_line(
+            annotated,
+            f"{board_settings_text} | Image: {width} x {height}",
+            12,
+            y0 + line_gap,
+        )
+
+        # Draw the filename and detection status metadata.
+        self._draw_processed_image_text_line(
+            annotated,
+            f"File: {image_path.name} | Detection: {status_text} | Points found: {point_count}",
+            12,
+            y0 + (line_gap * 2),
+        )
+
+        # Build the output filename.
+        output_path = output_folder / f"{image_path.stem}_processed{image_path.suffix}"
+
+        # Save the annotated image.
+        saved_ok = cv2.imwrite(str(output_path), annotated)
+
+        # Update the preview canvas with the processed image.
+        self._show_processed_image_preview(annotated)
+
+         # Return the processed image result.
+        return {
+            "image_path": image_path,
+            "output_path": output_path if saved_ok else None,
+            "found": bool(result["found"]),
+            "corners": result.get("corners"),
+            "ids": result.get("ids"),
+            "point_count": point_count,
+            "image_size": (width, height),
+            "error": None if saved_ok else "OpenCV could not save processed image.",
+        }
+
+
+    # -------------------------------------------------------------------------
+    # _build_checkerboard_object_points
+    #
+    # Builds the real-world checkerboard corner coordinates for calibration.
+    #
+    # This creates one 3D object point array for the selected checkerboard
+    # settings, using inner corner columns, inner corner rows, and square size.
+    # The board is treated as a flat Z=0 plane, which is what OpenCV expects for
+    # standard checkerboard camera calibration.
+    # -------------------------------------------------------------------------
+
+    def _build_checkerboard_object_points(self):
+
+        # Calculate the current checkerboard settings.
+        settings = self._get_checkerboard_board_settings()
+
+        # Get the checkerboard inner corner dimensions.
+        inner_columns = int(settings["inner_columns"])
+        inner_rows = int(settings["inner_rows"])
+
+        # Get the real-world square size in millimeters.
+        square_size_mm = float(settings["square_size_mm"])
+
+        # Create an empty object point array with one XYZ point per inner corner.
+        object_points = np.zeros(
+            (inner_rows * inner_columns, 3),
+            np.float32,
+        )
+
+        # Fill the X and Y coordinates in checkerboard order.
+        object_points[:, :2] = np.mgrid[
+            0:inner_columns,
+            0:inner_rows,
+        ].T.reshape(-1, 2)
+
+        # Scale the board coordinates into real-world millimeters.
+        object_points *= square_size_mm
+
+        # Return the object point array.
+        return object_points
+    
+
+    # -------------------------------------------------------------------------
+    # _run_stereo_calibration
+    #
+    # Runs OpenCV stereo calibration from collected checkerboard detections.
+    #
+    # This uses the matched object points, left image points, and right image
+    # points gathered from valid stereo image pairs to calculate camera
+    # intrinsics, stereo extrinsics, rectification transforms, and remap tables,
+    # then saves the four calibration files expected by the rest of the program.
+    # -------------------------------------------------------------------------
+
+    def _run_stereo_calibration(
+        self,
+        object_points_list,
+        left_image_points_list,
+        right_image_points_list,
+        image_size,
+        run_folder,
+    ):
+
+        # Stop if there are not enough valid stereo pairs for calibration.
+        if len(object_points_list) < 3:
+            raise ValueError(
+                "At least 3 valid stereo pairs are required for calibration."
+            )
+
+        # Convert the run folder into a Path object.
+        run_folder = Path(run_folder)
+
+        # Set OpenCV calibration termination criteria.
+        criteria = (
+            cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
+            100,
+            1e-5,
+        )
+
+        # Calibrate the left camera intrinsics.
+        left_rms, left_camera_matrix, left_dist_coeffs, left_rvecs, left_tvecs = cv2.calibrateCamera(
+            object_points_list,
+            left_image_points_list,
+            image_size,
+            None,
+            None,
+        )
+
+        # Calibrate the right camera intrinsics.
+        right_rms, right_camera_matrix, right_dist_coeffs, right_rvecs, right_tvecs = cv2.calibrateCamera(
+            object_points_list,
+            right_image_points_list,
+            image_size,
+            None,
+            None,
+        )
+
+        # Keep intrinsics mostly fixed while solving stereo relationship.
+        stereo_flags = cv2.CALIB_FIX_INTRINSIC
+
+        # Calibrate the stereo extrinsics between the left and right cameras.
+        stereo_rms, left_camera_matrix, left_dist_coeffs, right_camera_matrix, right_dist_coeffs, rotation, translation, essential_matrix, fundamental_matrix = cv2.stereoCalibrate(
+            object_points_list,
+            left_image_points_list,
+            right_image_points_list,
+            left_camera_matrix,
+            left_dist_coeffs,
+            right_camera_matrix,
+            right_dist_coeffs,
+            image_size,
+            criteria=criteria,
+            flags=stereo_flags,
+        )
+
+        # Calculate stereo rectification transforms and projection matrices.
+        left_rectification, right_rectification, left_projection, right_projection, disparity_to_depth, left_roi, right_roi = cv2.stereoRectify(
+            left_camera_matrix,
+            left_dist_coeffs,
+            right_camera_matrix,
+            right_dist_coeffs,
+            image_size,
+            rotation,
+            translation,
+            flags=cv2.CALIB_ZERO_DISPARITY,
+            alpha=0,
+        )
+
+        # Build the left image remap tables.
+        left_map_x, left_map_y = cv2.initUndistortRectifyMap(
+            left_camera_matrix,
+            left_dist_coeffs,
+            left_rectification,
+            left_projection,
+            image_size,
+            cv2.CV_32FC1,
+        )
+
+        # Build the right image remap tables.
+        right_map_x, right_map_y = cv2.initUndistortRectifyMap(
+            right_camera_matrix,
+            right_dist_coeffs,
+            right_rectification,
+            right_projection,
+            image_size,
+            cv2.CV_32FC1,
+        )
+
+        # Save camera intrinsics and distortion coefficients.
+        np.savez(
+            run_folder / "calibration_intrinsics.npz",
+
+            # Store the calibration image size in the format expected by the loader.
+            image_width=int(image_size[0]),
+            image_height=int(image_size[1]),
+
+            # Store left and right camera intrinsics in the format expected by the loader.
+            mtxL=left_camera_matrix,
+            distL=left_dist_coeffs,
+            mtxR=right_camera_matrix,
+            distR=right_dist_coeffs,
+
+            # Store calibration quality values for reference.
+            left_rms=left_rms,
+            right_rms=right_rms,
+
+            # Store per-camera pose estimates from individual calibration.
+            rvecsL=np.array(left_rvecs, dtype=object),
+            tvecsL=np.array(left_tvecs, dtype=object),
+            rvecsR=np.array(right_rvecs, dtype=object),
+            tvecsR=np.array(right_tvecs, dtype=object),
+        )
+
+        # Save stereo extrinsics in the format expected by the loader.
+        np.savez(
+            run_folder / "calibration_extrinsics.npz",
+            stereo_rms=stereo_rms,
+            R=rotation,
+            T=translation,
+            E=essential_matrix,
+            F=fundamental_matrix,
+        )
+
+        # Save stereo rectification data in the format expected by the loader.
+        np.savez(
+            run_folder / "calibration_rectification.npz",
+            RL=left_rectification,
+            RR=right_rectification,
+            PL=left_projection,
+            PR=right_projection,
+            Q=disparity_to_depth,
+            roiL=np.array(left_roi),
+            roiR=np.array(right_roi),
+        )
+
+        # Save rectification remap tables in the format expected by the loader.
+        np.savez(
+            run_folder / "calibration_maps.npz",
+            mapLx=left_map_x,
+            mapLy=left_map_y,
+            mapRx=right_map_x,
+            mapRy=right_map_y,
+        )
+
+        # Return calibration quality information for summaries and status messages.
+        return {
+            "left_rms": left_rms,
+            "right_rms": right_rms,
+            "stereo_rms": stereo_rms,
+            "valid_pair_count": len(object_points_list),
+        }
+    
+    # -------------------------------------------------------------------------
+    # _save_calibration_metadata
+    #
+    # Saves readable metadata for a completed calibration run.
+    #
+    # This writes the selected board type, board settings, image folder, output
+    # folder, valid pair count, image size, OpenCV version, and RMS results to a
+    # JSON file so the calibration can be reviewed later without opening the
+    # binary NumPy calibration files.
+    # -------------------------------------------------------------------------
+
+    def _save_calibration_metadata(
+        self,
+        run_folder,
+        image_folder,
+        image_size,
+        valid_pair_count,
+        calibration_result,
+    ):
+
+        # Convert the run folder into a Path object.
+        run_folder = Path(run_folder)
+
+        # Build the metadata dictionary.
+        metadata = {
+            "application": "Sizeamatic Pro",
+            "opencv_version": cv2.__version__,
+            "board_type": self.board_type.get(),
+            "board_settings": self._get_board_settings_summary_text(),
+            "image_folder": str(image_folder),
+            "run_folder": str(run_folder),
+            "image_width": int(image_size[0]) if image_size else None,
+            "image_height": int(image_size[1]) if image_size else None,
+            "valid_pair_count": int(valid_pair_count),
+            "left_rms": float(calibration_result["left_rms"]),
+            "right_rms": float(calibration_result["right_rms"]),
+            "stereo_rms": float(calibration_result["stereo_rms"]),
+        }
+
+        # Build the metadata output path.
+        metadata_path = run_folder / "calibration_metadata.json"
+
+        # Write the metadata file.
+        with open(metadata_path, "w", encoding="utf-8") as metadata_file:
+            json.dump(metadata, metadata_file, indent=2)
+
+        # Return the saved metadata path.
+        return metadata_path
+    
+    # -------------------------------------------------------------------------
+    # _build_charuco_board
+    #
+    # Builds the OpenCV CharucoBoard object described by the current UI settings.
+    #
+    # This recreates the same board used for printing and detection, using the
+    # selected square count, square size, marker size, and ArUco dictionary. The
+    # returned board is used to map detected Charuco corner IDs back to real
+    # world object points for camera calibration.
+    # -------------------------------------------------------------------------
+
+    def _build_charuco_board(self):
+
+        # Calculate the current Charuco board settings.
+        settings = self._get_charuco_board_settings()
+
+        # Map the UI dictionary names to OpenCV ArUco dictionary constants.
+        dictionary_map = {
+            "DICT_4X4_50": cv2.aruco.DICT_4X4_50,
+            "DICT_5X5_100": cv2.aruco.DICT_5X5_100,
+            "DICT_6X6_250": cv2.aruco.DICT_6X6_250,
+        }
+
+        # Get the selected dictionary name.
+        dictionary_name = settings["dictionary"]
+
+        # Stop if the selected dictionary is not supported.
+        if dictionary_name not in dictionary_map:
+            raise ValueError(f"Unsupported ArUco dictionary: {dictionary_name}")
+
+        # Get the OpenCV ArUco dictionary object.
+        aruco_dictionary = cv2.aruco.getPredefinedDictionary(
+            dictionary_map[dictionary_name]
+        )
+
+        # Create the OpenCV Charuco board object.
+        board = cv2.aruco.CharucoBoard(
+            (
+                int(settings["squares_x"]),
+                int(settings["squares_y"]),
+            ),
+            float(settings["square_size_mm"]),
+            float(settings["marker_size_mm"]),
+            aruco_dictionary,
+        )
+
+        # Return the board object.
+        return board
+    
+    # -------------------------------------------------------------------------
+    # _build_charuco_stereo_points_for_pair
+    #
+    # Builds matched object and image points for one Charuco stereo pair.
+    #
+    # This compares the detected Charuco corner IDs from the left and right
+    # images, keeps only IDs found in both images, and returns matching object
+    # points, left image points, and right image points in the same order for
+    # OpenCV stereo calibration.
+    # -------------------------------------------------------------------------
+
+    def _build_charuco_stereo_points_for_pair(self, left_result, right_result):
+
+        # Stop if either image failed Charuco detection.
+        if not left_result["found"] or not right_result["found"]:
+            return None
+
+        # Stop if either image has no Charuco corner IDs.
+        if left_result.get("ids") is None or right_result.get("ids") is None:
+            return None
+
+        # Get the detected Charuco corners and IDs.
+        left_corners = left_result["corners"]
+        left_ids = left_result["ids"].reshape(-1)
+
+        # Get the detected Charuco corners and IDs.
+        right_corners = right_result["corners"]
+        right_ids = right_result["ids"].reshape(-1)
+
+        # Build lookup tables from Charuco ID to detected corner.
+        left_corner_by_id = {
+            int(charuco_id): left_corners[index].reshape(2)
+            for index, charuco_id in enumerate(left_ids)
+        }
+
+        # Build lookup tables from Charuco ID to detected corner.
+        right_corner_by_id = {
+            int(charuco_id): right_corners[index].reshape(2)
+            for index, charuco_id in enumerate(right_ids)
+        }
+
+        # Find Charuco corner IDs detected in both left and right images.
+        shared_ids = sorted(set(left_corner_by_id.keys()) & set(right_corner_by_id.keys()))
+
+        # Stop if there are too few shared points to be useful.
+        if len(shared_ids) < 4:
+            return None
+
+        # Recreate the OpenCV Charuco board.
+        board = self._build_charuco_board()
+
+        # Get the real world chessboard corner coordinates from the Charuco board.
+        chessboard_corners = board.getChessboardCorners()
+
+        # Build object points for the shared Charuco IDs.
+        object_points = np.array(
+            [
+                chessboard_corners[charuco_id]
+                for charuco_id in shared_ids
+            ],
+            dtype=np.float32,
+        )
+
+        # Build left image points in the same ID order.
+        left_image_points = np.array(
+            [
+                left_corner_by_id[charuco_id]
+                for charuco_id in shared_ids
+            ],
+            dtype=np.float32,
+        ).reshape(-1, 1, 2)
+
+        # Build right image points in the same ID order.
+        right_image_points = np.array(
+            [
+                right_corner_by_id[charuco_id]
+                for charuco_id in shared_ids
+            ],
+            dtype=np.float32,
+        ).reshape(-1, 1, 2)
+
+        # Return the matched calibration points for this stereo pair.
+        return {
+            "object_points": object_points,
+            "left_image_points": left_image_points,
+            "right_image_points": right_image_points,
+            "shared_ids": shared_ids,
+        }
 
 # -----------------------------------------------------------------------------
 # open_perform_calibration_window

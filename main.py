@@ -1127,8 +1127,6 @@ class SizeamaticProApp:
         # Trigger redraw so rectified mode can be enabled immediately.
         self._render_current_frames()
 
-        # In real wiring, you will enable "Show Rectified" only after maps load.
-        # For now, we leave it togglable to test UI.
 
     # -------------------------------------------------------------------------
     # Stub handlers (view toggles)
