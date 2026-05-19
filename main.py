@@ -25,6 +25,15 @@ from perform_calibration import open_perform_calibration_window # An entire open
 import video_overlay # Manages drawing the overlay on the video
 import test_checkerboard_processing  # Runs checkerboard test scripts
 
+# Open generated HTML calibration reports in the user's default browser.
+import webbrowser
+
+# Generate HTML calibration reports from calibration output folders.
+from generate_calibration_report import generate_calibration_report
+
+# Work with calibration report paths.
+from pathlib import Path
+
 
 # -----------------------------------------------------------------------------
 # resource_path
@@ -853,15 +862,46 @@ class SizeamaticProApp:
         open_perform_calibration_window(self.root, app=self)
 
 
-    # -------------------------------------------------------------------------
+        # -------------------------------------------------------------------------
     # on_open_calibration_report
     #
-    # Handles the Calibration > Calibration Report menu command.
+    # Generates and opens a calibration report for the loaded calibration folder.
+    #
+    # This uses the current calibration folder selected in the main application,
+    # runs the HTML report generator against the calibration NPZ files in that
+    # folder, and opens the generated index.html file in the user's default
+    # browser.
     # -------------------------------------------------------------------------
 
     def on_open_calibration_report(self):
-        # Print a temporary message to confirm the menu callback is connected.
-        print("Calibration Report selected")
+
+        # Stop if no calibration folder has been loaded yet.
+        if not self.calibration_folder:
+            messagebox.showwarning(
+                "No Calibration Loaded",
+                "Please load a calibration folder before generating a report.",
+                parent=self.root,
+            )
+            return
+
+        # Generate the calibration report from the currently loaded calibration folder.
+        try:
+            report_paths = generate_calibration_report(
+                calib_dir=self.calibration_folder,
+                out_root=self.calibration_folder,
+            )
+
+        # Show the report generation error instead of crashing the application.
+        except Exception as error:
+            messagebox.showerror(
+                "Calibration Report Failed",
+                f"Could not generate calibration report:\n\n{error}",
+                parent=self.root,
+            )
+            return
+
+        # Open the generated report in the user's default browser.
+        webbrowser.open(Path(report_paths["index_html"]).resolve().as_uri())
        
 
     # -------------------------------------------------------------------------

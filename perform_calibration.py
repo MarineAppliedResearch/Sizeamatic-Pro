@@ -43,6 +43,18 @@ import re
 # Save readable calibration run metadata for reports and future debugging.
 import json
 
+# Run OpenCV calibration processing without blocking the Tkinter UI.
+import threading
+
+# Pass calibration progress messages safely from worker threads to the GUI.
+import queue
+
+# Generate the HTML calibration report after calibration succeeds.
+from generate_calibration_report import generate_calibration_report
+
+# Open generated HTML calibration reports in the user's default browser.
+import webbrowser
+
 
 # -----------------------------------------------------------------------------
 # ToolTip
@@ -1644,12 +1656,11 @@ class PerformCalibrationWindow:
     # -------------------------------------------------------------------------
     # on_run_calibration
     #
-    # Processes the selected stereo calibration image folder.
+    # Starts calibration processing on a background thread.
     #
-    # This creates a new calibration run folder, finds matching left and right
-    # stereo image pairs, processes each image with the selected OpenCV board
-    # detector, saves annotated detection images, updates the preview during the
-    # run, and writes a simple run summary file.
+    # This validates the selected image folder, creates a thread safe progress
+    # queue, starts the OpenCV calibration worker, and begins polling for preview
+    # images, completion messages, and errors from the GUI thread.
     # -------------------------------------------------------------------------
 
     def on_run_calibration(self):
@@ -1666,273 +1677,431 @@ class PerformCalibrationWindow:
             )
             return
 
-        
-
-        # Find matching left/right stereo image pairs.
-        stereo_pairs = self._find_stereo_calibration_pairs(image_folder)
-
-        # Stop if no matching stereo pairs were found.
-        if not stereo_pairs:
+        # Stop if a calibration worker is already running.
+        if (
+            hasattr(self, "calibration_worker_thread")
+            and self.calibration_worker_thread is not None
+            and self.calibration_worker_thread.is_alive()
+        ):
             messagebox.showwarning(
-                "No Stereo Pairs Found",
-                (
-                    "No matching stereo calibration image pairs were found.\n\n"
-                    "Expected filenames look like:\n"
-                    "left_3133.jpg\n"
-                    "right_3133.jpg"
-                ),
+                "Calibration Already Running",
+                "Calibration is already running.",
                 parent=self.window,
             )
             return
-        
-        # Create a new output folder for this calibration run.
-        run_folder = self._create_calibration_run_folder(image_folder)
 
-        # Track how many individual images were processed.
-        processed_count = 0
+        # Create a queue for worker thread messages.
+        self.calibration_progress_queue = queue.Queue()
 
-        # Track how many individual images had successful board detections.
-        detected_count = 0
+        # Create the background calibration worker thread.
+        self.calibration_worker_thread = threading.Thread(
+            target=self._run_calibration_worker,
+            args=(image_folder,),
+            daemon=True,
+        )
 
-        # Track how many individual images failed detection or processing.
-        failed_count = 0
+        # Start the background calibration worker.
+        self.calibration_worker_thread.start()
 
-        # Store per-image processing results for the summary file.
-        image_results = []
+        # Start polling worker progress from the Tkinter GUI thread.
+        self._poll_calibration_progress_queue()
 
-        # Store one object point array for each usable stereo pair.
-        object_points_list = []
 
-        # Store detected left image points for each usable stereo pair.
-        left_image_points_list = []
+    # -------------------------------------------------------------------------
+    # _poll_calibration_progress_queue
+    #
+    # Applies calibration worker updates from the Tkinter GUI thread.
+    #
+    # This polls the worker message queue for processed preview images, status
+    # messages, completion messages, and error messages. All Tkinter updates are
+    # handled here so the background OpenCV thread never touches GUI widgets
+    # directly.
+    # -------------------------------------------------------------------------
 
-        # Store detected right image points for each usable stereo pair.
-        right_image_points_list = []
+    def _poll_calibration_progress_queue(self):
 
-        # Store the image size used by OpenCV calibration.
-        image_size = None
+        # Process every message currently waiting in the queue.
+        while not self.calibration_progress_queue.empty():
 
-        # Process each matched stereo pair in sorted order.
-        for pair in stereo_pairs:
+            # Get the next worker message.
+            message = self.calibration_progress_queue.get()
 
-            # Process the left image for this stereo pair.
-            left_result = self._process_single_calibration_image(
-                pair["left_path"],
-                run_folder,
-            )
+            # Update the preview canvas with a processed calibration image.
+            if message["type"] == "preview":
+                self._show_processed_image_preview(message["image"])
 
-            # Store the left image result.
-            image_results.append(("left", pair["frame_id"], left_result))
+            # Update the window title with lightweight status text.
+            elif message["type"] == "status":
+                self.window.title(message["text"])
 
-            # Count the left image result.
-            processed_count += 1
-            detected_count += 1 if left_result["found"] else 0
-            failed_count += 0 if left_result["found"] else 1
-
-            # Process the right image for this stereo pair.
-            right_result = self._process_single_calibration_image(
-                pair["right_path"],
-                run_folder,
-            )
-
-            # Store the right image result.
-            image_results.append(("right", pair["frame_id"], right_result))
-
-            # Count the right image result.
-            processed_count += 1
-            detected_count += 1 if right_result["found"] else 0
-            failed_count += 0 if right_result["found"] else 1
-
-            # Use this stereo pair for checkerboard calibration only if both
-            # images had successful detections.
-            if (
-                self.board_type.get() == "checkerboard"
-                and left_result["found"]
-                and right_result["found"]
-            ):
-
-                # Store the image size from the first valid stereo pair.
-                if image_size is None:
-                    image_size = left_result["image_size"]
-
-                # Add one matching object point array for this stereo pair.
-                object_points_list.append(self._build_checkerboard_object_points())
-
-                # Add the left image points for this stereo pair.
-                left_image_points_list.append(left_result["corners"].astype(np.float32))
-
-                # Add the right image points for this stereo pair.
-                right_image_points_list.append(right_result["corners"].astype(np.float32))
-
-            # Use this stereo pair for Charuco calibration when enough matching
-            # Charuco corner IDs were detected in both images.
-            elif self.board_type.get() == "charuco":
-
-                # Build matched object and image points for this Charuco pair.
-                charuco_pair_points = self._build_charuco_stereo_points_for_pair(
-                    left_result,
-                    right_result,
+            elif message["type"] == "complete":
+                messagebox.showinfo(
+                    "Calibration Processing Complete",
+                    message["text"],
+                    parent=self.window,
                 )
 
-                # Store this pair only when enough shared Charuco corners exist.
-                if charuco_pair_points is not None:
+                # Open the generated calibration report when one was created.
+                if message.get("report_index_html"):
+                    webbrowser.open(Path(message["report_index_html"]).resolve().as_uri())
+
+                # Open the run folder so the user can inspect the results.
+                os.startfile(message["run_folder"])
+
+                # Restore the normal window title.
+                self.window.title("Perform Calibration")
+
+                # Stop polling after completion.
+                return
+
+            # Show worker errors without crashing the GUI.
+            elif message["type"] == "error":
+                messagebox.showerror(
+                    "Calibration Processing Failed",
+                    message["text"],
+                    parent=self.window,
+                )
+
+                # Restore the normal window title.
+                self.window.title("Perform Calibration")
+
+                # Stop polling after an unrecoverable worker error.
+                return
+
+        # Keep polling while the worker thread is still alive.
+        if (
+            hasattr(self, "calibration_worker_thread")
+            and self.calibration_worker_thread is not None
+            and self.calibration_worker_thread.is_alive()
+        ):
+            self.window.after(100, self._poll_calibration_progress_queue)
+
+        # Restore the normal title if the worker ended without sending a message.
+        else:
+            self.window.title("Perform Calibration")
+
+    # -------------------------------------------------------------------------
+    # _run_calibration_worker
+    #
+    # Processes calibration images and runs OpenCV calibration off the GUI thread.
+    #
+    # This finds stereo image pairs, creates a run folder, processes each left
+    # and right image, sends processed preview images back to the GUI through the
+    # progress queue, collects valid calibration points, runs stereo calibration,
+    # writes summary and metadata files, and sends a final completion or error
+    # message back to the Tkinter thread.
+    # -------------------------------------------------------------------------
+
+    def _run_calibration_worker(self, image_folder):
+
+        try:
+            # Find matching left/right stereo image pairs before creating output.
+            stereo_pairs = self._find_stereo_calibration_pairs(image_folder)
+
+            # Stop if no matching stereo pairs were found.
+            if not stereo_pairs:
+                self.calibration_progress_queue.put({
+                    "type": "error",
+                    "text": (
+                        "No matching stereo calibration image pairs were found.\n\n"
+                        "Expected filenames look like:\n"
+                        "left_3133.jpg\n"
+                        "right_3133.jpg"
+                    ),
+                })
+                return
+
+            # Create a new output folder for this calibration run.
+            run_folder = self._create_calibration_run_folder(image_folder)
+
+            # Tell the GUI that processing has started.
+            self.calibration_progress_queue.put({
+                "type": "status",
+                "text": "Perform Calibration - Processing Images",
+            })
+
+            # Track how many individual images were processed.
+            processed_count = 0
+
+            # Track how many individual images had successful board detections.
+            detected_count = 0
+
+            # Track how many individual images failed detection or processing.
+            failed_count = 0
+
+            # Store per-image processing results for the summary file.
+            image_results = []
+
+            # Store one object point array for each usable stereo pair.
+            object_points_list = []
+
+            # Store detected left image points for each usable stereo pair.
+            left_image_points_list = []
+
+            # Store detected right image points for each usable stereo pair.
+            right_image_points_list = []
+
+            # Store the image size used by OpenCV calibration.
+            image_size = None
+
+            # Store calibration result details if calibration succeeds.
+            calibration_result = None
+
+            # Store calibration error details if calibration fails.
+            calibration_error = None
+
+            # Process each matched stereo pair in sorted order.
+            for pair_index, pair in enumerate(stereo_pairs, start=1):
+
+                # Update the GUI status with the current pair number.
+                self.calibration_progress_queue.put({
+                    "type": "status",
+                    "text": f"Perform Calibration - Processing Pair {pair_index} of {len(stereo_pairs)}",
+                })
+
+                # Process the left image for this stereo pair.
+                left_result = self._process_single_calibration_image(
+                    pair["left_path"],
+                    run_folder,
+                )
+
+                # Store the left image result.
+                image_results.append(("left", pair["frame_id"], left_result))
+
+                # Count the left image result.
+                processed_count += 1
+                detected_count += 1 if left_result["found"] else 0
+                failed_count += 0 if left_result["found"] else 1
+
+                # Process the right image for this stereo pair.
+                right_result = self._process_single_calibration_image(
+                    pair["right_path"],
+                    run_folder,
+                )
+
+                # Store the right image result.
+                image_results.append(("right", pair["frame_id"], right_result))
+
+                # Count the right image result.
+                processed_count += 1
+                detected_count += 1 if right_result["found"] else 0
+                failed_count += 0 if right_result["found"] else 1
+
+                # Use this stereo pair for checkerboard calibration only if both
+                # images had successful detections.
+                if (
+                    self.board_type.get() == "checkerboard"
+                    and left_result["found"]
+                    and right_result["found"]
+                ):
 
                     # Store the image size from the first valid stereo pair.
                     if image_size is None:
                         image_size = left_result["image_size"]
 
-                    # Add the matched object points for this stereo pair.
-                    object_points_list.append(charuco_pair_points["object_points"])
+                    # Add one matching object point array for this stereo pair.
+                    object_points_list.append(self._build_checkerboard_object_points())
 
-                    # Add the matched left image points for this stereo pair.
-                    left_image_points_list.append(charuco_pair_points["left_image_points"])
+                    # Add the left image points for this stereo pair.
+                    left_image_points_list.append(left_result["corners"].astype(np.float32))
 
-                    # Add the matched right image points for this stereo pair.
-                    right_image_points_list.append(charuco_pair_points["right_image_points"])
-   
+                    # Add the right image points for this stereo pair.
+                    right_image_points_list.append(right_result["corners"].astype(np.float32))
 
-        # Store calibration result details if calibration succeeds.
-        calibration_result = None
+                # Use this stereo pair for Charuco calibration when enough matching
+                # Charuco corner IDs were detected in both images.
+                elif self.board_type.get() == "charuco":
 
-        # Store calibration error details if calibration fails.
-        calibration_error = None
+                    # Build matched object and image points for this Charuco pair.
+                    charuco_pair_points = self._build_charuco_stereo_points_for_pair(
+                        left_result,
+                        right_result,
+                    )
 
-        # Run stereo calibration when enough valid stereo pairs were collected.
-        if self.board_type.get() in ("checkerboard", "charuco") and object_points_list:
+                    # Store this pair only when enough shared Charuco corners exist.
+                    if charuco_pair_points is not None:
 
-            # Try to run the OpenCV stereo calibration math.
-            try:
+                        # Store the image size from the first valid stereo pair.
+                        if image_size is None:
+                            image_size = left_result["image_size"]
 
-                # Run OpenCV stereo calibration and save the expected calibration files.
-                calibration_result = self._run_stereo_calibration(
-                    object_points_list,
-                    left_image_points_list,
-                    right_image_points_list,
-                    image_size,
-                    run_folder,
-                )
+                        # Add the matched object points for this stereo pair.
+                        object_points_list.append(charuco_pair_points["object_points"])
 
-                # Save readable metadata for this completed calibration.
-                self._save_calibration_metadata(
-                    run_folder,
-                    image_folder,
-                    image_size,
-                    len(object_points_list),
-                    calibration_result,
-                )
+                        # Add the matched left image points for this stereo pair.
+                        left_image_points_list.append(charuco_pair_points["left_image_points"])
 
-            # Keep the UI alive if OpenCV calibration fails.
-            except Exception as error:
+                        # Add the matched right image points for this stereo pair.
+                        right_image_points_list.append(charuco_pair_points["right_image_points"])
 
-                # Store the calibration error so it can be written into the summary.
-                calibration_error = str(error)
+            # Run stereo calibration when enough valid stereo pairs were collected.
+            if self.board_type.get() in ("checkerboard", "charuco") and object_points_list:
 
-                # Leave calibration_result empty so the UI reports processing only.
-                calibration_result = None
+                # Tell the GUI that calibration math has started.
+                self.calibration_progress_queue.put({
+                    "type": "status",
+                    "text": "Perform Calibration - Running OpenCV Stereo Calibration",
+                })
 
+                # Try to run the OpenCV stereo calibration math.
+                try:
 
-        # Build the path to the run summary file.
-        summary_path = run_folder / "calibration_run_summary.txt"
+                    # Run OpenCV stereo calibration and save the expected calibration files.
+                    calibration_result = self._run_stereo_calibration(
+                        object_points_list,
+                        left_image_points_list,
+                        right_image_points_list,
+                        image_size,
+                        run_folder,
+                    )
 
-        # Write a simple text summary of the processing run.
-        with open(summary_path, "w", encoding="utf-8") as summary_file:
+                    # Save readable metadata for this completed calibration.
+                    self._save_calibration_metadata(
+                        run_folder,
+                        image_folder,
+                        image_size,
+                        len(object_points_list),
+                        calibration_result,
+                    )
 
-            # Write the run header.
-            summary_file.write("Sizeametic Pro Calibration Processing Run\n")
-            summary_file.write("========================================\n\n")
+                    # Generate the HTML calibration report for this run.
+                    report_paths = generate_calibration_report(
+                        calib_dir=run_folder,
+                        out_root=run_folder,
+                    )
 
-            # Write the selected board type.
-            summary_file.write(f"Board type: {self.board_type.get()}\n")
+                    # Store the generated report path in the calibration result.
+                    calibration_result["report_index_html"] = str(report_paths["index_html"])
 
-            # Write the selected board settings.
-            summary_file.write(f"Board settings: {self._get_board_settings_summary_text()}\n")
+                # Keep the worker alive if OpenCV calibration fails.
+                except Exception as error:
 
-            # Write the source image folder.
-            summary_file.write(f"Image folder: {image_folder}\n")
+                    # Store the calibration error so it can be written into the summary.
+                    calibration_error = str(error)
 
-            # Write the output run folder.
-            summary_file.write(f"Run folder: {run_folder}\n\n")
+                    # Leave calibration_result empty so the UI reports processing only.
+                    calibration_result = None
 
-            # Write the aggregate counts.
-            summary_file.write(f"Stereo pairs found: {len(stereo_pairs)}\n")
-            summary_file.write(f"Images processed: {processed_count}\n")
-            summary_file.write(f"Images detected: {detected_count}\n")
-            summary_file.write(f"Images failed: {failed_count}\n")
-            summary_file.write(f"Valid calibration pairs: {len(object_points_list)}\n\n")
+            # Build the path to the run summary file.
+            summary_path = run_folder / "calibration_run_summary.txt"
 
-            # Write calibration RMS results when calibration was run.
-            if calibration_result is not None:
-                summary_file.write("Calibration results\n")
-                summary_file.write("-------------------\n")
-                summary_file.write(f"Valid stereo pairs: {calibration_result['valid_pair_count']}\n")
-                summary_file.write(f"Left RMS: {calibration_result['left_rms']}\n")
-                summary_file.write(f"Right RMS: {calibration_result['right_rms']}\n")
-                summary_file.write(f"Stereo RMS: {calibration_result['stereo_rms']}\n\n")
+            # Write a simple text summary of the processing run.
+            with open(summary_path, "w", encoding="utf-8") as summary_file:
 
-            # Write calibration error details when calibration failed.
-            if calibration_error is not None:
-                summary_file.write("Calibration error\n")
+                # Write the run header.
+                summary_file.write("Sizeamatic Pro Calibration Processing Run\n")
+                summary_file.write("========================================\n\n")
+
+                # Write the selected board type.
+                summary_file.write(f"Board type: {self.board_type.get()}\n")
+
+                # Write the selected board settings.
+                summary_file.write(f"Board settings: {self._get_board_settings_summary_text()}\n")
+
+                # Write the source image folder.
+                summary_file.write(f"Image folder: {image_folder}\n")
+
+                # Write the output run folder.
+                summary_file.write(f"Run folder: {run_folder}\n\n")
+
+                # Write the aggregate counts.
+                summary_file.write(f"Stereo pairs found: {len(stereo_pairs)}\n")
+                summary_file.write(f"Images processed: {processed_count}\n")
+                summary_file.write(f"Images detected: {detected_count}\n")
+                summary_file.write(f"Images failed: {failed_count}\n")
+                summary_file.write(f"Valid calibration pairs: {len(object_points_list)}\n\n")
+
+                # Write calibration RMS results when calibration was run.
+                if calibration_result is not None:
+                    summary_file.write("Calibration results\n")
+                    summary_file.write("-------------------\n")
+                    summary_file.write(f"Valid stereo pairs: {calibration_result['valid_pair_count']}\n")
+                    summary_file.write(f"Left RMS: {calibration_result['left_rms']}\n")
+                    summary_file.write(f"Right RMS: {calibration_result['right_rms']}\n")
+                    summary_file.write(f"Stereo RMS: {calibration_result['stereo_rms']}\n\n")
+
+                    
+
+                # Write calibration error details when calibration failed.
+                if calibration_error is not None:
+                    summary_file.write("Calibration error\n")
+                    summary_file.write("-----------------\n")
+                    summary_file.write(f"{calibration_error}\n\n")
+
+                # Write the per-image results header.
+                summary_file.write("Per-image results\n")
                 summary_file.write("-----------------\n")
-                summary_file.write(f"{calibration_error}\n\n")
 
-            # Write the per-image results header.
-            summary_file.write("Per-image results\n")
-            summary_file.write("-----------------\n")
+                # Write each processed image result.
+                for side_name, frame_id, result in image_results:
 
-            # Write each processed image result.
-            for side_name, frame_id, result in image_results:
+                    # Build the detection status string.
+                    status_text = "DETECTED" if result["found"] else "NOT DETECTED"
 
-                # Build the detection status string.
-                status_text = "DETECTED" if result["found"] else "NOT DETECTED"
+                    # Get the output path text.
+                    output_path_text = str(result["output_path"]) if result["output_path"] else "None"
 
-                # Get the output path text.
-                output_path_text = str(result["output_path"]) if result["output_path"] else "None"
+                    # Write this image result.
+                    summary_file.write(
+                        f"{frame_id} | {side_name} | "
+                        f"{result['image_path'].name} | "
+                        f"{status_text} | "
+                        f"Points: {result['point_count']} | "
+                        f"Output: {output_path_text}\n"
+                    )
 
-                # Write this image result.
-                summary_file.write(
-                    f"{frame_id} | {side_name} | "
-                    f"{result['image_path'].name} | "
-                    f"{status_text} | "
-                    f"Points: {result['point_count']} | "
-                    f"Output: {output_path_text}\n"
+            # Build the completion message.
+            completion_message = (
+                f"Processed {processed_count} images.\n"
+                f"Detected boards in {detected_count} images.\n"
+                f"Failed detections: {failed_count}\n"
+                f"Valid calibration pairs: {len(object_points_list)}\n"
+            )
+
+            # Add calibration RMS values when calibration was run.
+            if calibration_result is not None:
+                completion_message += (
+                    f"\nCalibration completed.\n"
+                    f"Left RMS: {calibration_result['left_rms']:.4f}\n"
+                    f"Right RMS: {calibration_result['right_rms']:.4f}\n"
+                    f"Stereo RMS: {calibration_result['stereo_rms']:.4f}\n"
                 )
 
-        # Build the completion message.
-        completion_message = (
-            f"Processed {processed_count} images.\n"
-            f"Detected boards in {detected_count} images.\n"
-            f"Failed detections: {failed_count}\n"
-            f"Valid calibration pairs: {len(object_points_list)}\n"
-        )
+                # Add the generated report location when available.
+                if "report_index_html" in calibration_result:
+                    completion_message += (
+                        f"\nReport:\n{calibration_result['report_index_html']}\n"
+                    )
 
-        # Add calibration RMS values when calibration was run.
-        if calibration_result is not None:
-            completion_message += (
-                f"\nCalibration completed.\n"
-                f"Left RMS: {calibration_result['left_rms']:.4f}\n"
-                f"Right RMS: {calibration_result['right_rms']:.4f}\n"
-                f"Stereo RMS: {calibration_result['stereo_rms']:.4f}\n"
-            )
+            # Add calibration error details when image processing completed but calibration failed.
+            elif calibration_error is not None:
+                completion_message += (
+                    "\nImage processing completed, but calibration failed.\n"
+                    f"{calibration_error}\n"
+                )
 
-        # Add calibration error details when image processing completed but calibration failed.
-        elif calibration_error is not None:
-            completion_message += (
-                "\nImage processing completed, but calibration failed.\n"
-                f"{calibration_error}\n"
-            )
+            # Add the output folder location.
+            completion_message += f"\nOutput folder:\n{run_folder}"
 
-        # Add the output folder location.
-        completion_message += f"\nOutput folder:\n{run_folder}"
+            # Send the completion message back to the GUI thread.
+            self.calibration_progress_queue.put({
+                "type": "complete",
+                "text": completion_message,
+                "run_folder": str(run_folder),
+                "report_index_html": (
+                    calibration_result.get("report_index_html")
+                    if calibration_result is not None
+                    else None
+                ),
+            })
 
-        # Show the user where the processed images and calibration files were written.
-        messagebox.showinfo(
-            "Calibration Processing Complete",
-            completion_message,
-            parent=self.window,
-        )
+        except Exception as error:
 
-        # Open the run folder so the user can inspect the processed images.
-        os.startfile(run_folder)
+            # Send unrecoverable worker errors back to the GUI thread.
+            self.calibration_progress_queue.put({
+                "type": "error",
+                "text": str(error),
+            })
 
 
     # -------------------------------------------------------------------------
@@ -2688,8 +2857,16 @@ class PerformCalibrationWindow:
         # Save the annotated image.
         saved_ok = cv2.imwrite(str(output_path), annotated)
 
-        # Update the preview canvas with the processed image.
-        self._show_processed_image_preview(annotated)
+         # Send the processed image to the GUI thread when running in worker mode.
+        if hasattr(self, "calibration_progress_queue"):
+            self.calibration_progress_queue.put({
+                "type": "preview",
+                "image": annotated,
+            })
+
+        # Update the preview directly when no worker queue exists.
+        else:
+            self._show_processed_image_preview(annotated)
 
          # Return the processed image result.
         return {

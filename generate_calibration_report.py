@@ -35,6 +35,12 @@ import argparse
 from pathlib import Path
 
 import numpy as np
+
+# Use a noninteractive Matplotlib backend for report image generation.
+import matplotlib
+matplotlib.use("Agg")
+
+# Generate static calibration report plots.
 import matplotlib.pyplot as plt
 
 
@@ -1600,6 +1606,165 @@ def parse_thresholds_csv(text):
     return vals
 
 
+# -----------------------------------------------------------------------------
+# CalibrationReportOptions
+#
+# Stores report generation settings normally provided by command line arguments.
+#
+# This small options object lets the report generator be called from the
+# Sizeamatic Pro GUI without needing to fake command line arguments.
+# -----------------------------------------------------------------------------
+
+class CalibrationReportOptions:
+
+    # -------------------------------------------------------------------------
+    # __init__
+    #
+    # Initializes report generation settings.
+    # -------------------------------------------------------------------------
+
+    def __init__(
+        self,
+        calib_dir,
+        out_root=".",
+        mm_per_unit=1.0,
+        sigma_disp_px=0.25,
+        sigma_len_px=1.0,
+        example_length_mm=300.0,
+        depth_min_m=0.5,
+        depth_max_m=25.0,
+        depth_samples=250,
+        depth_band_thresholds="1,3,10",
+    ):
+
+        # Store the calibration folder containing the calibration NPZ files.
+        self.calib_dir = calib_dir
+
+        # Store the root folder where report folders will be created.
+        self.out_root = out_root
+
+        # Store the conversion from calibration units to millimeters.
+        self.mm_per_unit = mm_per_unit
+
+        # Store the assumed disparity uncertainty in pixels.
+        self.sigma_disp_px = sigma_disp_px
+
+        # Store the assumed endpoint picking uncertainty in pixels.
+        self.sigma_len_px = sigma_len_px
+
+        # Store the example measured object length in millimeters.
+        self.example_length_mm = example_length_mm
+
+        # Store the minimum depth used for report curves.
+        self.depth_min_m = depth_min_m
+
+        # Store the maximum depth used for report curves.
+        self.depth_max_m = depth_max_m
+
+        # Store the number of samples used for depth curves.
+        self.depth_samples = depth_samples
+
+        # Store parsed depth band thresholds.
+        self.depth_band_thresholds = parse_thresholds_csv(depth_band_thresholds)
+
+
+# -----------------------------------------------------------------------------
+# generate_calibration_report
+#
+# Generates the HTML calibration report from a calibration folder.
+#
+# This function performs the same report generation work as the command line
+# script: creates the report folder, copies calibration files, builds report
+# data, generates plots, writes report_data.json, writes the text report, and
+# writes index.html. It returns the generated report folder and HTML file path.
+# -----------------------------------------------------------------------------
+
+def generate_calibration_report(
+    calib_dir,
+    out_root=".",
+    mm_per_unit=1.0,
+    sigma_disp_px=0.25,
+    sigma_len_px=1.0,
+    example_length_mm=300.0,
+    depth_min_m=0.5,
+    depth_max_m=25.0,
+    depth_samples=250,
+    depth_band_thresholds="1,3,10",
+):
+
+    # Build an options object that matches the old argparse args structure.
+    args = CalibrationReportOptions(
+        calib_dir=calib_dir,
+        out_root=out_root,
+        mm_per_unit=mm_per_unit,
+        sigma_disp_px=sigma_disp_px,
+        sigma_len_px=sigma_len_px,
+        example_length_mm=example_length_mm,
+        depth_min_m=depth_min_m,
+        depth_max_m=depth_max_m,
+        depth_samples=depth_samples,
+        depth_band_thresholds=depth_band_thresholds,
+    )
+
+    # Create output folder structure.
+    report_dir, assets_dir = create_report_folder(args.out_root)
+
+    # Copy calibration files into assets.
+    copied_files = copy_calibration_files(args.calib_dir, assets_dir)
+
+    # Build report_data.json payload.
+    report_data, warp_pack = build_report_data(args.calib_dir, args, copied_files)
+
+    # Build the depth plot payload.
+    depth_pack_for_plot = {
+        "depth_m": np.array(report_data["depth_curves"]["depth_m"], dtype=np.float64),
+        "rel_sigma": np.array(report_data["depth_curves"]["rel_sigma_percent"], dtype=np.float64) / 100.0,
+        "sigma_z_m": np.array(report_data["depth_curves"]["sigma_z_m"], dtype=np.float64),
+        "disparity_px": np.array(report_data["depth_curves"]["disparity_px"], dtype=np.float64),
+    }
+
+    # Build the length plot payload.
+    length_pack_for_plot = {
+        "depth_m": np.array(report_data["length_curves"]["depth_m"], dtype=np.float64),
+        "mm_per_px": np.array(report_data["length_curves"]["mm_per_px"], dtype=np.float64),
+        "sigma_L_mm": np.array(report_data["length_curves"]["sigma_L_mm"], dtype=np.float64),
+        "percent_error_example": np.array(report_data["length_curves"]["percent_error_example"], dtype=np.float64),
+        "example_length_mm": float(report_data["length_curves"]["example_length_mm"]),
+    }
+
+    # Create figure list now that we know whether we have maps.
+    figures = build_figure_list(has_maps=(warp_pack is not None))
+
+    # Store the figure list in the report data.
+    report_data["figures"] = figures
+
+    # Generate static plot images.
+    generate_static_plots(
+        assets_dir,
+        depth_pack_for_plot,
+        length_pack_for_plot,
+        report_data["depth_bands"],
+        warp_pack,
+    )
+
+    # Write report_data.json.
+    write_json(assets_dir / "report_data.json", report_data)
+
+    # Write calibration_report.txt.
+    report_text = build_text_report(report_data)
+    write_text(report_dir / "calibration_report.txt", report_text)
+
+    # Write index.html.
+    html = build_html(report_data)
+    write_text(report_dir / "index.html", html)
+
+    # Return useful report paths to the caller.
+    return {
+        "report_dir": report_dir,
+        "assets_dir": assets_dir,
+        "index_html": report_dir / "index.html",
+        "report_text": report_dir / "calibration_report.txt",
+    }
 
 # Main entry point for the report generator
 def main():
@@ -1625,66 +1790,32 @@ def main():
     args = parser.parse_args()
 
     # Parse depth band thresholds
-    args.depth_band_thresholds = parse_thresholds_csv(args.depth_band_thresholds)
+    #args.depth_band_thresholds = parse_thresholds_csv(args.depth_band_thresholds)
 
-    # Create output folder structure
-    report_dir, assets_dir = create_report_folder(args.out_root)
-
-    # Copy calibration files into assets
-    copied_files = copy_calibration_files(args.calib_dir, assets_dir)
-
-    # Build report_data.json payload
-    report_data, warp_pack = build_report_data(args.calib_dir, args, copied_files)
-
-    # Generate static plots
-    depth_pack_for_plot = {
-        "depth_m": np.array(report_data["depth_curves"]["depth_m"], dtype=np.float64),
-        "rel_sigma": np.array(report_data["depth_curves"]["rel_sigma_percent"], dtype=np.float64) / 100.0,
-        "sigma_z_m": np.array(report_data["depth_curves"]["sigma_z_m"], dtype=np.float64),
-        "disparity_px": np.array(report_data["depth_curves"]["disparity_px"], dtype=np.float64),
-    }
-
-    length_pack_for_plot = {
-        "depth_m": np.array(report_data["length_curves"]["depth_m"], dtype=np.float64),
-        "mm_per_px": np.array(report_data["length_curves"]["mm_per_px"], dtype=np.float64),
-        "sigma_L_mm": np.array(report_data["length_curves"]["sigma_L_mm"], dtype=np.float64),
-        "percent_error_example": np.array(report_data["length_curves"]["percent_error_example"], dtype=np.float64),
-        "example_length_mm": float(report_data["length_curves"]["example_length_mm"]),
-    }
-
-    # Create figure list now that we know whether we have maps
-    figures = build_figure_list(has_maps=(warp_pack is not None))
-    report_data["figures"] = figures
-
-    generate_static_plots(
-        assets_dir,
-        depth_pack_for_plot,
-        length_pack_for_plot,
-        report_data["depth_bands"],
-        warp_pack
+     # Generate the report using the shared callable report function.
+    report_paths = generate_calibration_report(
+        calib_dir=args.calib_dir,
+        out_root=args.out_root,
+        mm_per_unit=args.mm_per_unit,
+        sigma_disp_px=args.sigma_disp_px,
+        sigma_len_px=args.sigma_len_px,
+        example_length_mm=args.example_length_mm,
+        depth_min_m=args.depth_min_m,
+        depth_max_m=args.depth_max_m,
+        depth_samples=args.depth_samples,
+        depth_band_thresholds=args.depth_band_thresholds,
     )
 
-    # Write report_data.json
-    write_json(assets_dir / "report_data.json", report_data)
-
-    # Write calibration_report.txt
-    report_text = build_text_report(report_data)
-    write_text(report_dir / "calibration_report.txt", report_text)
-
-    # Write index.html
-    html = build_html(report_data)
-    write_text(report_dir / "index.html", html)
-
-    # Show final location
+    # Show final location.
     print("Report generated at:")
-    print(f"  {report_dir.resolve()}")
+    print(f"  {report_paths['report_dir'].resolve()}")
     print("")
     print("Open:")
-    print(f"  {report_dir.resolve() / 'index.html'}")
+    print(f"  {report_paths['index_html'].resolve()}")
     print("")
     print("Optional:")
     print("  If you want fully offline interactive charts, place Chart.js at:")
-    print(f"    {assets_dir.resolve() / 'chart.umd.min.js'}")
+    print(f"    {report_paths['assets_dir'].resolve() / 'chart.umd.min.js'}")
 
 
 if __name__ == "__main__":
