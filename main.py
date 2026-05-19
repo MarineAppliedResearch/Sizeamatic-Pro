@@ -3,6 +3,8 @@
 
 
 import os
+import sys # Used for icon resources
+
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -12,12 +14,41 @@ import base64
 import numpy as np
 import math
 
+import ctypes # For App Model ID
+
 # Local Imports
 import stereo_matching
 import measurement_window  # measurement_window contains the Tkinter measurement results window and update helpers.
 import anaglyph_preview    # Manages the anaglyph_preview functionality
 import calibration_summary # calibration_summary contains the Tkinter calibration summary window and update helpers.
 import video_overlay # Manages drawing the overlay on the video
+
+
+# -----------------------------------------------------------------------------
+# resource_path
+#
+# Gets the correct path to a bundled resource file.
+#
+# When running normally, this returns a path relative to the source folder.
+# When running from PyInstaller, this returns a path inside the bundled app.
+#
+# Parameters:
+#   relative_path:
+#     The file path relative to the project root.
+#
+# Returns:
+#   The absolute path to the requested resource.
+# -----------------------------------------------------------------------------
+def resource_path(relative_path):
+
+    # PyInstaller stores bundled files in a temporary/internal folder exposed here.
+    if hasattr(sys, "_MEIPASS"):
+
+        # Build the path to the bundled resource.
+        return os.path.join(sys._MEIPASS, relative_path)
+
+    # Otherwise, build the path from the normal source directory.
+    return os.path.join(os.path.abspath("."), relative_path)
 
 
 class SizeamaticProApp:
@@ -614,8 +645,6 @@ class SizeamaticProApp:
 
 
     
-
-
 
 
 
@@ -1889,7 +1918,19 @@ class SizeamaticProApp:
 
 
 def main():
+
+    # Set the Windows taskbar application identity.
+    if sys.platform == "win32":
+
+        # Use a stable unique ID for Windows taskbar grouping.
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "SizeamaticPro.SizeamaticPro.App"
+        )
+        
     root = tk.Tk()
+
+    # Set the application window icon.
+    root.iconbitmap(resource_path("assets/icon.ico"))
 
     # ttk theme defaults are OK. If you want a darker theme later, we can style it.
     app = SizeamaticProApp(root)

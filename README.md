@@ -95,3 +95,10 @@ for node in tree.body:
             if isinstance(item, ast.FunctionDef):
                 print(f"    def {item.name}(...):")
 '@ | python
+
+
+
+'''
+building:
+
+pyinstaller --onedir --windowed --name Sizeamatic-Pro --icon assets/icon.ico --add-data "assets/icon.ico;assets" main.py
