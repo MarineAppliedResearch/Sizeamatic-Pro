@@ -21,7 +21,9 @@ import stereo_matching
 import measurement_window  # measurement_window contains the Tkinter measurement results window and update helpers.
 import anaglyph_preview    # Manages the anaglyph_preview functionality
 import calibration_summary # calibration_summary contains the Tkinter calibration summary window and update helpers.
+from perform_calibration import open_perform_calibration_window # An entire open cv calibration work flow in an window
 import video_overlay # Manages drawing the overlay on the video
+import test_checkerboard_processing  # Runs checkerboard test scripts
 
 
 # -----------------------------------------------------------------------------
@@ -614,6 +616,12 @@ class SizeamaticProApp:
             command=self.on_open_calibration_report,
         )
 
+         # Add a command for generating or opening the calibration report.
+        calibration_menu.add_command(
+            label="Calibration Test 1",
+           command=lambda:test_checkerboard_processing.test_process_checkerboard_folder(self.root)
+        )
+
         # Attach the Calibration dropdown to the main menu bar.
         menubar.add_cascade(label="Calibration", menu=calibration_menu)
 
@@ -840,8 +848,9 @@ class SizeamaticProApp:
     # -------------------------------------------------------------------------
 
     def on_perform_calibration(self):
-        # Print a temporary message to confirm the menu callback is connected.
-        print("Perform Calibration selected")
+
+        # Open the calibration workflow window.
+        open_perform_calibration_window(self.root, app=self)
 
 
     # -------------------------------------------------------------------------
@@ -1992,6 +2001,10 @@ class SizeamaticProApp:
 
 
 def main():
+
+    print("SizeaMatic Pro")
+    print(cv2.__version__)
+    print(hasattr(cv2, "aruco"))
 
     # Set the Windows taskbar application identity.
     if sys.platform == "win32":
