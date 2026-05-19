@@ -1,3 +1,60 @@
+# -----------------------------------------------------------------------------
+# calibration_summary.py
+#
+# Author: Isaac Travers
+# Created: 2026-05-18
+# Project: Sizeamatic Pro
+#
+# Purpose:
+#   Provides the calibration summary window for Sizeamatic Pro.
+#
+#   This module creates and updates a Tkinter summary window for loaded stereo
+#   calibration data. The summary is intended to help users inspect important
+#   calibration values, identify obvious calibration problems, and copy useful
+#   diagnostics into notes, reports, or spreadsheets.
+#
+# Contents:
+#   - Calibration summary window creation.
+#   - Calibration summary table management.
+#   - Copyable calibration summary text generation.
+#   - Baseline and stereo translation display.
+#   - Relative rotation angle and axis display.
+#   - Intrinsic camera parameter display.
+#   - Field of view estimates.
+#   - Distortion coefficient display.
+#   - Rectification projection and ROI display.
+#   - Rectification map out of bounds checks.
+#   - Basic calibration warning checks.
+#
+# Design Notes:
+#   The calibration summary window state is stored in this module instead of on
+#   the main application object. This keeps the summary window widgets grouped
+#   with the code that creates and updates them.
+#
+#   Functions in this module receive the main application object when they need
+#   access to the currently loaded calibration dictionary or the Tkinter root
+#   window. This module does not load calibration files and does not perform
+#   stereo calibration.
+#
+# Assumptions:
+#   - The main application stores the loaded calibration dictionary as app.cal.
+#   - The calibration dictionary contains the camera matrices, distortion
+#     coefficients, stereo transform, rectification matrices, projection
+#     matrices, and remap arrays expected by the summary functions.
+#   - Calibration translation units determine the baseline units. In this
+#     application, those units are normally millimeters.
+#   - Warning checks in this file are simple diagnostic checks, not a complete
+#     validation of calibration quality.
+#
+# Dependencies:
+#   - math is used for angle and field of view calculations.
+#   - tkinter provides the calibration summary Toplevel window and text widget.
+#   - tkinter.ttk provides themed frames, labels, and Treeview tables.
+#   - OpenCV is used to convert rotation matrices into Rodrigues vector form.
+#   - NumPy is used for calibration matrices, vectors, norms, and remap checks.
+# -----------------------------------------------------------------------------
+
+
 # Standard library imports.
 
 # math is used for angle and field of view calculations.
@@ -28,6 +85,7 @@ cal_tree = None
 
 # Stores the copyable calibration summary Text widget.
 cal_copy_text = None
+
 
 # -----------------------------------------------------------------------------
 # ensure_calibration_window

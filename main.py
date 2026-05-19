@@ -17,6 +17,7 @@ import stereo_matching
 import measurement_window  # measurement_window contains the Tkinter measurement results window and update helpers.
 import anaglyph_preview    # Manages the anaglyph_preview functionality
 import calibration_summary # calibration_summary contains the Tkinter calibration summary window and update helpers.
+import video_overlay # Manages drawing the overlay on the video
 
 
 class SizeamaticProApp:
@@ -26,7 +27,6 @@ class SizeamaticProApp:
 
     def __init__(self, root):
         self.root = root
-
 
         # ---- Window setup ----
         self.root.title("Sizeamatic Pro")
@@ -192,79 +192,11 @@ class SizeamaticProApp:
         calibration_summary.update_calibration_window(self)
 
 
-    # Redraws overlay items for both panes.
-    # For now, this draws a single test handle and label in each pane.
-    def _redraw_overlays(self):
-        # Draw left overlay.
-        self._draw_overlay_for_pane("L", self.left_overlay_canvas, self.ptsL)
 
-        # Draw right overlay.
-        self._draw_overlay_for_pane("R", self.right_overlay_canvas, self.ptsR)
-
-    # Draws handles, labels, and connecting segments for one pane.
-    # Points are stored in IMAGE pixel coordinates and mapped to SCREEN coords using the same scale as the video.
-    def _draw_overlay_for_pane(self, which, canvas, pts):
-        # Clear only overlay items so the video frame stays intact.
-        canvas.delete("overlay")
-
-        # Compute image->screen scale so overlay tracks the displayed video.
-        scale = self._get_pane_scale(which, canvas)
-
-        # Draw line segments first so handles sit on top.
-        # For N points, draw segments (0-1), (1-2), ...
-        if len(pts) >= 2:
-            for i in range(1, len(pts)):
-                x0, y0 = pts[i - 1]
-                x1, y1 = pts[i]
-
-                sx0, sy0 = self._image_to_screen(which, canvas, x0, y0)
-                sx1, sy1 = self._image_to_screen(which, canvas, x1, y1)
-
-                canvas.create_line(
-                    sx0,
-                    sy0,
-                    sx1,
-                    sy1,
-                    width=2,
-                    fill="#00ff66",
-                    tags=("overlay",),
-                )
-
-        # Draw handles and index labels.
-        r = int(self.handle_radius_px)
-
-        for i, (x, y) in enumerate(pts):
-
-            # Translate to screen coordinates
-            sx, sy = self._image_to_screen(which, canvas, x, y)
-
-            # Handle oval:
-            # Tag it as "handle" so _get_handle_index_under_cursor can recognize it.
-            # Tag idx:<n> so we can identify which point index was clicked.
-            canvas.create_oval(
-                sx - r,
-                sy - r,
-                sx + r,
-                sy + r,
-                outline="#00ff66",
-                width=2,
-                fill="",
-                tags=("overlay", "handle", f"idx:{i}"),
-            )
-
-            # Index label near the handle.
-            canvas.create_text(
-                sx + r + 6,
-                sy - r - 6,
-                text=str(i),
-                fill="#00ff66",
-                font=("Segoe UI", 11, "bold"),
-                tags=("overlay",),
-            )
 
         # Mouse wheel zoom for a pane, anchored under the cursor.
     def on_mouse_wheel(self, which, event):
-        canvas = self.left_overlay_canvas if which == "L" else self.right_overlay_canvas
+        canvas = video_overlay.left_overlay_canvas if which == "L" else video_overlay.right_overlay_canvas
 
         # Require metadata so we know how to map coords.
         if self._get_image_size(which) is None:
@@ -424,287 +356,10 @@ class SizeamaticProApp:
         iy = (float(sy) - float(dy) - float(view["off_y"])) / S
         return ix, iy
 
-    """ # Converts screen coordinates (canvas pixels) to image pixel coordinates.
-    # This must invert the same scale used to draw the video and overlays.
-    def _screen_to_image(self, which, canvas, sx, sy):
-        # Scale maps image->screen. We invert it to map screen->image.
-        scale = self._get_pane_scale(which, canvas)
 
-        # Guard against divide by zero.
-        if scale <= 0.0:
-            scale = 1.0
-
-        # Convert to image pixel coords.
-        ix = float(sx) / scale
-        iy = float(sy) / scale
-
-        return ix, iy """
-
-    # Returns the point list for a pane.
-    def _get_points_list(self, which):
-        if which == "L":
-            return self.ptsL
-        return self.ptsR
     
-    # Attempts to extract a handle index from the canvas item under the cursor.
-    # Returns an integer index if the current item is a handle, else returns None.
-    def _get_handle_index_under_cursor(self, canvas):
-        # "current" is the canvas item under the mouse pointer at event time.
-        items = canvas.find_withtag("current")
-        if not items:
-            return None
-
-        item_id = items[0]
-
-        # Read the item's tags and look for the "handle" marker and an "idx:<n>" tag.
-        tags = canvas.gettags(item_id)
-
-        # Only treat this as a draggable point if it is tagged as a handle.
-        if "handle" not in tags:
-            return None
-
-        # Parse an index tag formatted like "idx:0", "idx:1", etc.
-        for t in tags:
-            if t.startswith("idx:"):
-                try:
-                    return int(t.split(":", 1)[1])
-                except ValueError:
-                    return None
-
-        return None
-
-     # Finds the nearest handle to a screen-space click in the given pane.
-    # Returns the point index if the click is close enough to a handle, else None.
-    def _get_nearest_handle_index(self, which, canvas, sx, sy):
-        # Read the point list for this pane.
-        pts = self._get_points_list(which)
-        if not pts:
-            return None
-
-        # Use a slightly generous hit radius so handles are easy to grab.
-        hit_r = float(self.handle_radius_px) * 2.0
-        hit_r2 = hit_r * hit_r
-
-        best_idx = None
-        best_d2 = None
-
-        # Compare the click against each handle center in screen coordinates.
-        for i, (ix, iy) in enumerate(pts):
-            hx, hy = self._image_to_screen(which, canvas, ix, iy)
-
-            dx = float(sx) - float(hx)
-            dy = float(sy) - float(hy)
-            d2 = dx * dx + dy * dy
-
-            # Keep the closest handle that falls inside the hit radius.
-            if d2 <= hit_r2:
-                if best_d2 is None or d2 < best_d2:
-                    best_idx = i
-                    best_d2 = d2
-
-        return best_idx
-    
-    # Left mouse button pressed on overlay.
-    def on_overlay_left_down(self, which, event):
-        # Choose the correct overlay canvas for this pane.
-        canvas = self.left_overlay_canvas if which == "L" else self.right_overlay_canvas
-
-        # First try the exact canvas-item hit test under the cursor.
-        idx = self._get_handle_index_under_cursor(canvas)
-
-        # If that fails, fall back to a nearest-handle search in screen space.
-        # This makes points easier to grab even if the user misses the oval outline.
-        if idx is None:
-            idx = self._get_nearest_handle_index(which, canvas, event.x, event.y)
-
-        # If we found a handle by either method, begin dragging it.
-        if idx is not None:
-            self.drag_active = True
-            self.drag_which = which
-            self.drag_index = idx
-            return
-
-        # Otherwise, treat this as a "place a new point" click.
-        pts = self._get_points_list(which)
-
-        # If we are already at the point cap, ignore clicks on empty space.
-        # This is important because later we will raise the cap for curves.
-        if len(pts) >= int(self.max_points_per_pane):
-            return
-
-        # Convert the click from screen coords to image coords.
-        ix, iy = self._screen_to_image(which, canvas, event.x, event.y)
-
-        # Record the new point on the pane the user clicked.
-        pts.append((ix, iy))
-
-        # If the opposite pane does not yet have this index, try to auto-create the mate.
-        # This lets the user click one side first, then get an initial correspondence guess
-        # on the other side instead of solving disparity entirely by hand.
-        new_idx = len(pts) - 1
-
-        # Select the opposite pane's point list.
-        other_which = "R" if which == "L" else "L"
-        other_pts = self._get_points_list(other_which)
-
-        # Only auto-create a mate if the opposite pane does not already have one.
-        if new_idx >= len(other_pts):
-            # Ask the scanline matcher for an initial guess in the opposite image.
-            mate = stereo_matching.guess_mate_point_on_scanline(self, which, ix, iy)
-
-            # If matching succeeded, append the guessed mate at the same pair index.
-            if mate is not None:
-                other_pts.append(mate)
-
-        # Trigger overlay redraw and measurement stub.
-        self._on_points_changed()
-
-    # Mouse moved while left button is held.
-    def on_overlay_left_drag(self, which, event):
-        # Only drag if we are actively dragging a handle.
-        if not self.drag_active:
-            return
-
-        # Only respond if the drag belongs to this pane.
-        if self.drag_which != which:
-            return
-
-        canvas = self.left_overlay_canvas if which == "L" else self.right_overlay_canvas
-        pts = self._get_points_list(which)
-
-        # Validate index.
-        if self.drag_index is None:
-            return
-        if self.drag_index < 0 or self.drag_index >= len(pts):
-            return
-
-        # Convert cursor position to image coords.
-        ix, iy = self._screen_to_image(which, canvas, event.x, event.y)
-
-        # Update the dragged point.
-        pts[self.drag_index] = (ix, iy)
-
-        # Redraw overlays and update measurement stub continuously while dragging.
-        self._on_points_changed()
-
-    # Left mouse button released.
-    # Left mouse button released.
-    def on_overlay_left_up(self, which, _event):
-        # Only finish a drag if this pane owns the active drag.
-        if not self.drag_active or self.drag_which != which:
-            return
-
-        # Clear drag state now that the drag is finished.
-        self.drag_active = False
-        self.drag_which = None
-        self.drag_index = None
-
-        # Redraw overlays and recompute measurements using the user placed point.
-        self._on_points_changed()
-
-    # Right mouse button pressed on overlay.
-    def on_overlay_right_down(self, which, event):
-        # Choose the correct overlay canvas for this pane.
-        canvas = self.left_overlay_canvas if which == "L" else self.right_overlay_canvas
-
-        # Start refine drag only when the user clicked an existing handle.
-        idx = self._get_handle_index_under_cursor(canvas)
-        if idx is None:
-            idx = self._get_nearest_handle_index(which, canvas, event.x, event.y)
-        if idx is None:
-            return
-
-        # Only refine points that already have a mate on the opposite pane.
-        pts = self._get_points_list(which)
-        other_which = "R" if which == "L" else "L"
-        other_pts = self._get_points_list(other_which)
-        if idx >= len(pts) or idx >= len(other_pts):
-            return
-
-        # Begin explicit refine-drag mode for this paired point.
-        self.refine_drag_active = True
-        self.refine_drag_which = which
-        self.refine_drag_index = idx
 
 
-    # Mouse moved while right button is held.
-    def on_overlay_right_drag(self, which, event):
-        # Only drag if we are actively doing a refine drag.
-        if not self.refine_drag_active:
-            return
-
-        # Only respond if this pane owns the active refine drag.
-        if self.refine_drag_which != which:
-            return
-
-        canvas = self.left_overlay_canvas if which == "L" else self.right_overlay_canvas
-        pts = self._get_points_list(which)
-
-        # Validate the dragged point index.
-        if self.refine_drag_index is None:
-            return
-        if self.refine_drag_index < 0 or self.refine_drag_index >= len(pts):
-            return
-
-        # Convert cursor position to image coords and preview the manual placement.
-        ix, iy = self._screen_to_image(which, canvas, event.x, event.y)
-        pts[self.refine_drag_index] = (ix, iy)
-
-        # Redraw overlays and update measurement preview while dragging.
-        self._on_points_changed()
-
-
-    # Right mouse button released.
-    def on_overlay_right_up(self, which, _event):
-        # Only finish a refine drag if this pane owns it.
-        if not self.refine_drag_active or self.refine_drag_which != which:
-            return
-
-        # Keep the point index before clearing refine-drag state.
-        idx = self.refine_drag_index
-
-        # Refine only if this point still has a mate on the opposite pane.
-        if idx is not None:
-            pts = self._get_points_list(which)
-            other_which = "R" if which == "L" else "L"
-            other_pts = self._get_points_list(other_which)
-
-            if idx < len(pts) and idx < len(other_pts):
-                # Read the current point being refined and its mate on the opposite pane.
-                x_cur, y_cur = pts[idx]
-                x_other, y_other = other_pts[idx]
-
-                # Refine near the user placed X so the matcher stays local.
-                refined = stereo_matching.guess_mate_point_on_scanline(
-                    self,
-                    other_which,
-                    x_other,
-                    y_other,
-                    x_hint=x_cur,
-                    search_half_width=8,
-                )
-
-                # If refinement succeeded, replace the point with the refined result.
-                if refined is not None:
-                    pts[idx] = refined
-
-        # Clear refine-drag state now that the gesture is complete.
-        self.refine_drag_active = False
-        self.refine_drag_which = None
-        self.refine_drag_index = None
-
-        # Redraw overlays and recompute measurements using the refined point.
-        self._on_points_changed()
-
-    # Called whenever points are added, moved, or deleted.
-    # This is the single place that triggers overlay redraw and measurement refresh.
-    def _on_points_changed(self):
-        # Redraw overlays (function will be updated next step to draw real points/lines).
-        # For now, keep calling it so the pipeline is correct.
-        self._redraw_overlays()
-
-        # Update measurement status text (stub for now).
-        self._update_measurement_status_stub()
 
     # Updates the status bar with a simple "ready" message.
     def _update_measurement_status_stub(self):
@@ -949,7 +604,7 @@ class SizeamaticProApp:
         self.drag_index = None
 
         # Redraw overlays to remove handles and lines.
-        self._redraw_overlays()
+        video_overlay.redraw_overlays(self)
 
         # Update measurement status text.
         self._update_measurement_status_stub()
@@ -1013,18 +668,7 @@ class SizeamaticProApp:
         )
         self.left_video_canvas.grid(row=0, column=0, sticky="nsew")  # Fill the viewport.
 
-        # Top canvas: overlays live here (points, lines, labels).
-        # We do NOT draw video here, so we can change video rendering later without touching overlays.
-        self.left_overlay_canvas = tk.Canvas(
-            self.left_viewport,
-            bg="black",          # Tk requires a valid color; we fake transparency later.
-            highlightthickness=0,
-            bd=0,
-        )
-
-        # Use place so the overlay canvas always covers the video canvas exactly.
-        # relwidth/relheight = 1 makes it track the viewport size automatically.
-        self.left_overlay_canvas.place(x=0, y=0, relwidth=1.0, relheight=1.0)
+       
 
         # Slider row: slider + label
         self.left_slider_row = ttk.Frame(self.left_frame)
@@ -1075,14 +719,7 @@ class SizeamaticProApp:
         )
         self.right_video_canvas.grid(row=0, column=0, sticky="nsew")
 
-        # Top canvas draws overlay shapes and handles later.
-        self.right_overlay_canvas = tk.Canvas(
-            self.right_viewport,
-            bg="black",
-            highlightthickness=0,
-            bd=0,
-        )
-        self.right_overlay_canvas.place(x=0, y=0, relwidth=1.0, relheight=1.0)
+        
 
         self.right_slider_row = ttk.Frame(self.right_frame)
         self.right_slider_row.grid(row=2, column=0, sticky="ew", pady=(8, 0))
@@ -1109,33 +746,10 @@ class SizeamaticProApp:
         self.left_video_canvas.bind("<Configure>", self.on_canvas_resized)
         self.right_video_canvas.bind("<Configure>", self.on_canvas_resized)
 
-        self.left_overlay_canvas.bind("<Configure>", self.on_canvas_resized)
-        self.right_overlay_canvas.bind("<Configure>", self.on_canvas_resized)
+        # Create overlay canvases for point drawing and point interaction.
+        video_overlay.create_overlay_canvases(self)
 
-        # Left overlay canvas receives manual left-button input.
-        self.left_overlay_canvas.bind("<Button-1>", lambda e: self.on_overlay_left_down("L", e))
-        self.left_overlay_canvas.bind("<B1-Motion>", lambda e: self.on_overlay_left_drag("L", e))
-        self.left_overlay_canvas.bind("<ButtonRelease-1>", lambda e: self.on_overlay_left_up("L", e))
-
-        # Left overlay canvas also receives explicit right-button refine input.
-        self.left_overlay_canvas.bind("<Button-3>", lambda e: self.on_overlay_right_down("L", e))
-        self.left_overlay_canvas.bind("<B3-Motion>", lambda e: self.on_overlay_right_drag("L", e))
-        self.left_overlay_canvas.bind("<ButtonRelease-3>", lambda e: self.on_overlay_right_up("L", e))
-
-        # Right overlay canvas receives manual left-button input.
-        self.right_overlay_canvas.bind("<Button-1>", lambda e: self.on_overlay_left_down("R", e))
-        self.right_overlay_canvas.bind("<B1-Motion>", lambda e: self.on_overlay_left_drag("R", e))
-        self.right_overlay_canvas.bind("<ButtonRelease-1>", lambda e: self.on_overlay_left_up("R", e))
-
-        # Right overlay canvas also receives explicit right-button refine input.
-        self.right_overlay_canvas.bind("<Button-3>", lambda e: self.on_overlay_right_down("R", e))
-        self.right_overlay_canvas.bind("<B3-Motion>", lambda e: self.on_overlay_right_drag("R", e))
-        self.right_overlay_canvas.bind("<ButtonRelease-3>", lambda e: self.on_overlay_right_up("R", e))
-
-        # Mouse wheel zoom for each pane (Windows uses <MouseWheel> with event.delta).
-        self.left_overlay_canvas.bind("<MouseWheel>", lambda e: self.on_mouse_wheel("L", e))
-        self.right_overlay_canvas.bind("<MouseWheel>", lambda e: self.on_mouse_wheel("R", e))
-
+       
        
 
     # -------------------------------------------------------------------------
@@ -1806,8 +1420,8 @@ class SizeamaticProApp:
             self._render_current_frames()
             return
 
-        self._draw_placeholder(self.left_overlay_canvas, "LEFT", self.view_rectified.get())
-        self._draw_placeholder(self.right_overlay_canvas, "RIGHT", self.view_rectified.get())
+        self._draw_placeholder(video_overlay.left_overlay_canvas, "LEFT", self.view_rectified.get())
+        self._draw_placeholder(video_overlay.right_overlay_canvas, "RIGHT", self.view_rectified.get())
 
         self._update_frame_labels()
 
@@ -2142,14 +1756,14 @@ class SizeamaticProApp:
                 self.current_frameL = None
 
                 # Draw the missing-frame placeholder on the left pane.
-                self._draw_missing_frame(self.left_overlay_canvas, "LEFT", li)
+                self._draw_missing_frame(video_overlay.left_overlay_canvas, "LEFT", li)
             else:
                 # Cache the exact left image currently being displayed.
                 # If rectified view is enabled, this is the rectified frame.
                 self.current_frameL = frameL
 
                 # Display the current left frame on the left pane.
-                self._display_bgr_on_canvas(self.left_overlay_canvas, frameL, "L")
+                self._display_bgr_on_canvas(video_overlay.left_overlay_canvas, frameL, "L")
 
         # Right side render.
         if self.capR:
@@ -2165,44 +1779,21 @@ class SizeamaticProApp:
                 self.current_frameR = None
 
                 # Draw the missing-frame placeholder on the right pane.
-                self._draw_missing_frame(self.right_overlay_canvas, "RIGHT", ri)
+                self._draw_missing_frame(video_overlay.right_overlay_canvas, "RIGHT", ri)
             else:
                 # Cache the exact right image currently being displayed.
                 # If rectified view is enabled, this is the rectified frame.
                 self.current_frameR = frameR
 
                 # Display the current right frame on the right pane.
-                self._display_bgr_on_canvas(self.right_overlay_canvas, frameR, "R")
+                self._display_bgr_on_canvas(video_overlay.right_overlay_canvas, frameR, "R")
 
         # Update the slider frame labels after rendering.
         self._update_frame_labels()
 
         # Draw overlay over frame
-        self._redraw_overlays()
+        video_overlay.redraw_overlays(self)
 
-    # Computes the current image->screen scale factor for the given pane.
-    # Fit To Window scales by width only, so we match that here.
-    def _get_pane_scale(self, which, canvas):
-        # Default scale is 1.0 (native pixel mapping).
-        if not self.fit_to_window.get():
-            return 1.0
-
-        # We need source image width to compute scale.
-        # If meta is missing, fall back to 1.0.
-        if which == "L":
-            if not self.metaL:
-                return 1.0
-            src_w = float(self.metaL["width"])
-        else:
-            if not self.metaR:
-                return 1.0
-            src_w = float(self.metaR["width"])
-
-        # Canvas width is the target width under Fit To Window.
-        canvas_w = float(max(1, canvas.winfo_width()))
-
-        # Scale by width only.
-        return canvas_w / src_w
     
     # Computes the on-canvas rectangle where the video should be drawn while preserving aspect ratio.
     # Returns (dx, dy, dw, dh) in SCREEN pixels.
