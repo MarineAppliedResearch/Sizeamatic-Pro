@@ -513,57 +513,111 @@ class SizeamaticProApp:
         measurement_window.update_measurement_window(self, points_rows, seg_rows, err_msg)
 
     # -------------------------------------------------------------------------
-    # Menu bar
-    # -------------------------------------------------------------------------
+    # _build_menu
+    #
+    # Builds the main Tkinter menu bar for the application.
+    #
+    # This function creates the top-level File, View, and Calibration menus,
+    # adds each menu command or toggle, connects each item to its callback
+    # function, and assigns the completed menu bar to the root Tk window.
 
     def _build_menu(self):
+        # Create the root menu bar that will be attached to the main Tk window.
         menubar = tk.Menu(self.root)
 
-        # ---- File menu ----
+        # ---------------------------------------------------------------------
+        # File menu
+        # ---------------------------------------------------------------------
+
+        # Create the File dropdown menu.
         file_menu = tk.Menu(menubar, tearoff=False)
+
+        # Add commands for loading the left and right stereo video files.
         file_menu.add_command(label="Load Left Video…", command=self.on_load_left_video)
         file_menu.add_command(label="Load Right Video…", command=self.on_load_right_video)
+
+        # Add a separator before the application exit command.
         file_menu.add_separator()
-        file_menu.add_command(label="Load Calibration Folder…", command=self.on_load_calibration_folder)
-        file_menu.add_separator()
+
+        # Add the command for closing the application.
         file_menu.add_command(label="Exit", command=self.root.quit)
+
+        # Attach the File dropdown to the main menu bar.
         menubar.add_cascade(label="File", menu=file_menu)
 
-        # ---- View menu ----
+        # ---------------------------------------------------------------------
+        # View menu
+        # ---------------------------------------------------------------------
+
+        # Create the View dropdown menu.
         view_menu = tk.Menu(menubar, tearoff=False)
 
-        # Show Raw / Show Rectified as a single toggle.
-        # Disabled behavior (until calibration loaded) can be added later.
+        # Add a checkbutton that switches the main display between raw and rectified views.
         view_menu.add_checkbutton(
             label="Show Rectified",
             variable=self.view_rectified,
             command=self.on_toggle_view_rectified,
         )
 
+        # Add a command for opening or toggling the anaglyph 3D preview window.
         view_menu.add_command(label="Anaglyph 3D Preview…", command=self.on_toggle_anaglyph_preview)
 
+        # Add a separator before the general display toggles.
         view_menu.add_separator()
+
+        # Add a checkbutton that controls whether the video display fits the available window size.
         view_menu.add_checkbutton(
             label="Fit To Window",
             variable=self.fit_to_window,
             command=self.on_toggle_fit_to_window,
         )
+
+        # Add a checkbutton that controls whether overlay graphics are drawn on top of the video.
         view_menu.add_checkbutton(
             label="Show Overlays",
             variable=self.show_overlays,
             command=self.on_toggle_show_overlays,
         )
+
+        # Add a checkbutton that controls whether the epipolar cursor guide line is shown.
         view_menu.add_checkbutton(
             label="Show Epipolar Cursor Line",
             variable=self.show_epipolar,
             command=self.on_toggle_show_epipolar,
         )
 
-        view_menu.add_separator()
-        view_menu.add_command(label="Calibration Summary…", command=self.on_show_calibration_summary)
-
+        # Attach the View dropdown to the main menu bar.
         menubar.add_cascade(label="View", menu=view_menu)
 
+        # ---------------------------------------------------------------------
+        # Calibration menu
+        # ---------------------------------------------------------------------
+
+        # Create the Calibration dropdown menu.
+        calibration_menu = tk.Menu(menubar, tearoff=False)
+
+        # Add a command for loading an existing calibration folder.
+        calibration_menu.add_command(
+            label="Load Calibration…",
+            command=self.on_load_calibration_folder,
+        )
+
+        # Add a command for opening the calibration workflow window.
+        calibration_menu.add_command(
+            label="Perform Calibration…",
+            command=self.on_perform_calibration,
+        )
+
+        # Add a command for generating or opening the calibration report.
+        calibration_menu.add_command(
+            label="Calibration Report…",
+            command=self.on_open_calibration_report,
+        )
+
+        # Attach the Calibration dropdown to the main menu bar.
+        menubar.add_cascade(label="Calibration", menu=calibration_menu)
+
+        # Assign the completed menu bar to the main Tk window.
         self.root.config(menu=menubar)
 
     # -------------------------------------------------------------------------
@@ -779,6 +833,26 @@ class SizeamaticProApp:
         video_overlay.create_overlay_canvases(self)
 
        
+    # -------------------------------------------------------------------------
+    # on_perform_calibration
+    #
+    # Handles the Calibration > Perform Calibration menu command.
+    # -------------------------------------------------------------------------
+
+    def on_perform_calibration(self):
+        # Print a temporary message to confirm the menu callback is connected.
+        print("Perform Calibration selected")
+
+
+    # -------------------------------------------------------------------------
+    # on_open_calibration_report
+    #
+    # Handles the Calibration > Calibration Report menu command.
+    # -------------------------------------------------------------------------
+
+    def on_open_calibration_report(self):
+        # Print a temporary message to confirm the menu callback is connected.
+        print("Calibration Report selected")
        
 
     # -------------------------------------------------------------------------
