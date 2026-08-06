@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Generated artifacts (regeneratable from scripts, e.g. create_charuco_calibration_target.py)
+output/
+
+# Local-only test/calibration fixtures (real videos + calibration sets, too large to track)
+examples/
+
+# Generated outputs from misc/ dev-scratch scripts
+misc/report_dashboard_output/
+misc/report_wordcloud_output/
+
+# Docs site build output (Phase 2)
+site/
