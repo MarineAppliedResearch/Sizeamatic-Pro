@@ -1,0 +1,29 @@
+site_name: Sizeamatic Pro
+site_description: Stereo video measurement tool developer docs
+repo_url: https://github.com/MarineAppliedResearch/Sizeamatic-Pro
+
+theme:
+  name: readthedocs
+
+nav:
+  - Home: index.md
+  - Reference:
+      - main.py: reference/main.md
+      - stereo_matching.py: reference/stereo_matching.md
+      - measurement_window.py: reference/measurement_window.md
+      - calibration_summary.py: reference/calibration_summary.md
+      - anaglyph_preview.py: reference/anaglyph_preview.md
+      - video_overlay.py: reference/video_overlay.md
+      - generate_calibration_report.py: reference/generate_calibration_report.md
+      - create_charuco_calibration_target.py: reference/create_charuco_calibration_target.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [.]
+          options:
+            docstring_style: google
+            show_source: true
+            show_if_no_docstring: true
