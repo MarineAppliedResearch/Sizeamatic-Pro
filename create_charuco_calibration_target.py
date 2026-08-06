@@ -9,6 +9,7 @@
 # =============================================================================
 
 import io
+import os
 
 import cv2
 import numpy as np
@@ -178,8 +179,10 @@ def main() -> None:
     # PDF page margin around the board, in inches.
     margin_in = 0.5
 
-    # Output file.
-    out_pdf_path = "charuco_letter_landscape.pdf"
+    # Output file. Generated artifacts live in output/, which is gitignored.
+    output_dir = "output"
+    os.makedirs(output_dir, exist_ok=True)
+    out_pdf_path = os.path.join(output_dir, "charuco_letter_landscape.pdf")
 
     # Build the board image.
     board_img = build_charuco_image(
