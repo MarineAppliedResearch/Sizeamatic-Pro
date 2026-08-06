@@ -8,3 +8,9 @@ dependencies = [
     "opencv-python>=5.0.0.93",
     "reportlab>=5.0.0",
 ]
+
+[dependency-groups]
+dev = [
+    "mkdocs>=1.6.1",
+    "mkdocstrings[python]>=1.0.6",
+]

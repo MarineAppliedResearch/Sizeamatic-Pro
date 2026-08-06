@@ -90,6 +90,12 @@ runtime dependencies; `uv.lock` pins exact versions.
 
 ## Git workflow
 
+- **Branching model:** we loosely follow the Git branching model described in
+  [nvie.com/posts/a-successful-git-branching-model](https://nvie.com/posts/a-successful-git-branching-model/)
+  ("git-flow") — `develop` as the integration branch, `master` as
+  release-only, feature branches for everything else. We haven't formally
+  adopted its `release/*`/`hotfix/*` branches yet; revisit that if the need
+  comes up.
 - **Branching:** create a feature branch off `develop` for each task (e.g.
   `phase1/agents-md-setup`). Never commit directly to `develop` or `master`.
   Open a PR into `develop` when the work is ready for review. `master` is

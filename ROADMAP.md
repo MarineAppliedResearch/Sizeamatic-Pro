@@ -7,7 +7,7 @@ learn more.
 
 Status legend: `[ ]` not started, `[~]` in progress, `[x]` done.
 
-## Phase 1 — Conventions, architecture notes, and agent instructions `[~]`
+## Phase 1 — Conventions, architecture notes, and agent instructions `[x]`
 
 Establish what future contributors (human or agent) need to know before touching
 this codebase: coding conventions, current architecture state, git workflow,
@@ -23,15 +23,16 @@ dependency management, and this roadmap itself.
 - [x] `CLAUDE.md` — pointer to `AGENTS.md`
 - [x] `ROADMAP.md` (this file)
 
-## Phase 2 — Documentation generation system `[ ]`
+## Phase 2 — Documentation generation system `[x]`
 
 Install and configure MkDocs + mkdocstrings so developer docs generate from
 docstrings, per the conventions established in Phase 1.
 
-- [ ] Add `mkdocs`, `mkdocstrings[python]` as dev dependencies
-- [ ] `mkdocs.yml` site config, nav structure
-- [ ] Verify `mkdocs serve` renders a working API reference page from at least
-      one real docstring
+- [x] Add `mkdocs`, `mkdocstrings[python]` as dev dependencies
+- [x] `mkdocs.yml` site config, nav structure
+- [x] Verify `mkdocs serve` renders a working API reference page from at least
+      one real docstring (confirmed via `mkdocs build --strict`, the
+      `SizeamaticProApp` docstring renders correctly)
 
 ## Phase 3 — Document and analyze the existing system as-is `[ ]`
 

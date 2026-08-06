@@ -1929,8 +1929,13 @@ def main():
         
     root = tk.Tk()
 
-    # Set the application window icon.
-    root.iconbitmap(resource_path("assets/icon.ico"))
+    # Set the application window icon, if one is present.
+    # assets/icon.ico is not currently committed to the repo, so this is
+    # best-effort: fall back to the default Tk icon rather than crashing.
+    try:
+        root.iconbitmap(resource_path("assets/icon.ico"))
+    except tk.TclError:
+        pass
 
     # ttk theme defaults are OK. If you want a darker theme later, we can style it.
     app = SizeamaticProApp(root)

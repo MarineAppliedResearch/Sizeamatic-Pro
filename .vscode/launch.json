@@ -10,6 +10,17 @@
       "justMyCode": true,
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe"
+    },
+    {
+      "name": "Docs Server (mkdocs serve)",
+      "type": "python",
+      "request": "launch",
+      "module": "mkdocs",
+      "args": ["serve"],
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "cwd": "${workspaceFolder}",
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe"
     }
   ]
 }
