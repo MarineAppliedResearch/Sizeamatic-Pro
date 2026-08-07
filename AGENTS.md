@@ -88,6 +88,27 @@ runtime dependencies; `uv.lock` pins exact versions.
 - Run a script inside the project's environment: `uv run python main.py`
 - Sync the environment to match the lockfile: `uv sync`
 
+## Docs site — build it, don't serve it
+
+To check what the generated developer docs actually look like:
+
+```
+uv run mkdocs build
+```
+
+then open `site/index.html` (or any other file under `site/`) directly in
+a browser. No server needed.
+
+**Do not use `mkdocs serve` to verify content.** It has a confirmed,
+reproducible bug where instance-attribute docstrings render as
+completely empty, even though the exact same source renders correctly via
+`mkdocs build` — see `FINDINGS.md` item D. Module, function, and method
+docstrings weren't affected, only instance/class attributes, which made
+it a very misleading way to check whether documentation content was
+actually there. If you want to preview the docs, always build fresh and
+open the static file — don't trust a running dev server, live-reloaded or
+not.
+
 ## Git workflow
 
 - **Branching model:** we loosely follow the Git branching model described in

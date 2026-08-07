@@ -1,59 +1,51 @@
-# -----------------------------------------------------------------------------
-# calibration_summary.py
-#
-# Author: Isaac Travers
-# Created: 2026-05-18
-# Project: Sizeamatic Pro
-#
-# Purpose:
-#   Provides the calibration summary window for Sizeamatic Pro.
-#
-#   This module creates and updates a Tkinter summary window for loaded stereo
-#   calibration data. The summary is intended to help users inspect important
-#   calibration values, identify obvious calibration problems, and copy useful
-#   diagnostics into notes, reports, or spreadsheets.
-#
-# Contents:
-#   - Calibration summary window creation.
-#   - Calibration summary table management.
-#   - Copyable calibration summary text generation.
-#   - Baseline and stereo translation display.
-#   - Relative rotation angle and axis display.
-#   - Intrinsic camera parameter display.
-#   - Field of view estimates.
-#   - Distortion coefficient display.
-#   - Rectification projection and ROI display.
-#   - Rectification map out of bounds checks.
-#   - Basic calibration warning checks.
-#
-# Design Notes:
-#   The calibration summary window state is stored in this module instead of on
-#   the main application object. This keeps the summary window widgets grouped
-#   with the code that creates and updates them.
-#
-#   Functions in this module receive the main application object when they need
-#   access to the currently loaded calibration dictionary or the Tkinter root
-#   window. This module does not load calibration files and does not perform
-#   stereo calibration.
-#
-# Assumptions:
-#   - The main application stores the loaded calibration dictionary as app.cal.
-#   - The calibration dictionary contains the camera matrices, distortion
-#     coefficients, stereo transform, rectification matrices, projection
-#     matrices, and remap arrays expected by the summary functions.
-#   - Calibration translation units determine the baseline units. In this
-#     application, those units are normally millimeters.
-#   - Warning checks in this file are simple diagnostic checks, not a complete
-#     validation of calibration quality.
-#
-# Dependencies:
-#   - math is used for angle and field of view calculations.
-#   - tkinter provides the calibration summary Toplevel window and text widget.
-#   - tkinter.ttk provides themed frames, labels, and Treeview tables.
-#   - OpenCV is used to convert rotation matrices into Rodrigues vector form.
-#   - NumPy is used for calibration matrices, vectors, norms, and remap checks.
-# -----------------------------------------------------------------------------
+"""Calibration summary window for Sizeamatic Pro.
 
+This module creates and updates a Tkinter summary window for loaded stereo
+calibration data. The summary is intended to help users inspect important
+calibration values, identify obvious calibration problems, and copy useful
+diagnostics into notes, reports, or spreadsheets.
+
+Contents:
+    - Calibration summary window creation.
+    - Calibration summary table management.
+    - Copyable calibration summary text generation.
+    - Baseline and stereo translation display.
+    - Relative rotation angle and axis display.
+    - Intrinsic camera parameter display.
+    - Field of view estimates.
+    - Distortion coefficient display.
+    - Rectification projection and ROI display.
+    - Rectification map out of bounds checks.
+    - Basic calibration warning checks.
+
+Design notes:
+    The calibration summary window state is stored in this module (as
+    module-level globals) instead of on the main application object. This
+    keeps the summary window widgets grouped with the code that creates and
+    updates them.
+
+    Functions in this module receive the main application object (`app`)
+    when they need access to the currently loaded calibration dictionary or
+    the Tkinter root window. This module does not load calibration files
+    and does not perform stereo calibration.
+
+Assumptions:
+    - The main application stores the loaded calibration dictionary as
+      `app.cal`.
+    - The calibration dictionary contains the camera matrices, distortion
+      coefficients, stereo transform, rectification matrices, projection
+      matrices, and remap arrays expected by the summary functions.
+    - Calibration translation units determine the baseline units. In this
+      application, those units are normally millimeters.
+    - Warning checks in this file are simple diagnostic checks, not a
+      complete validation of calibration quality.
+
+Author:
+    Isaac Travers
+
+Created:
+    2026-05-18
+"""
 
 # Standard library imports.
 
@@ -77,30 +69,86 @@ import cv2
 
 # Variables
 
-# Stores the calibration summary Toplevel window.
 cal_win = None
+"""The calibration summary Toplevel window, or None if it hasn't been
+opened yet (or was closed). Lives as a module global rather than an `app`
+attribute — see the "Design notes" above — so `_on_close` must redeclare
+`global` itself; a prior version missed that and left this pointing at a
+destroyed window (see `FINDINGS.md` #1)."""
 
-# Stores the calibration summary Treeview widget.
 cal_tree = None
+"""The calibration summary Treeview (item/value table) widget, or None if
+the window hasn't been built yet. `update_calibration_window` uses `None`
+here as its signal that there's nothing safe to update."""
 
-# Stores the copyable calibration summary Text widget.
 cal_copy_text = None
+"""The copyable calibration summary Text widget, or None if the window
+hasn't been built yet."""
 
 
-# -----------------------------------------------------------------------------
-# ensure_calibration_window
-#
-# Inputs: app provides the Tk root window and stores calibration summary widget
-# references used by later calibration display updates.
-# Outputs: creates or raises the calibration summary window and stores widget
-# references on app; returns nothing.
-#
-# Creates the calibration summary window, including the item/value table and
-# copyable text area. If the window already exists, the function brings it to the
-# front instead of creating a duplicate. This function only builds the UI widgets;
-# calibration values are filled in later by update_calibration_window.
-# -----------------------------------------------------------------------------
+def _on_calibration_window_close(win):
+    """Handle the user manually closing the calibration summary window.
+
+    Destroys the Tkinter window and clears the module-level widget
+    references. Clearing these references is important because later
+    summary updates need to know that the widgets no longer exist and must
+    be rebuilt.
+
+    Note:
+        This used to be a closure nested inside `ensure_calibration_window`
+        (`_on_close`), which caused a real bug: a nested function that
+        assigns to module-level globals must redeclare them `global` in
+        its *own* scope — a `global` statement in the enclosing function
+        does not extend into a nested one. A prior version of this
+        function was missing that declaration, silently creating local
+        variables instead, which left `cal_win`/`cal_tree`/`cal_copy_text`
+        pointing at destroyed widgets after the window closed and crashed
+        the next `update_calibration_window` call (see `FINDINGS.md` #1).
+        Promoting it to a top-level function removes the nesting — and
+        the whole bug class with it — as well as making it visible as its
+        own entry on the generated docs site, which a nested function
+        never is, no matter how good its docstring is.
+
+    Args:
+        win (tkinter.Toplevel): The calibration summary window being
+            closed.
+
+    Returns:
+        None
+    """
+
+    global cal_win
+    global cal_tree
+    global cal_copy_text
+
+    # Destroy the Tkinter window.
+    win.destroy()
+
+    # Clear the stored calibration window reference.
+    cal_win = None
+
+    # Clear the stored table and copy text references because the widgets were
+    # destroyed.
+    cal_tree = None
+    cal_copy_text = None
+
+
 def ensure_calibration_window(app):
+    """Create the calibration summary window, or raise it if it exists.
+
+    Creates the calibration summary window, including the item/value table
+    and copyable text area. If the window already exists, the function
+    brings it to the front instead of creating a duplicate. This function
+    only builds the UI widgets; calibration values are filled in later by
+    `update_calibration_window`.
+
+    Args:
+        app: The main application object, used for the Tk root window that
+            owns the new Toplevel window.
+
+    Returns:
+        None
+    """
 
     global cal_tree
     global cal_win
@@ -127,32 +175,8 @@ def ensure_calibration_window(app):
     # Give the window an initial size large enough for the table and copy box.
     win.geometry("700x600")
 
-    # -------------------------------------------------------------------------
-    # _on_close
-    #
-    # Inputs: none.
-    # Outputs: destroys the calibration summary window and clears stored widget
-    # references on the app object.
-    #
-    # Handles the user closing the calibration summary window manually. Clearing
-    # the app references is important because later summary updates need to know
-    # that the widgets no longer exist and must be rebuilt.
-    # -------------------------------------------------------------------------
-    def _on_close():
-
-        # Destroy the Tkinter window.
-        win.destroy()
-
-        # Clear the stored calibration window reference.
-        cal_win = None
-
-        # Clear the stored table and copy text references because the widgets were
-        # destroyed.
-        cal_tree = None
-        cal_copy_text = None
-
     # Use the cleanup callback when the user closes the calibration summary window.
-    win.protocol("WM_DELETE_WINDOW", _on_close)
+    win.protocol("WM_DELETE_WINDOW", lambda: _on_calibration_window_close(win))
 
     # Create one padded outer frame to hold all calibration summary content.
     outer = ttk.Frame(win, padding=(10, 10))
@@ -216,20 +240,23 @@ def ensure_calibration_window(app):
     cal_copy_text = txt
 
 
-# -----------------------------------------------------------------------------
-# update_calibration_window
-#
-# Inputs: app provides the currently loaded calibration dictionary.
-# Outputs: updates the calibration summary table and copy text box; returns
-# nothing.
-#
-# Refreshes the calibration summary window from the loaded calibration data. This
-# function displays image size, baseline, relative rotation, intrinsics, field of
-# view estimates, distortion coefficients, rectification details, ROI overlap,
-# remap validity, and simple warning checks. It also builds a tab separated copy
-# block for spreadsheet or report use.
-# -----------------------------------------------------------------------------
 def update_calibration_window(app):
+    """Refresh the calibration summary window from the loaded calibration.
+
+    Refreshes the calibration summary window from the loaded calibration
+    data. This function displays image size, baseline, relative rotation,
+    intrinsics, field of view estimates, distortion coefficients,
+    rectification details, ROI overlap, remap validity, and simple warning
+    checks. It also builds a tab separated copy block for spreadsheet or
+    report use.
+
+    Args:
+        app: The main application object, used to read the currently
+            loaded calibration dictionary (`app.cal`).
+
+    Returns:
+        None
+    """
 
     # Use module level widget references owned by this calibration summary module.
     global cal_tree
@@ -451,17 +478,20 @@ def update_calibration_window(app):
     cal_copy_text.configure(state="disabled")
 
 
-# -----------------------------------------------------------------------------
-# cal_add_row
-#
-# Inputs: label is the row name to display, and value is the row value to display.
-# Outputs: inserts one row into the calibration summary table; returns nothing.
-#
-# Adds one item/value row to the calibration summary Treeview. The table widget is
-# owned by this module and is created by ensure_calibration_window before summary
-# values are inserted.
-# -----------------------------------------------------------------------------
 def cal_add_row(label, value):
+    """Add one item/value row to the calibration summary table.
+
+    Adds one item/value row to the calibration summary Treeview. The table
+    widget is owned by this module and is created by
+    `ensure_calibration_window` before summary values are inserted.
+
+    Args:
+        label (str): Row name to display in the "Item" column.
+        value (str): Row value to display in the "Value" column.
+
+    Returns:
+        None
+    """
 
     # Use the module level calibration summary table widget.
     global cal_tree
@@ -474,19 +504,26 @@ def cal_add_row(label, value):
     cal_tree.insert("", "end", values=(label, value))
 
 
-# -----------------------------------------------------------------------------
-# map_oob_percent
-#
-# Inputs: mapx/mapy are remap arrays from rectified pixel coordinates to source
-# image pixel coordinates, and w/h are the source image width and height.
-# Outputs: returns the percentage of remap samples that point outside the source
-# image bounds.
-#
-# Computes how much of a rectification map samples outside the valid source image.
-# A high percentage can indicate poor rectification coverage, mismatched image
-# size, or calibration data that does not match the loaded video dimensions.
-# -----------------------------------------------------------------------------
 def map_oob_percent(mapx, mapy, w, h):
+    """Compute the percentage of a rectification map that samples out of bounds.
+
+    Computes how much of a rectification map samples outside the valid
+    source image. A high percentage can indicate poor rectification
+    coverage, mismatched image size, or calibration data that does not
+    match the loaded video dimensions.
+
+    Args:
+        mapx (numpy.ndarray): Remap array of source image X coordinates,
+            indexed by rectified pixel position.
+        mapy (numpy.ndarray): Remap array of source image Y coordinates,
+            indexed by rectified pixel position.
+        w (int): Source image width.
+        h (int): Source image height.
+
+    Returns:
+        float: The percentage of remap samples that point outside the
+        source image bounds.
+    """
 
     # Mark every remap coordinate that samples outside the valid source image.
     # The upper bound uses w - 1 and h - 1 because interpolation needs neighboring

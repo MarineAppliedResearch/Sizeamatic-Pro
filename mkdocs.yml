@@ -2,6 +2,20 @@ site_name: Sizeamatic Pro
 site_description: Stereo video measurement tool developer docs
 repo_url: https://github.com/MarineAppliedResearch/Sizeamatic-Pro
 
+# mkdocstrings pulls docs live from these source files, but mkdocs's dev
+# server only auto-watches docs_dir + this config file by default. Without
+# this, `mkdocs serve` silently keeps showing a stale build after any .py
+# edit — list every first-party module here so hot-reload actually works.
+watch:
+  - main.py
+  - stereo_matching.py
+  - measurement_window.py
+  - calibration_summary.py
+  - anaglyph_preview.py
+  - video_overlay.py
+  - generate_calibration_report.py
+  - create_charuco_calibration_target.py
+
 theme:
   name: readthedocs
 
@@ -27,3 +41,4 @@ plugins:
             docstring_style: google
             show_source: true
             show_if_no_docstring: true
+            filters: []

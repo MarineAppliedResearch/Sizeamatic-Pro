@@ -1,12 +1,15 @@
-# =============================================================================
-# make_charuco_pdf_letter_landscape.py
-#
-# Generates a ChArUco calibration target as a LETTER landscape PDF at true scale.
-# Includes a 100 mm scale bar so you can verify the print came out correctly.
-#
-# Author: Isaac Travers
-# Date: 2026-03-01
-# =============================================================================
+"""ChArUco calibration target generator.
+
+Generates a ChArUco calibration target as a LETTER landscape PDF at true
+scale. Includes a 100 mm scale bar so you can verify the print came out
+correctly.
+
+Author:
+    Isaac Travers
+
+Date:
+    2026-03-01
+"""
 
 import io
 import os
@@ -19,23 +22,20 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 
 
-# -----------------------------------------------------------------------------
-# mm_to_points
-#
-# Convert millimeters to PDF points (1 inch = 72 points).
-# -----------------------------------------------------------------------------
 def mm_to_points(mm: float) -> float:
+    """Convert millimeters to PDF points.
+
+    Args:
+        mm (float): Length in millimeters.
+
+    Returns:
+        float: Length in PDF points (1 inch = 72 points).
+    """
 
     # 25.4 mm per inch, 72 points per inch.
     return (mm / 25.4) * 72.0
 
 
-# -----------------------------------------------------------------------------
-# build_charuco_image
-#
-# Builds a high resolution ChArUco board image suitable for printing.
-# Returns a grayscale uint8 image (0..255).
-# -----------------------------------------------------------------------------
 def build_charuco_image(squares_x: int,
                         squares_y: int,
                         square_size_mm: float,
@@ -43,6 +43,25 @@ def build_charuco_image(squares_x: int,
                         dictionary_id: int,
                         dpi: int,
                         margin_mm: float) -> np.ndarray:
+    """Build a high resolution ChArUco board image suitable for printing.
+
+    Args:
+        squares_x (int): Number of chessboard squares along the X axis.
+        squares_y (int): Number of chessboard squares along the Y axis.
+        square_size_mm (float): Physical size of each chessboard square,
+            in millimeters.
+        marker_size_mm (float): Physical size of each ArUco marker, in
+            millimeters.
+        dictionary_id (int): OpenCV ArUco predefined dictionary ID (e.g.
+            `cv2.aruco.DICT_4X4_1000`).
+        dpi (int): Render resolution, in dots per inch.
+        margin_mm (float): White margin inside the rendered image, in
+            millimeters.
+
+    Returns:
+        numpy.ndarray: A grayscale uint8 image (0..255) of the rendered
+        board.
+    """
 
     # Create the ArUco dictionary that defines the marker family.
     dictionary = cv2.aruco.getPredefinedDictionary(dictionary_id)
@@ -76,17 +95,32 @@ def build_charuco_image(squares_x: int,
     return img
 
 
-# -----------------------------------------------------------------------------
-# write_pdf_letter_landscape
-#
-# Writes the given board image into a LETTER landscape PDF at true physical size.
-# Adds a 100 mm scale bar for print verification.
-# -----------------------------------------------------------------------------
 def write_pdf_letter_landscape(out_pdf_path: str,
                                board_img_gray: np.ndarray,
                                board_w_mm: float,
                                board_h_mm: float,
                                margin_in: float) -> None:
+    """Write a board image into a LETTER landscape PDF at true physical size.
+
+    Centers the board within the printable area and adds a 100 mm scale
+    bar plus a printing-instructions note for print verification.
+
+    Args:
+        out_pdf_path (str): Destination PDF file path.
+        board_img_gray (numpy.ndarray): Grayscale board image, as returned
+            by `build_charuco_image`.
+        board_w_mm (float): Physical board width, in millimeters.
+        board_h_mm (float): Physical board height, in millimeters.
+        margin_in (float): PDF page margin around the board, in inches.
+
+    Raises:
+        RuntimeError: If the board does not fit within the usable page
+            area given `margin_in`, or if the board image fails to encode
+            as PNG.
+
+    Returns:
+        None
+    """
 
     # Use a fixed page size: US Letter in landscape orientation.
     page_w_pt, page_h_pt = landscape(letter)
@@ -151,12 +185,16 @@ def write_pdf_letter_landscape(out_pdf_path: str,
     c.save()
 
 
-# -----------------------------------------------------------------------------
-# main
-#
-# Generates charuco_letter_landscape.pdf for printing.
-# -----------------------------------------------------------------------------
 def main() -> None:
+    """Build the ChArUco board and write charuco_letter_landscape.pdf.
+
+    Uses a fixed 11x8 square board layout sized to fit LETTER landscape
+    with margins, writes the output PDF into the gitignored `output/`
+    folder (creating it if needed), and prints the output path.
+
+    Returns:
+        None
+    """
 
     # Board layout in squares (not corners).
     squares_x = 11
