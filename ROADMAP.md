@@ -72,19 +72,32 @@ decide how to restructure it further.
       typing `app: SizeamaticProApp` would require a circular import back
       into `main.py`; not worth chasing down right now.
 
-## Phase 4 — Regression testing system `[ ]`
+## Phase 4 — Regression testing system `[x]`
 
 Design and build the actual test suite (unit + any feasible integration
 tests), now that the codebase is documented and understood well enough to know
 what's testable and how. Usable by both a developer and an agent to catch
 regressions before/after changes.
 
-- [ ] Decide the testing framework/approach given the GUI+OpenCV shape of the
-      code
-- [ ] Real test fixtures (likely a small trimmed subset of what's in
-      `examples/` today)
-- [ ] Test suite covering core measurement/calibration logic
-- [ ] Document how to run tests (for humans and agents) in `AGENTS.md`
+- [x] Decide the testing framework/approach given the GUI+OpenCV shape of the
+      code — `pytest`, with a `FakeApp` stand-in (see `AGENTS.md` §Testing)
+      for the app-parameter functions instead of a real Tk GUI wherever
+      possible
+- [x] Real test fixtures — used **synthetic** fixtures with known-correct
+      expected values instead of a trimmed subset of `examples/`: real
+      calibration files have no "known correct answer" to assert against,
+      and the one large real file (`calibration_maps.npz`, 33MB) isn't
+      needed when a small synthetic remap array tests the same code path
+- [x] Test suite covering core measurement/calibration logic — 43 tests
+      across `stereo_matching.py`, `generate_calibration_report.py`,
+      `calibration_summary.py`, `create_charuco_calibration_target.py`,
+      plus one regression test per bug fixed in `FINDINGS.md`, plus
+      `smoke_test.py` folded in as an integration test
+- [x] Document how to run tests (for humans and agents) in `AGENTS.md`
+
+Deliberately out of scope: simulated GUI interaction testing (clicks/drags
+in `video_overlay.py`) — its module-level mutable state makes it awkward
+to test in isolation before the Phase 5 restructure.
 
 ## Phase 5 — Architecture restructure `[ ]`
 
