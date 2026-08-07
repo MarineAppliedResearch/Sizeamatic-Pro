@@ -30,29 +30,47 @@ docstrings, per the conventions established in Phase 1.
 
 - [x] Add `mkdocs`, `mkdocstrings[python]` as dev dependencies
 - [x] `mkdocs.yml` site config, nav structure
-- [x] Verify `mkdocs serve` renders a working API reference page from at least
-      one real docstring (confirmed via `mkdocs build --strict`, the
-      `SizeamaticProApp` docstring renders correctly)
+- [x] Verify `mkdocs build` renders a working API reference page from at
+      least one real docstring (the `SizeamaticProApp` docstring renders
+      correctly). Note: verify via `mkdocs build` + opening the static
+      HTML, not `mkdocs serve` — see `FINDINGS.md` item D for why.
+- [x] `filters: []` set in `mkdocs.yml` so private (`_`-prefixed) members
+      actually render — the default filter was hiding most of
+      `SizeamaticProApp`'s methods; see `FINDINGS.md` "Documentation
+      tooling gaps" section B (caught during Phase 3, not at initial setup)
 
-## Phase 3 — Document and analyze the existing system as-is `[ ]`
+## Phase 3 — Document and analyze the existing system as-is `[x]`
 
-Go through `main.py` (and the other first-party scripts) and add docstrings to
-everything per the Phase 1 convention (all public and private classes,
-functions, methods, and notable variables/objects). While going through the
-code this closely, do a deliberate pass looking for obvious bugs, flaws, and
-risky patterns (measurement math, rectification, calibration loading, UI state
-edge cases). Also stand up whatever tooling an agent needs to be able to
-exercise and run the app itself for testing purposes — this is documentation +
-analysis, not a refactor. The goal is a fully-documented, well-understood
-monolith before we decide how to restructure it.
+Go through `main.py` and its supporting modules (see `ARCHITECTURE.md` for
+the current file breakdown) and add docstrings to everything per the Phase 1
+convention (all public and private classes, functions, methods, and notable
+variables/objects). While going through the code this closely, do a
+deliberate pass looking for obvious bugs, flaws, and risky patterns
+(measurement math, rectification, calibration loading, UI state edge cases).
+Also stand up whatever tooling an agent needs to be able to exercise and run
+the app itself for testing purposes — this is documentation + analysis, not a
+refactor. The goal is a fully-documented, well-understood codebase before we
+decide how to restructure it further.
 
-- [ ] `main.py`
-- [ ] `generate_calibration_report.py`
-- [ ] `create_charuco_calibration_target.py`
-- [ ] Bugs/flaws findings written up somewhere durable (an issue list, or a
-      findings doc)
-- [ ] Tooling so an agent can run/exercise the app for testing purposes
-- [ ] Pass over the rendered docs site to sanity-check the output
+- [x] `main.py`
+- [x] `stereo_matching.py`
+- [x] `measurement_window.py`
+- [x] `calibration_summary.py`
+- [x] `anaglyph_preview.py`
+- [x] `video_overlay.py`
+- [x] `generate_calibration_report.py`
+- [x] `create_charuco_calibration_target.py`
+- [x] Bugs/flaws findings written up somewhere durable (an issue list, or a
+      findings doc) — see `FINDINGS.md`
+- [x] Tooling so an agent can run/exercise the app for testing purposes —
+      see `smoke_test.py`
+- [x] Pass over the rendered docs site to sanity-check the output — built
+      clean (`mkdocs build`), spot-checked rendered docstrings across
+      several modules. `--strict` mode reports ~163 warnings for missing
+      type annotations on the untyped `app` parameter/returns — expected
+      given the "type hints on new/touched code only" convention and that
+      typing `app: SizeamaticProApp` would require a circular import back
+      into `main.py`; not worth chasing down right now.
 
 ## Phase 4 — Regression testing system `[ ]`
 

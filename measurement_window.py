@@ -1,40 +1,37 @@
-# -----------------------------------------------------------------------------
-# measurement_window.py
-#
-# Author: Isaac Travers
-# Created: 2026-05-18
-# Project: Sizeamatic Pro
-#
-# Purpose:
-#   Provides the Tkinter measurement results window used by Sizeamatic Pro.
-#
-#   This module creates and updates the measurement output window, including the
-#   point diagnostics table, segment table, error/status line, and copyable text
-#   output for spreadsheet use.
-#
-# Contents:
-#   - Measurement window creation.
-#   - Point result table setup.
-#   - Segment result table setup.
-#   - Measurement status/error display.
-#   - Tab separated copy block generation.
-#
-# Design Notes:
-#   Functions in this file receive the main application object so they can access
-#   Tkinter root state, measurement widgets, and display settings owned by the
-#   app. This keeps measurement display behavior grouped in one file while
-#   preserving the current application state model.
-#
-# Assumptions:
-#   - Measurement rows passed into this module are already computed and formatted.
-#   - This module does not perform stereo triangulation or measurement math.
-#   - Widget references are stored on the app object so later update calls can
-#     reuse or rebuild the measurement window as needed.
-#
-# Dependencies:
-#   - tkinter provides the Toplevel window and text variable support.
-#   - tkinter.ttk provides themed frames, labels, and Treeview tables.
-# -----------------------------------------------------------------------------
+"""Tkinter measurement results window for Sizeamatic Pro.
+
+This module creates and updates the measurement output window, including
+the point diagnostics table, segment table, error/status line, and
+copyable text output for spreadsheet use.
+
+Contents:
+    - Measurement window creation.
+    - Point result table setup.
+    - Segment result table setup.
+    - Measurement status/error display.
+    - Tab separated copy block generation.
+
+Design notes:
+    Functions in this file receive the main application object (`app`) so
+    they can access Tkinter root state, measurement widgets, and display
+    settings owned by the app. This keeps measurement display behavior
+    grouped in one file while preserving the current application state
+    model.
+
+Assumptions:
+    - Measurement rows passed into this module are already computed and
+      formatted.
+    - This module does not perform stereo triangulation or measurement
+      math.
+    - Widget references are stored on the app object so later update calls
+      can reuse or rebuild the measurement window as needed.
+
+Author:
+    Isaac Travers
+
+Created:
+    2026-05-18
+"""
 
 # tkinter provides the measurement results window widgets.
 import tkinter as tk
@@ -43,21 +40,65 @@ import tkinter as tk
 from tkinter import ttk
 
 
-# -----------------------------------------------------------------------------
-# ensure_measurement_window
-#
-# Inputs: app provides the Tk root window and stores measurement window widget
-# references used by later measurement display updates.
-# Outputs: creates the measurement Toplevel window if needed and stores widget
-# references on app; returns nothing.
-#
-# Creates the measurement results window, including the point diagnostics table,
-# segment measurement table, error message line, and copyable text area. If the
-# window already exists, the function exits without creating another one. This
-# function only builds the UI widgets; measurement values are filled in later by
-# update_measurement_window.
-# -----------------------------------------------------------------------------
+def _on_measurement_window_close(app, win):
+    """Handle the user manually closing the measurement window.
+
+    Destroys the Tkinter window and clears the stored widget references on
+    the app object. Clearing the app references is important because the
+    next measurement update needs to know that the widgets no longer exist
+    and must be rebuilt.
+
+    Note:
+        This used to be a closure nested inside `ensure_measurement_window`
+        (`_on_close`). It's a top-level function instead so it shows up as
+        its own documented entry on the generated docs site — a function
+        defined inside another function isn't visible to `mkdocstrings` at
+        all, no matter how good its own docstring is.
+
+    Args:
+        app: The main application object, whose measurement window widget
+            references get cleared.
+        win (tkinter.Toplevel): The measurement window being closed.
+
+    Returns:
+        None
+    """
+
+    # Destroy the Tkinter window.
+    win.destroy()
+
+    # Clear the stored measurement window reference.
+    app.meas_win = None
+
+    # Clear the stored table references because the widgets were destroyed.
+    app.points_tree = None
+    app.segs_tree = None
+
+    # Clear the copy text widget reference because the widget was destroyed.
+    app.meas_copy_text = None
+
+    # Clear the error text variable reference because the window was destroyed.
+    app.meas_error_var = None
+
+
 def ensure_measurement_window(app):
+    """Create the measurement results window if it doesn't already exist.
+
+    Creates the measurement results window, including the point diagnostics
+    table, segment measurement table, error message line, and copyable
+    text area. If the window already exists, the function exits without
+    creating another one. This function only builds the UI widgets;
+    measurement values are filled in later by `update_measurement_window`.
+
+    Args:
+        app: The main application object. Provides the Tk root window, and
+            receives the created widget references (`app.meas_win`,
+            `app.points_tree`, `app.segs_tree`, `app.meas_copy_text`,
+            `app.meas_error_var`) for later measurement display updates.
+
+    Returns:
+        None
+    """
 
     # If the measurement window already exists, reuse it instead of creating a
     # duplicate Toplevel window.
@@ -74,37 +115,8 @@ def ensure_measurement_window(app):
     # copyable text box.
     win.geometry("620x520")
 
-    # -------------------------------------------------------------------------
-    # _on_close
-    #
-    # Inputs: none.
-    # Outputs: destroys the measurement window and clears stored widget
-    # references on the app object.
-    #
-    # Handles the user closing the measurement window manually. Clearing the app
-    # references is important because the next measurement update needs to know
-    # that the widgets no longer exist and must be rebuilt.
-    # -------------------------------------------------------------------------
-    def _on_close():
-
-        # Destroy the Tkinter window.
-        win.destroy()
-
-        # Clear the stored measurement window reference.
-        app.meas_win = None
-
-        # Clear the stored table references because the widgets were destroyed.
-        app.points_tree = None
-        app.segs_tree = None
-
-        # Clear the copy text widget reference because the widget was destroyed.
-        app.meas_copy_text = None
-
-        # Clear the error text variable reference because the window was destroyed.
-        app.meas_error_var = None
-
     # Use the cleanup callback when the user closes the measurement window.
-    win.protocol("WM_DELETE_WINDOW", _on_close)
+    win.protocol("WM_DELETE_WINDOW", lambda: _on_measurement_window_close(app, win))
 
     # Create one padded outer frame to hold all measurement window content.
     outer = ttk.Frame(win, padding=(10, 10))
@@ -253,21 +265,31 @@ def ensure_measurement_window(app):
     app.meas_copy_text = txt
 
 
-# -----------------------------------------------------------------------------
-# update_measurement_window
-#
-# Inputs: app provides the measurement window widgets and click uncertainty
-# setting; points_rows and seg_rows contain already formatted measurement table
-# rows; error_msg contains an optional measurement error message.
-# Outputs: updates the measurement window tables, status line, and copy text box;
-# returns nothing.
-#
-# Refreshes the measurement results window using computed point and segment rows.
-# The function clears any previous table contents, inserts the latest rows, and
-# builds a tab separated copy block that can be pasted into a spreadsheet. This
-# function only updates display widgets; it does not compute measurement values.
-# -----------------------------------------------------------------------------
 def update_measurement_window(app, points_rows, seg_rows, error_msg):
+    """Refresh the measurement window with the latest computed rows.
+
+    Refreshes the measurement results window using computed point and
+    segment rows. The function clears any previous table contents, inserts
+    the latest rows, and builds a tab separated copy block that can be
+    pasted into a spreadsheet. This function only updates display widgets;
+    it does not compute measurement values.
+
+    Args:
+        app: The main application object. Provides the measurement window
+            widgets (created via `ensure_measurement_window`) and the
+            assumed click uncertainty setting (`app.click_sigma_px`).
+        points_rows (list[tuple]): Already-formatted point diagnostic rows,
+            each `(idx, X, Y, Z, Range, Disp, dY, ReprojRMS, sZ, sRange)`,
+            matching the points table column order.
+        seg_rows (list[tuple]): Already-formatted segment rows, each
+            `(seg, dX, dY, dZ, Len, sLen)`, matching the segments table
+            column order.
+        error_msg (str | None): Optional measurement error message to show
+            in the status line instead of the assumed click uncertainty.
+
+    Returns:
+        None
+    """
 
     # Make sure the measurement window and its child widgets exist before trying
     # to update table rows or copy text.

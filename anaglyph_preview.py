@@ -1,48 +1,47 @@
-# -----------------------------------------------------------------------------
-# anaglyph_preview.py
-#
-# Author: Isaac Travers
-# Created: 2026-05-18
-# Project: Sizeamatic Pro
-#
-# Purpose:
-#   Provides the red/cyan anaglyph preview feature for Sizeamatic Pro.
-#
-#   This module manages the OpenCV preview window, preview playback state, frame
-#   stepping controls, and red/cyan anaglyph image generation used to visually
-#   inspect the current stereo video pair.
-#
-# Contents:
-#   - Anaglyph preview active and playback state.
-#   - OpenCV preview window creation and cleanup.
-#   - Preview tick/update loop.
-#   - Keyboard controls for play, pause, stepping, and closing.
-#   - Optional rectified frame display when calibration is loaded.
-#   - Red/cyan anaglyph frame generation.
-#
-# Design Notes:
-#   The View menu command remains in the main application class because it is
-#   part of the main GUI menu wiring. This module owns the preview state and
-#   implementation details for the anaglyph preview feature itself.
-#
-#   Functions in this module receive the main application object when they need
-#   access to video captures, frame indexes, calibration maps, frame reading
-#   helpers, Tkinter scheduling, or status bar updates.
-#
-# Assumptions:
-#   - Both left and right videos are loaded before the preview is started.
-#   - The main application provides readable left and right video captures.
-#   - If rectified view is enabled, the loaded calibration dictionary contains
-#     mapLx, mapLy, mapRx, and mapRy remap arrays.
-#   - The preview is a visual inspection aid and does not change measurement
-#     points, measurement results, calibration values, or video state.
-#
-# Dependencies:
-#   - OpenCV is used for the preview window, frame display, keyboard handling,
-#     frame remapping, and grayscale conversion.
-#   - NumPy is used to allocate and combine image channels.
-#
+"""Red/cyan anaglyph preview feature for Sizeamatic Pro.
 
+This module manages the OpenCV preview window, preview playback state,
+frame stepping controls, and red/cyan anaglyph image generation used to
+visually inspect the current stereo video pair.
+
+Contents:
+    - Anaglyph preview active and playback state.
+    - OpenCV preview window creation and cleanup.
+    - Preview tick/update loop.
+    - Keyboard controls for play, pause, stepping, and closing.
+    - Optional rectified frame display when calibration is loaded.
+    - Red/cyan anaglyph frame generation.
+
+Design notes:
+    The View menu command remains in the main application class because it
+    is part of the main GUI menu wiring. This module owns the preview state
+    and implementation details for the anaglyph preview feature itself.
+
+    Functions in this module receive the main application object (`app`)
+    when they need access to video captures, frame indexes, calibration
+    maps, frame reading helpers, Tkinter scheduling, or status bar updates.
+
+    The preview loop mixes OpenCV's own window/event handling
+    (`cv2.imshow`/`cv2.waitKey`) with Tkinter's `after()` scheduling. This
+    is a known-workable pattern but is a bit fragile: it depends on
+    `cv2.waitKey()` being called on every tick to keep the OpenCV window
+    responsive, and on `app.root.after()` continuing to fire on schedule.
+
+Assumptions:
+    - Both left and right videos are loaded before the preview is started.
+    - The main application provides readable left and right video captures.
+    - If rectified view is enabled, the loaded calibration dictionary
+      contains `mapLx`, `mapLy`, `mapRx`, and `mapRy` remap arrays.
+    - The preview is a visual inspection aid and does not change
+      measurement points, measurement results, calibration values, or
+      video state.
+
+Author:
+    Isaac Travers
+
+Created:
+    2026-05-18
+"""
 
 # OpenCV is used for stereo triangulation, template matching, projection, and
 # other image-space measurement operations.
@@ -51,32 +50,54 @@ import cv2
 # NumPy is used to build OpenCV-compatible point arrays and perform vector math.
 import numpy as np
 
-# Tracks whether the anaglyph preview loop is currently active.
 anaglyph_active = False
+"""Whether the anaglyph preview loop is currently active. Set True by
+`start_anaglyph_preview`, False by `stop_anaglyph_preview`; `anaglyph_tick`
+checks this first thing on every tick to decide whether to keep
+rescheduling itself."""
 
-# Tracks whether the preview advances frames automatically.
 anaglyph_playing = False
+"""Whether the preview auto-advances frames. The preview always opens
+paused (so the user can inspect the first frame before anything moves) —
+pressing Space toggles this in `anaglyph_tick`'s keyboard handling."""
 
-# Stores the frame index currently being previewed.
 anaglyph_index = 0
+"""Frame index currently shown in the preview window. Deliberately
+separate from the main app's left/right timeline indices — the preview
+has its own scrubbing position, only seeded from the left timeline's
+current index at the moment the preview opens."""
 
-# Stores the OpenCV window name used for the preview.
 anaglyph_window_name = "Anaglyph 3D Preview"
+"""OpenCV window title for the preview. `main.py` overrides this to
+"Sizeamatic Pro - Anaglyph 3D" when constructing `SizeamaticProApp`, so
+what the user actually sees matches the app's branding rather than this
+module's generic default."""
+
+anaglyph_after_id = None
+"""Tkinter `after()` job ID for the scheduled preview tick, so it can be
+cancelled when the preview stops. Initialized to `None` up front — rather
+than only coming into existence the first time `anaglyph_tick` reaches its
+own assignment to this variable — specifically so `stop_anaglyph_preview`
+can safely check it even if the very first tick fails before getting that
+far. See `FINDINGS.md` #2 for the bug this was guarding against."""
 
 
-# -----------------------------------------------------------------------------
-# start_anaglyph_preview
-#
-# Inputs: app provides the current left frame index, status display helper, and
-# anaglyph tick/update behavior.
-# Outputs: opens the OpenCV anaglyph preview window, initializes preview state,
-# and starts the preview update loop; returns nothing.
-#
-# Starts the anaglyph preview at the current left video frame so the preview opens
-# near the user's current timeline position. The preview starts paused by default,
-# allowing the user to inspect the first anaglyph frame before playing.
-# -----------------------------------------------------------------------------
 def start_anaglyph_preview(app):
+    """Open the anaglyph preview window and start the preview loop.
+
+    Starts the anaglyph preview at the current left video frame so the
+    preview opens near the user's current timeline position. The preview
+    starts paused by default, allowing the user to inspect the first
+    anaglyph frame before playing.
+
+    Args:
+        app: The main application object, used to read the current left
+            frame index (`app.left_frame_index`) and to display status
+            text (`app._set_status_mid`).
+
+    Returns:
+        None
+    """
 
     # Use module level state so anaglyph preview state lives with the feature
     # implementation instead of on the main application object.
@@ -101,18 +122,21 @@ def start_anaglyph_preview(app):
     anaglyph_tick(app)
 
 
-# -----------------------------------------------------------------------------
-# stop_anaglyph_preview
-#
-# Inputs: app provides the Tk root scheduler and status display helper.
-# Outputs: cancels the preview update loop, closes the OpenCV preview window,
-# resets preview state, and returns nothing.
-#
-# Stops the red/cyan anaglyph preview feature. This function is safe to call from
-# the menu toggle, from the preview tick when the OpenCV window is closed, or from
-# keyboard handling when the user presses Q or ESC.
-# -----------------------------------------------------------------------------
 def stop_anaglyph_preview(app):
+    """Stop the anaglyph preview and close its OpenCV window.
+
+    Stops the red/cyan anaglyph preview feature. This function is safe to
+    call from the menu toggle, from the preview tick when the OpenCV window
+    is closed, or from keyboard handling when the user presses Q or ESC.
+
+    Args:
+        app: The main application object, used to cancel the scheduled
+            Tkinter tick (`app.root.after_cancel`) and to display status
+            text (`app._set_status_mid`).
+
+    Returns:
+        None
+    """
 
     # Use module level state so the preview state stays inside this feature file.
     global anaglyph_active
@@ -140,20 +164,24 @@ def stop_anaglyph_preview(app):
     app._set_status_mid("Anaglyph preview closed")
 
 
-# -----------------------------------------------------------------------------
-# anaglyph_tick
-#
-# Inputs: app provides video captures, frame metadata, calibration state, frame
-# reading helper, and Tk root scheduling.
-# Outputs: updates the OpenCV anaglyph preview window and schedules the next
-# preview tick; returns nothing.
-#
-# Runs one update pass of the anaglyph preview loop. The function reads the left
-# and right frames at the current anaglyph index, optionally remaps them into
-# rectified view, builds a red/cyan anaglyph image, displays it in the OpenCV
-# preview window, handles keyboard controls, and schedules the next tick.
-# -----------------------------------------------------------------------------
 def anaglyph_tick(app):
+    """Run one update pass of the anaglyph preview loop.
+
+    Runs one update pass of the anaglyph preview loop. The function reads
+    the left and right frames at the current anaglyph index, optionally
+    remaps them into rectified view, builds a red/cyan anaglyph image,
+    displays it in the OpenCV preview window, handles keyboard controls,
+    and schedules the next tick.
+
+    Args:
+        app: The main application object, used for video captures
+            (`app.capL`/`app.capR`), frame metadata, calibration state
+            (`app.cal`), the frame reading helper (`app._read_frame_at`),
+            and Tk root scheduling (`app.root.after`).
+
+    Returns:
+        None
+    """
 
     # Use module level state so the preview state stays inside this feature file.
     global anaglyph_active
@@ -264,19 +292,24 @@ def anaglyph_tick(app):
     anaglyph_after_id = app.root.after(40, lambda: anaglyph_tick(app))
 
 
-# -----------------------------------------------------------------------------
-# make_anaglyph_red_cyan
-#
-# Inputs: frameL_bgr and frameR_bgr are left and right video frames in OpenCV BGR
-# image format.
-# Outputs: returns a red/cyan anaglyph image in BGR format for cv2.imshow.
-#
-# Builds a simple grayscale red/cyan anaglyph for stereo preview. The left frame
-# supplies the red channel, and the right frame supplies the green and blue
-# channels. This preview is meant for visual inspection only and does not affect
-# measurement results.
-# -----------------------------------------------------------------------------
 def make_anaglyph_red_cyan(frameL_bgr, frameR_bgr):
+    """Build a red/cyan anaglyph image from a left/right frame pair.
+
+    Builds a simple grayscale red/cyan anaglyph for stereo preview. The
+    left frame supplies the red channel, and the right frame supplies the
+    green and blue channels. This preview is meant for visual inspection
+    only and does not affect measurement results.
+
+    Args:
+        frameL_bgr (numpy.ndarray): Left video frame in OpenCV BGR image
+            format.
+        frameR_bgr (numpy.ndarray): Right video frame in OpenCV BGR image
+            format.
+
+    Returns:
+        numpy.ndarray: A red/cyan anaglyph image in BGR format, suitable
+        for `cv2.imshow`.
+    """
 
     # Convert the left frame to grayscale so it can be placed into the red channel.
     gL = cv2.cvtColor(frameL_bgr, cv2.COLOR_BGR2GRAY)

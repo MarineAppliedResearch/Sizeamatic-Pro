@@ -1,48 +1,40 @@
-# -----------------------------------------------------------------------------
-# stereo_matching.py
-#
-# Author: Isaac Travers
-# Created: 2026-05-18
-# Project: Sizeamatic Pro
-#
-# Purpose:
-#   Provides stereo matching and stereo measurement helper functions for the
-#   Sizeamatic Pro application.
-#
-#   This module supports matched point selection, stereo triangulation,
-#   reprojection checks, and practical uncertainty estimates for measurements
-#   made from rectified left and right stereo camera views.
-#
-# Contents:
-#   - Scanline based mate point guessing for rectified stereo images.
-#   - Pixel perturbation helpers used for uncertainty estimates.
-#   - Triangulation from matched left and right image coordinates.
-#   - Projection of reconstructed 3D points back into image coordinates.
-#   - Reprojection RMS error calculations.
-#   - Point depth and range uncertainty estimates.
-#   - Segment length and segment uncertainty estimates.
-#   - Formatting helpers for measurement display.
-#
-# Design Notes:
-#   Some functions receive the main application object so they can access current
-#   clicked point lists, rectified view state, and loaded calibration data. This
-#   keeps stereo measurement behavior grouped in one file while preserving the
-#   application's current state model.
-#
-# Assumptions:
-#   - Measurement points are in rectified image coordinates.
-#   - The loaded calibration dictionary contains rectified projection matrices
-#     named "PL" and "PR".
-#   - Calibration translation units determine the output 3D units. In this
-#     application, those units are normally millimeters.
-#   - Reprojection and perturbation based uncertainty estimates are practical
-#     consistency checks, not complete models of total measurement error.
-#
-# Dependencies:
-#   - OpenCV is used for template matching, triangulation, and projection related
-#     operations.
-#   - NumPy is used for OpenCV compatible arrays and numeric calculations.
-# -----------------------------------------------------------------------------
+"""Stereo matching and stereo measurement helpers for Sizeamatic Pro.
+
+This module supports matched point selection, stereo triangulation,
+reprojection checks, and practical uncertainty estimates for measurements
+made from rectified left and right stereo camera views.
+
+Contents:
+    - Scanline based mate point guessing for rectified stereo images.
+    - Pixel perturbation helpers used for uncertainty estimates.
+    - Triangulation from matched left and right image coordinates.
+    - Projection of reconstructed 3D points back into image coordinates.
+    - Reprojection RMS error calculations.
+    - Point depth and range uncertainty estimates.
+    - Segment length and segment uncertainty estimates.
+
+Design notes:
+    Some functions receive the main application object (`app`) so they can
+    access current clicked point lists, rectified view state, and loaded
+    calibration data. This keeps stereo measurement behavior grouped in one
+    file while preserving the application's current state model.
+
+Assumptions:
+    - Measurement points are in rectified image coordinates.
+    - The loaded calibration dictionary contains rectified projection
+      matrices named "PL" and "PR".
+    - Calibration translation units determine the output 3D units. In this
+      application, those units are normally millimeters.
+    - Reprojection and perturbation based uncertainty estimates are
+      practical consistency checks, not complete models of total
+      measurement error.
+
+Author:
+    Isaac Travers
+
+Created:
+    2026-05-18
+"""
 
 # Standard library imports.
 
@@ -56,23 +48,44 @@ import cv2
 import numpy as np
 
 
-# -------------------------------------------------------------------------
-    # guess_mate_point_on_scanline
-    #
-    # Inputs: which_src identifies the clicked pane ("L" or "R"), x_src/y_src are
-    # source image pixel coordinates, x_hint optionally centers the opposite-image
-    # search, and search_half_width controls the horizontal search range.
-    # Outputs: returns a guessed opposite-image point as (x, y) floats, or None if
-    # the guess cannot be made safely.
-    #
-    # Uses a small grayscale template around the clicked source point and searches
-    # for the best matching patch along the same rectified scanline in the opposite
-    # image. This is only a measurement aid: it assumes rectified frames, does not
-    # prove the match is correct, and should still allow the user to inspect or
-    # manually adjust the guessed mate point.
-    # -------------------------------------------------------------------------
 def guess_mate_point_on_scanline(app, which_src, x_src, y_src, x_hint=None, search_half_width=120):
-        
+    """Guess the matching point in the opposite rectified stereo image.
+
+    Uses a small grayscale template around the clicked source point and
+    searches for the best matching patch along the same rectified scanline
+    in the opposite image. This is only a measurement aid: it assumes
+    rectified frames, does not prove the match is correct, and should still
+    allow the user to inspect or manually adjust the guessed mate point.
+
+    Note:
+        This search assumes the rectified stereo pair is vertically aligned
+        well enough that the true mate point is on the same image row as the
+        clicked source point. In real footage, small calibration,
+        rectification, lens, synchronization, vibration, blur, or
+        click-placement errors can leave the best mate point one or more
+        pixels above or below the source scanline. Because this helper only
+        searches horizontally, it may miss the correct feature or choose a
+        weaker match when there is residual vertical error.
+
+    Args:
+        app: The main application object, used to read the rectified-view
+            flag, loaded calibration, and cached current left/right frames.
+        which_src (str): Which pane was clicked, "L" or "R".
+        x_src (float): Clicked source image X pixel coordinate.
+        y_src (float): Clicked source image Y pixel coordinate.
+        x_hint (float | None): Optional X coordinate to center the
+            opposite-image search around, used for post-drag refinement
+            instead of the default source-X-centered search.
+        search_half_width (int): Half-width, in pixels, of the horizontal
+            search range in the opposite image.
+
+    Returns:
+        tuple[float, float] | None: The guessed opposite-image point as
+        (x, y), or None if the guess cannot be made safely (rectified view
+        disabled, no calibration, missing frames, or the template/search
+        region falls outside the image bounds).
+    """
+
     # NOTE:
     # This search assumes the rectified stereo pair is vertically aligned well
     # enough that the true mate point is on the same image row as the clicked
@@ -195,21 +208,29 @@ def guess_mate_point_on_scanline(app, which_src, x_src, y_src, x_hint=None, sear
     return (float(best_x), float(best_y))
 
 
-# -------------------------------------------------------------------------
-# triangulate_from_pixels
-#
-# Inputs: xL/yL are the left rectified image pixel coordinates, and xR/yR are
-# the right rectified image pixel coordinates for the same physical point.
-# Outputs: returns the triangulated 3D point as (X, Y, Z) in calibration units,
-# or None if the homogeneous result cannot be safely normalized.
-#
-# Uses the rectified left and right projection matrices from the loaded
-# calibration to reconstruct one matched stereo point in 3D. The left and
-# right Y values are averaged before triangulation so small manual vertical
-# click differences do not directly enter the 3D solve. This assumes the
-# input pixels are already in the coordinate space expected by PL and PR.
-# -------------------------------------------------------------------------
 def triangulate_from_pixels(app, xL, yL, xR, yR):
+    """Triangulate one matched stereo pixel pair into a 3D point.
+
+    Uses the rectified left and right projection matrices from the loaded
+    calibration to reconstruct one matched stereo point in 3D. The left and
+    right Y values are averaged before triangulation so small manual
+    vertical click differences do not directly enter the 3D solve. This
+    assumes the input pixels are already in the coordinate space expected by
+    PL and PR.
+
+    Args:
+        app: The main application object, used to read the loaded
+            calibration's "PL"/"PR" rectified projection matrices.
+        xL (float): Left rectified image X pixel coordinate.
+        yL (float): Left rectified image Y pixel coordinate.
+        xR (float): Right rectified image X pixel coordinate.
+        yR (float): Right rectified image Y pixel coordinate.
+
+    Returns:
+        tuple[float, float, float] | None: The triangulated 3D point as
+        (X, Y, Z) in calibration units, or None if the homogeneous result
+        cannot be safely normalized (W too close to zero).
+    """
 
     # In a rectified stereo pair, corresponding points should lie on the same scanline.
     # Manual clicks may differ slightly in Y between left and right, even when the user
@@ -224,7 +245,7 @@ def triangulate_from_pixels(app, xL, yL, xR, yR):
 
     # Use the left and right rectified projection matrices to reconstruct the
     # 3D point from the matched left/right image coordinates.
-    
+
     # OpenCV returns the result in homogeneous coordinates, meaning the first
     # three values still need to be divided by the fourth value, W.
     Xh = cv2.triangulatePoints(app.cal["PL"], app.cal["PR"], ptsL, ptsR)
@@ -246,21 +267,26 @@ def triangulate_from_pixels(app, xL, yL, xR, yR):
     return (X, Y, Z)
 
 
-# -----------------------------------------------------------------------------
-# triangulate_point_pair
-#
-# Inputs: app provides the rectified-view state, loaded calibration, and clicked
-# left/right point lists; index selects the matched point pair to triangulate.
-# Outputs: returns ((X, Y, Z), None) on success, or (None, error_message) if the
-# point pair cannot be triangulated safely.
-#
-# Validates that rectified stereo measurement is currently available, confirms
-# that the requested left/right point pair exists, reads the matched clicked
-# pixels from the app state, and passes those pixels to triangulate_from_pixels.
-# This keeps point-list validation separate from the lower-level triangulation
-# math.
-# -----------------------------------------------------------------------------
 def triangulate_point_pair(app, index):
+    """Triangulate one clicked left/right point pair by index.
+
+    Validates that rectified stereo measurement is currently available,
+    confirms that the requested left/right point pair exists, reads the
+    matched clicked pixels from the app state, and passes those pixels to
+    `triangulate_from_pixels`. This keeps point-list validation separate
+    from the lower-level triangulation math.
+
+    Args:
+        app: The main application object, used to read the rectified-view
+            flag, loaded calibration, and clicked left/right point lists
+            (`app.ptsL`, `app.ptsR`).
+        index (int): Index of the matched left/right point pair to
+            triangulate.
+
+    Returns:
+        tuple: `((X, Y, Z), None)` on success, or `(None, error_message)` if
+        the point pair cannot be triangulated safely.
+    """
 
     # Measurements require rectified image coordinates and rectified projection
     # matrices, so do not triangulate while the app is showing raw camera frames.
@@ -303,19 +329,27 @@ def triangulate_point_pair(app, index):
     return P, None
 
 
-# -----------------------------------------------------------------------------
-# project_point
-#
-# Inputs: P is a 3x4 projection matrix, and X/Y/Z are the 3D point coordinates in
-# the same calibration coordinate system expected by that projection matrix.
-# Outputs: returns projected image coordinates as (u, v) floats, or None if the
-# homogeneous projection cannot be safely normalized.
-#
-# Projects one 3D point back into image pixel space. This is mainly used for
-# reprojection checks, where a triangulated 3D point is projected back into the
-# left or right image and compared against the original clicked image point.
-# -----------------------------------------------------------------------------
 def project_point(P, X, Y, Z):
+    """Project one 3D point into image pixel space.
+
+    This is mainly used for reprojection checks, where a triangulated 3D
+    point is projected back into the left or right image and compared
+    against the original clicked image point.
+
+    Args:
+        P (numpy.ndarray): A 3x4 camera projection matrix.
+        X (float): 3D point X coordinate, in the calibration coordinate
+            system expected by `P`.
+        Y (float): 3D point Y coordinate, in the calibration coordinate
+            system expected by `P`.
+        Z (float): 3D point Z coordinate, in the calibration coordinate
+            system expected by `P`.
+
+    Returns:
+        tuple[float, float] | None: The projected image coordinates as
+        (u, v), or None if the homogeneous projection cannot be safely
+        normalized (w too close to zero).
+    """
 
     # Build the 3D point in homogeneous form so it can be multiplied by the
     # 3x4 camera projection matrix.
@@ -340,20 +374,25 @@ def project_point(P, X, Y, Z):
     return (u, v)
 
 
-# -----------------------------------------------------------------------------
-# reprojection_rms_px
-#
-# Inputs: app provides the clicked point lists and loaded calibration data; index
-# selects which clicked left/right point pair to evaluate.
-# Outputs: returns the left/right reprojection RMS error in pixels, or None if the
-# point cannot be triangulated or projected safely.
-#
-# Triangulates one clicked stereo point pair into 3D, projects that 3D point back
-# into both rectified camera images, and compares the projected pixels against the
-# original clicked pixels. This gives a pixel-space consistency check for the
-# selected point pair.
-# -----------------------------------------------------------------------------
 def reprojection_rms_px(app, index):
+    """Compute the pixel-space reprojection RMS error for a clicked point pair.
+
+    Triangulates one clicked stereo point pair into 3D, projects that 3D
+    point back into both rectified camera images, and compares the
+    projected pixels against the original clicked pixels. This gives a
+    pixel-space consistency check for the selected point pair.
+
+    Args:
+        app: The main application object, used to read clicked point lists
+            and loaded calibration data.
+        index (int): Index of the clicked left/right point pair to
+            evaluate.
+
+    Returns:
+        float | None: The combined left/right reprojection RMS error in
+        pixels, or None if the point cannot be triangulated or projected
+        safely.
+    """
 
     # Triangulate the selected clicked left/right point pair into one 3D point.
     P, err = triangulate_point_pair(app, index)
@@ -399,19 +438,24 @@ def reprojection_rms_px(app, index):
     return float(erms)
 
 
-# -----------------------------------------------------------------------------
-# endpoint_perturbs
-#
-# Inputs: app provides the clicked left/right point lists, idx selects the endpoint
-# point to perturb, and sigma_px is the image-space perturbation amount in pixels.
-# Outputs: returns a list of perturbed left/right pixel coordinate tuples.
-#
-# Builds the eight single-coordinate perturbations for one clicked stereo endpoint.
-# Each perturbation moves only one of xL, yL, xR, or yR by ±sigma_px while leaving
-# the other image coordinates unchanged. This helper is used by segment uncertainty
-# estimation to test how endpoint click error affects measured length.
-# -----------------------------------------------------------------------------
 def endpoint_perturbs(app, idx, sigma_px):
+    """Build the eight single-coordinate perturbations for a clicked endpoint.
+
+    Each perturbation moves only one of xL, yL, xR, or yR by ±sigma_px while
+    leaving the other image coordinates unchanged. This helper is used by
+    segment uncertainty estimation to test how endpoint click error affects
+    measured length.
+
+    Args:
+        app: The main application object, used to read clicked left/right
+            point lists (`app.ptsL`, `app.ptsR`).
+        idx (int): Index of the clicked endpoint to perturb.
+        sigma_px (float): Image-space perturbation amount, in pixels.
+
+    Returns:
+        list[tuple[float, float, float, float]]: A list of eight perturbed
+        (xL, yL, xR, yR) pixel coordinate tuples.
+    """
 
     # Read the clicked left and right image coordinates for this endpoint.
     xL, yL = app.ptsL[idx]
@@ -430,21 +474,27 @@ def endpoint_perturbs(app, idx, sigma_px):
     ]
 
 
-# -----------------------------------------------------------------------------
-# estimate_point_sigma_mm
-#
-# Inputs: app provides clicked point lists and calibration data, index selects the
-# matched point pair to test, and sigma_px is the assumed click uncertainty in
-# image pixels.
-# Outputs: returns (sigma_Z, sigma_range) in calibration units, normally
-# millimeters, or None if the uncertainty estimate cannot be computed safely.
-#
-# Estimates how sensitive one triangulated 3D point is to small image-space click
-# errors. The function perturbs each left/right pixel coordinate by ±sigma_px,
-# retriangulates each perturbed point pair, and uses the spread in resulting Z
-# and 3D range values as a practical local uncertainty estimate.
-# -----------------------------------------------------------------------------
 def estimate_point_sigma_mm(app, index, sigma_px):
+    """Estimate local depth/range uncertainty for one triangulated point.
+
+    Estimates how sensitive one triangulated 3D point is to small
+    image-space click errors. The function perturbs each left/right pixel
+    coordinate by ±sigma_px, retriangulates each perturbed point pair, and
+    uses the spread in resulting Z and 3D range values as a practical local
+    uncertainty estimate.
+
+    Args:
+        app: The main application object, used to read clicked point lists
+            and calibration data.
+        index (int): Index of the matched point pair to test.
+        sigma_px (float): Assumed click uncertainty, in image pixels.
+
+    Returns:
+        tuple[float, float] | None: `(sigma_Z, sigma_range)` in calibration
+        units (normally millimeters), or None if the uncertainty estimate
+        cannot be computed safely (baseline triangulation fails, or fewer
+        than 4 perturbations triangulate successfully).
+    """
 
     # Read the matched left and right clicked points in image pixel coordinates.
     xL, yL = app.ptsL[index]
@@ -502,21 +552,28 @@ def estimate_point_sigma_mm(app, index, sigma_px):
     return (sZ, sR)
 
 
-# -----------------------------------------------------------------------------
-# estimate_segment_sigma_len_mm
-#
-# Inputs: app provides clicked point lists and calibration data, i0/i1 select the
-# two matched stereo endpoints, and sigma_px is the assumed click uncertainty in
-# image pixels.
-# Outputs: returns (length, sigma_length) in calibration units, normally
-# millimeters, or None if the segment uncertainty cannot be computed safely.
-#
-# Triangulates the two selected stereo endpoints into 3D, computes the baseline
-# segment length, then perturbs each endpoint independently to estimate how much
-# click uncertainty affects the measured length. This estimates local sensitivity
-# to endpoint click error, not total measurement uncertainty.
-# -----------------------------------------------------------------------------
 def estimate_segment_sigma_len_mm(app, i0, i1, sigma_px):
+    """Estimate local length uncertainty for a segment between two endpoints.
+
+    Triangulates the two selected stereo endpoints into 3D, computes the
+    baseline segment length, then perturbs each endpoint independently to
+    estimate how much click uncertainty affects the measured length. This
+    estimates local sensitivity to endpoint click error, not total
+    measurement uncertainty.
+
+    Args:
+        app: The main application object, used to read clicked point lists
+            and calibration data.
+        i0 (int): Index of the first endpoint.
+        i1 (int): Index of the second endpoint.
+        sigma_px (float): Assumed click uncertainty, in image pixels.
+
+    Returns:
+        tuple[float, float] | None: `(length, sigma_length)` in calibration
+        units (normally millimeters), or None if the segment uncertainty
+        cannot be computed safely (invalid indexes, baseline triangulation
+        fails, or fewer than 6 perturbations triangulate successfully).
+    """
 
     # Reject invalid negative endpoint indexes before reading point lists.
     if i0 < 0 or i1 < 0:

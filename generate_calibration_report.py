@@ -1,29 +1,27 @@
-# OpenCV Stereo Calibration Report Generator
-#
-# Author:
-# Date:
-#
-# Purpose:
-#   Read OpenCV stereo calibration .npz files and generate a responsive HTML report
-#   with tables, graphs, and layman friendly explanations.
-#
-# Output:
-#   Creates a new timestamped report folder containing:
-#     index.html
-#     calibration_report.txt
-#     assets/
-#       report_data.json
-#       plot_*.png
-#       calibration_*.npz (copies of inputs)
-#       chart.umd.min.js (optional local Chart.js, if you place it there)
-#
-# Intended input files (in one directory):
-#   calibration_intrinsics.npz
-#   calibration_extrinsics.npz
-#   calibration_rectification.npz
-#   calibration_maps.npz (optional)
-# python generate_calibration_report.py --calib_dir "examples/calibration" --out_root "./examples/calibration"
+"""OpenCV stereo calibration report generator.
 
+Reads OpenCV stereo calibration .npz files and generates a responsive HTML
+report with tables, graphs, and layman friendly explanations.
+
+Output:
+    Creates a new timestamped report folder containing:
+        index.html
+        calibration_report.txt
+        assets/
+            report_data.json
+            plot_*.png
+            calibration_*.npz (copies of inputs)
+            chart.umd.min.js (optional local Chart.js, if you place it there)
+
+Intended input files (in one directory):
+    calibration_intrinsics.npz
+    calibration_extrinsics.npz
+    calibration_rectification.npz
+    calibration_maps.npz (optional)
+
+Usage:
+    python generate_calibration_report.py --calib_dir "examples/calibration" --out_root "./examples/calibration"
+"""
 
 import os
 import re
@@ -38,29 +36,61 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-# Return current timestamp string for folder naming
 def get_timestamp_string():
+    """Return the current timestamp as a string, for folder naming.
+
+    Returns:
+        str: Local time formatted as "%Y%m%d_%H%M%S".
+    """
 
     # Use local time for human readability
     return time.strftime("%Y%m%d_%H%M%S")
 
 
-# Clamp a number into a safe range
 def clamp(value, min_value, max_value):
+    """Clamp a number into a safe [min_value, max_value] range.
+
+    Args:
+        value (float): The value to clamp.
+        min_value (float): Inclusive lower bound.
+        max_value (float): Inclusive upper bound.
+
+    Returns:
+        float: The clamped value. Used to prevent numeric issues in
+        `math.acos` and related operations.
+    """
 
     # Prevent numeric issues in acos and related operations
     return max(min_value, min(max_value, value))
 
 
-# Convert radians to degrees
 def rad_to_deg(radians):
+    """Convert radians to degrees.
+
+    Args:
+        radians (float): Angle in radians.
+
+    Returns:
+        float: Angle in degrees.
+    """
 
     # Convert angle units for humans
     return float(radians) * 180.0 / math.pi
 
 
-# Load a .npz file into a standard python dict
 def load_npz_dict(npz_path):
+    """Load a .npz file into a standard python dict.
+
+    Args:
+        npz_path (pathlib.Path): Path to the .npz file.
+
+    Raises:
+        FileNotFoundError: If `npz_path` does not exist.
+
+    Returns:
+        dict: Mapping of array name to `numpy.ndarray`, for every array
+        stored in the file.
+    """
 
     # Ensure we fail loudly if a required file is missing
     if not npz_path.exists():
@@ -73,8 +103,16 @@ def load_npz_dict(npz_path):
     return {k: data[k] for k in data.files}
 
 
-# Write a dict as pretty JSON
 def write_json(path, payload):
+    """Write a dict as pretty-printed JSON, creating parent dirs as needed.
+
+    Args:
+        path (pathlib.Path): Destination file path.
+        payload (dict): The JSON-serializable payload to write.
+
+    Returns:
+        None
+    """
 
     # Ensure parent directory exists
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -84,8 +122,16 @@ def write_json(path, payload):
         json.dump(payload, f, indent=2)
 
 
-# Write a plain text file
 def write_text(path, text):
+    """Write a plain text file, creating parent dirs as needed.
+
+    Args:
+        path (pathlib.Path): Destination file path.
+        text (str): The text content to write.
+
+    Returns:
+        None
+    """
 
     # Ensure parent directory exists
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -95,8 +141,16 @@ def write_text(path, text):
         f.write(text)
 
 
-# Save a matplotlib figure to a file
 def save_plot(fig, out_path):
+    """Save a matplotlib figure to a file and close it.
+
+    Args:
+        fig (matplotlib.figure.Figure): The figure to save.
+        out_path (pathlib.Path): Destination file path.
+
+    Returns:
+        None
+    """
 
     # Ensure parent directory exists
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -108,8 +162,18 @@ def save_plot(fig, out_path):
     plt.close(fig)
 
 
-# Compute field of view from focal length in pixels and image dimension in pixels
 def compute_fov_degrees(f_pixels, size_pixels):
+    """Compute field of view from focal length and image dimension, in pixels.
+
+    Args:
+        f_pixels (float): Focal length, in pixels.
+        size_pixels (float): Image width or height, in pixels.
+
+    Returns:
+        float: Field of view in degrees, using the pinhole model
+        approximation `FOV = 2*atan((size/2)/f)`. Returns NaN if
+        `f_pixels` is not positive.
+    """
 
     # Use pinhole model approximation
     f_pixels = float(f_pixels)
@@ -123,8 +187,19 @@ def compute_fov_degrees(f_pixels, size_pixels):
     return rad_to_deg(2.0 * math.atan((size_pixels * 0.5) / f_pixels))
 
 
-# Compute diagonal field of view from focal length and image width and height
 def compute_diag_fov_degrees(f_pixels, width_pixels, height_pixels):
+    """Compute diagonal field of view from focal length and image dimensions.
+
+    Args:
+        f_pixels (float): Focal length, in pixels.
+        width_pixels (float): Image width, in pixels.
+        height_pixels (float): Image height, in pixels.
+
+    Returns:
+        float: Diagonal field of view in degrees, using the pinhole model
+        approximation `FOV = 2*atan((diag/2)/f)`. Returns NaN if
+        `f_pixels` is not positive.
+    """
 
     # Compute half diagonal in pixels
     half_diag = math.sqrt((float(width_pixels) * 0.5) ** 2 + (float(height_pixels) * 0.5) ** 2)
@@ -137,8 +212,17 @@ def compute_diag_fov_degrees(f_pixels, width_pixels, height_pixels):
     return rad_to_deg(2.0 * math.atan(half_diag / float(f_pixels)))
 
 
-# Compute rotation angle between cameras from rotation matrix
 def compute_rotation_angle_degrees(R):
+    """Compute the relative rotation angle between cameras from a rotation matrix.
+
+    Args:
+        R (numpy.ndarray): 3x3 relative rotation matrix between the two
+            cameras.
+
+    Returns:
+        float: Rotation angle in degrees, derived from the matrix trace
+        (clamped for numerical stability before `acos`).
+    """
 
     # Extract trace for angle
     tr = float(np.trace(R))
@@ -153,15 +237,32 @@ def compute_rotation_angle_degrees(R):
     return rad_to_deg(math.acos(c))
 
 
-# Compute baseline length from translation vector
 def compute_baseline_units(T):
+    """Compute baseline length (camera separation) from a translation vector.
+
+    Args:
+        T (numpy.ndarray): Stereo translation vector between the two
+            cameras, in calibration units.
+
+    Returns:
+        float: The baseline length, i.e. the norm of `T`, in calibration
+        units.
+    """
 
     # Baseline is the norm of the translation vector
     return float(np.linalg.norm(T.reshape(-1)))
 
 
-# Convert units to meters using a provided scale
 def units_to_meters(value_units, mm_per_unit):
+    """Convert a value in calibration units to meters.
+
+    Args:
+        value_units (float): The value, in calibration units.
+        mm_per_unit (float): Millimeters per calibration unit.
+
+    Returns:
+        float: The value in meters.
+    """
 
     # Convert to millimeters then to meters
     mm = float(value_units) * float(mm_per_unit)
@@ -170,8 +271,16 @@ def units_to_meters(value_units, mm_per_unit):
     return mm / 1000.0
 
 
-# Convert meters to calibration units using a provided scale
 def meters_to_units(value_m, mm_per_unit):
+    """Convert a value in meters to calibration units.
+
+    Args:
+        value_m (float): The value, in meters.
+        mm_per_unit (float): Millimeters per calibration unit.
+
+    Returns:
+        float: The value in calibration units.
+    """
 
     # Convert meters to millimeters
     mm = float(value_m) * 1000.0
@@ -180,8 +289,24 @@ def meters_to_units(value_m, mm_per_unit):
     return mm / float(mm_per_unit)
 
 
-# Compute stereo depth and error curves using rectified focal length and baseline
 def compute_depth_error_curves(depth_m_array, f_rect_px, baseline_units, mm_per_unit, sigma_disp_px):
+    """Compute stereo depth and depth-error curves over a range of depths.
+
+    Args:
+        depth_m_array (numpy.ndarray): Depth values to evaluate, in
+            meters.
+        f_rect_px (float): Rectified focal length, in pixels.
+        baseline_units (float): Stereo baseline, in calibration units.
+        mm_per_unit (float): Millimeters per calibration unit, used to
+            convert the baseline to meters.
+        sigma_disp_px (float): Assumed disparity measurement uncertainty,
+            in pixels.
+
+    Returns:
+        dict: Packed arrays with keys "depth_m", "disparity_px",
+        "sigma_z_m" (absolute depth uncertainty), and "rel_sigma"
+        (`sigma_z_m / depth_m`).
+    """
 
     # Convert baseline to meters for formula usage
     baseline_m = units_to_meters(baseline_units, mm_per_unit)
@@ -216,8 +341,24 @@ def compute_depth_error_curves(depth_m_array, f_rect_px, baseline_units, mm_per_
     }
 
 
-# Compute length measurement uncertainty curves at depth
 def compute_length_error_curves(depth_m_array, f_rect_px, sigma_len_px, example_length_mm):
+    """Compute length-measurement uncertainty curves over a range of depths.
+
+    Args:
+        depth_m_array (numpy.ndarray): Depth values to evaluate, in
+            meters.
+        f_rect_px (float): Rectified focal length, in pixels.
+        sigma_len_px (float): Assumed endpoint-picking uncertainty, in
+            pixels.
+        example_length_mm (float): An example object length, in
+            millimeters, used to compute an illustrative percent error.
+
+    Returns:
+        dict: Packed arrays with keys "depth_m", "mm_per_px",
+        "sigma_L_mm" (estimated length uncertainty), and
+        "percent_error_example" (percent error for `example_length_mm`),
+        plus "example_length_mm" itself.
+    """
 
     # Use rectified focal length in pixels
     f = float(f_rect_px)
@@ -256,8 +397,25 @@ def compute_length_error_curves(depth_m_array, f_rect_px, sigma_len_px, example_
     }
 
 
-# Classify depth bands based on relative depth error thresholds
 def compute_depth_bands(depth_m_array, rel_sigma_array, thresholds):
+    """Classify depth bands by relative depth error thresholds.
+
+    For each threshold, finds the maximum depth at which relative depth
+    error still stays within it.
+
+    Args:
+        depth_m_array (numpy.ndarray): Depth values, in meters, matching
+            `rel_sigma_array` element-for-element.
+        rel_sigma_array (numpy.ndarray): Relative depth error at each
+            depth (fraction, not percent).
+        thresholds (list[float]): Relative error thresholds, in percent.
+
+    Returns:
+        list[dict]: One entry per threshold (sorted ascending), each with
+        "threshold_percent", "max_depth_m" (None if no depth in range
+        satisfies it), and "range_m" (`[min_depth, max_depth]` or
+        `[None, None]`).
+    """
 
     # Sort thresholds so the output is stable
     thresholds_sorted = sorted([float(t) for t in thresholds])
@@ -294,8 +452,21 @@ def compute_depth_bands(depth_m_array, rel_sigma_array, thresholds):
     return bands
 
 
-# Compute point estimates at specific distances
 def compute_point_estimates(distances_m, curve_pack):
+    """Interpolate depth-error point estimates at specific distances.
+
+    Args:
+        distances_m (list[float]): The specific depths, in meters, to
+            report estimates for.
+        curve_pack (dict): A depth-error curve pack as returned by
+            `compute_depth_error_curves` (keys "depth_m", "disparity_px",
+            "sigma_z_m", "rel_sigma").
+
+    Returns:
+        list[dict]: One row per requested distance (clamped into the
+        curve's depth range), each with "depth_m", "disparity_px",
+        "sigma_z_m", and "rel_sigma_percent".
+    """
 
     # Use arrays from the curve pack
     z = curve_pack["depth_m"]
@@ -330,8 +501,23 @@ def compute_point_estimates(distances_m, curve_pack):
     return rows
 
 
-# Compute warp statistics and images from undistort rectify maps
 def compute_warp_products(maps_npz, image_width, image_height):
+    """Compute rectification warp statistics and heatmap images from remap arrays.
+
+    Args:
+        maps_npz (dict): Dict of remap arrays with keys "mapLx", "mapLy",
+            "mapRx", "mapRy" (as loaded by `load_npz_dict`).
+        image_width (int): Source image width, in pixels.
+        image_height (int): Source image height, in pixels.
+
+    Returns:
+        dict: Packed products including per-pixel displacement magnitude
+        maps ("magL"/"magR"), valid-region masks ("validL"/"validR"),
+        usable fraction of each map ("usable_fraction_L"/
+        "usable_fraction_R"), and a displacement-magnitude histogram
+        ("warp_hist_bin_centers", "warp_hist_counts_L",
+        "warp_hist_counts_R", "warp_mag_max").
+    """
 
     # Extract maps
     mapLx = maps_npz["mapLx"]
@@ -401,8 +587,28 @@ def compute_warp_products(maps_npz, image_width, image_height):
     }
 
 
-# Generate core PNG plots (static figures)
 def generate_static_plots(out_assets_dir, depth_pack, length_pack, depth_bands, warp_pack_or_none):
+    """Generate and save the report's core PNG plots.
+
+    Saves depth-error, disparity, mm-per-pixel, and length-error plots,
+    plus (if `warp_pack_or_none` is given) warp heatmaps, valid-region
+    masks, and a warp-magnitude histogram.
+
+    Args:
+        out_assets_dir (pathlib.Path): Directory to save PNGs into.
+        depth_pack (dict): Depth-error curve pack, as returned by
+            `compute_depth_error_curves`.
+        length_pack (dict): Length-error curve pack, as returned by
+            `compute_length_error_curves`.
+        depth_bands (list[dict]): Depth band descriptors, as returned by
+            `compute_depth_bands`, used to draw threshold lines.
+        warp_pack_or_none (dict | None): Warp product pack, as returned
+            by `compute_warp_products`, or None if no calibration maps
+            were available.
+
+    Returns:
+        None
+    """
 
     # Plot relative depth error vs depth
     fig = plt.figure()
@@ -527,8 +733,16 @@ def generate_static_plots(out_assets_dir, depth_pack, length_pack, depth_bands, 
         save_plot(fig, out_assets_dir / "plot_warp_histogram.png")
 
 
-# Create a human readable text report
 def build_text_report(report_data):
+    """Build a human-readable plain text version of the calibration report.
+
+    Args:
+        report_data (dict): The full report payload, as built by
+            `build_report_data` (with "figures" attached by the caller).
+
+    Returns:
+        str: The formatted plain text report.
+    """
 
     # Start with a compact header
     lines = []
@@ -597,8 +811,22 @@ def build_text_report(report_data):
     return "\n".join(lines)
 
 
-# Build the HTML report body with Bootstrap, tooltips, and Chart.js
 def build_html(report_data):
+    """Build the self-contained HTML report body.
+
+    Embeds `report_data` directly as inline JSON (so the report works
+    offline over `file://` without CORS issues) and generates a Bootstrap
+    + Chart.js page with tooltips, tables, and interactive charts. Chart.js
+    is loaded from a local `assets/chart.umd.min.js` copy if present,
+    falling back to a CDN otherwise.
+
+    Args:
+        report_data (dict): The full report payload, as built by
+            `build_report_data` (with "figures" attached by the caller).
+
+    Returns:
+        str: The complete HTML document as a string.
+    """
 
     # Use local Chart.js if present, otherwise fallback to CDN
     chart_js_local = "assets/chart.umd.min.js"
@@ -1267,8 +1495,18 @@ def build_html(report_data):
     return html
 
 
-# Build figure metadata for the HTML report
 def build_figure_list(has_maps):
+    """Build the figure metadata list (file/title/caption) for the HTML report.
+
+    Args:
+        has_maps (bool): Whether calibration remap arrays were available,
+            which adds the warp-heatmap/valid-region/histogram figures on
+            top of the always-included core plots.
+
+    Returns:
+        list[dict]: One entry per figure, each with "file", "title", and
+        "caption".
+    """
 
     # Always include core plots
     figs = [
@@ -1338,8 +1576,16 @@ def build_figure_list(has_maps):
     return figs
 
 
-# Create a report folder and return paths
 def create_report_folder(out_root):
+    """Create a timestamped report folder (with an assets/ subfolder).
+
+    Args:
+        out_root (str | os.PathLike): Directory under which to create the
+            new `calibration_report_<timestamp>` folder.
+
+    Returns:
+        tuple[pathlib.Path, pathlib.Path]: `(report_dir, assets_dir)`.
+    """
 
     # Create a timestamped folder name
     ts = get_timestamp_string()
@@ -1353,8 +1599,18 @@ def create_report_folder(out_root):
     return report_dir, assets_dir
 
 
-# Copy calibration input files into the report assets folder
 def copy_calibration_files(calib_dir, assets_dir):
+    """Copy any present calibration input files into the report assets folder.
+
+    Args:
+        calib_dir (str | os.PathLike): Directory containing the source
+            `calibration_*.npz` files.
+        assets_dir (str | os.PathLike): Destination assets directory for
+            the report.
+
+    Returns:
+        list[str]: Filenames that were actually found and copied.
+    """
 
     # List candidate file names
     candidates = [
@@ -1383,8 +1639,28 @@ def copy_calibration_files(calib_dir, assets_dir):
     return copied
 
 
-# Build full report_data.json payload from calibration files
 def build_report_data(calib_dir, args, copied_files):
+    """Build the full report_data.json payload from calibration files.
+
+    Loads the intrinsics/extrinsics/rectification (and optional maps) NPZ
+    files, computes intrinsics/FOV summaries, stereo geometry, depth and
+    length error curves, depth bands, and point estimates, and packages
+    everything (plus raw matrices for the "engineer details" section)
+    into one JSON-serializable dict.
+
+    Args:
+        calib_dir (str | os.PathLike): Directory containing the
+            calibration NPZ files.
+        args (argparse.Namespace): Parsed CLI arguments (assumptions and
+            depth-curve settings).
+        copied_files (list[str]): Filenames already copied into the
+            report's assets folder, recorded in the output metadata.
+
+    Returns:
+        tuple[dict, dict | None]: `(report_data, warp_pack)`, where
+        `warp_pack` is the raw warp product pack (for plotting) or None
+        if no calibration maps were available.
+    """
 
     # Resolve file paths
     intr_path = Path(calib_dir) / "calibration_intrinsics.npz"
@@ -1583,8 +1859,15 @@ def build_report_data(calib_dir, args, copied_files):
     return report_data, warp_pack
 
 
-# Parse comma separated thresholds like "1,3,10"
 def parse_thresholds_csv(text):
+    """Parse a comma/whitespace separated list of thresholds, e.g. "1,3,10".
+
+    Args:
+        text (str): The threshold list as a string.
+
+    Returns:
+        list[float]: The parsed threshold values.
+    """
 
     # Split by commas and whitespace
     parts = re.split(r"[,\s]+", text.strip())
@@ -1601,8 +1884,17 @@ def parse_thresholds_csv(text):
 
 
 
-# Main entry point for the report generator
 def main():
+    """Parse CLI arguments and generate the calibration report.
+
+    Reads `--calib_dir` and report/assumption options, builds the report
+    data payload, generates static plots, and writes
+    `report_data.json`/`calibration_report.txt`/`index.html` into a new
+    timestamped report folder under `--out_root`.
+
+    Returns:
+        None
+    """
 
     parser = argparse.ArgumentParser(description="Generate an HTML + PNG report from OpenCV stereo calibration files.")
 

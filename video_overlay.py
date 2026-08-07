@@ -1,56 +1,56 @@
-# -----------------------------------------------------------------------------
-# video_overlay.py
-#
-# Author: Isaac Travers
-# Created: 2026-05-18
-# Project: Sizeamatic Pro
-#
-# Purpose:
-#   Provides the video overlay system for Sizeamatic Pro.
-#
-#   This module creates and manages the overlay canvases that sit above the left
-#   and right video panes. It handles drawing measurement points, point labels,
-#   connecting line segments, and mouse interaction for placing, dragging, and
-#   refining stereo measurement points.
-#
-# Contents:
-#   - Left and right overlay canvas creation.
-#   - Overlay canvas mouse event binding.
-#   - Overlay redraw logic for points, handles, labels, and line segments.
-#   - Point handle hit testing.
-#   - Point list lookup helpers.
-#   - Left button point placement and dragging.
-#   - Right button point refinement.
-#   - Shared point change handling.
-#
-# Design Notes:
-#   The main application owns the video viewer layout and the actual point data.
-#   This module owns the overlay canvas widgets and overlay interaction state.
-#
-#   Functions in this module receive the main application object when they need
-#   access to point lists, viewer settings, coordinate conversion helpers,
-#   measurement refresh behavior, or status updates.
-#
-#   Image points are stored in image pixel coordinates. Overlay drawing converts
-#   those image coordinates to screen coordinates so handles and line segments
-#   remain aligned with the displayed video frame.
-#
-# Assumptions:
-#   - The main application provides left and right viewport frames before overlay
-#     canvases are created.
-#   - The main application stores measurement point lists as app.ptsL and
-#     app.ptsR.
-#   - The main application provides coordinate conversion helpers for mapping
-#     between image coordinates and overlay canvas coordinates.
-#   - The overlay is a visual and interaction layer only. It does not own video
-#     frame rendering or stereo measurement math.
-#
-# Dependencies:
-#   - tkinter provides the overlay Canvas widgets.
-#   - stereo_matching provides scanline based mate point guessing for automatic
-#     correspondence suggestions and local point refinement.
-# -----------------------------------------------------------------------------
+"""Video overlay system for Sizeamatic Pro.
 
+This module creates and manages the overlay canvases that sit above the
+left and right video panes. It handles drawing measurement points, point
+labels, connecting line segments, and mouse interaction for placing,
+dragging, and refining stereo measurement points.
+
+Contents:
+    - Left and right overlay canvas creation.
+    - Overlay canvas mouse event binding.
+    - Overlay redraw logic for points, handles, labels, and line segments.
+    - Point handle hit testing.
+    - Point list lookup helpers.
+    - Left button point placement and dragging.
+    - Right button point refinement.
+    - Shared point change handling.
+
+Design notes:
+    The main application owns the video viewer layout and the actual point
+    data. This module owns the overlay canvas widgets and overlay
+    interaction state.
+
+    Functions in this module receive the main application object (`app`)
+    when they need access to point lists, viewer settings, coordinate
+    conversion helpers, measurement refresh behavior, or status updates.
+
+    Image points are stored in image pixel coordinates. Overlay drawing
+    converts those image coordinates to screen coordinates so handles and
+    line segments remain aligned with the displayed video frame.
+
+    `draw_overlay_for_pane` draws a connecting line between every
+    consecutive pair of points in the pane (0-1, 1-2, 2-3, ...), i.e. one
+    continuous polyline through all placed points. This intentionally
+    matches how `main.py`'s `_update_measurement_status_stub` computes
+    `seg_rows` (also consecutive pairs), so a polyline with more than 2
+    points is measured as a chain of segments, not independent pairs.
+
+Assumptions:
+    - The main application provides left and right viewport frames before
+      overlay canvases are created.
+    - The main application stores measurement point lists as `app.ptsL`
+      and `app.ptsR`.
+    - The main application provides coordinate conversion helpers for
+      mapping between image coordinates and overlay canvas coordinates.
+    - The overlay is a visual and interaction layer only. It does not own
+      video frame rendering or stereo measurement math.
+
+Author:
+    Isaac Travers
+
+Created:
+    2026-05-18
+"""
 
 # tkinter provides the overlay canvases used for point drawing and mouse input.
 import tkinter as tk
@@ -61,43 +61,64 @@ import stereo_matching
 
 # Module level overlay canvas state.
 
-# Stores the transparent overlay canvas for the left video pane.
 left_overlay_canvas = None
+"""The transparent overlay canvas stacked on top of the left video pane,
+used for drawing measurement points/handles/lines and for capturing mouse
+input. Set by `set_overlay_canvases`/`create_overlay_canvases`; other
+functions in this module treat `None` as "not built yet, nothing safe to
+draw on or interact with"."""
 
-# Stores the transparent overlay canvas for the right video pane.
 right_overlay_canvas = None
+"""The transparent overlay canvas stacked on top of the right video pane.
+Mirrors `left_overlay_canvas` for the right side."""
 
-# Tracks whether a point handle drag is currently active.
 drag_active = False
+"""Whether a left-button point handle drag is currently active (the
+"move an existing point" gesture, as opposed to placing a brand new one).
+Set in `on_overlay_left_down`, cleared in `on_overlay_left_up`."""
 
-# Stores which pane owns the point currently being dragged: "L" or "R".
 drag_which = None
+"""Which pane, "L" or "R", owns the point currently being dragged. Used so
+`on_overlay_left_drag`/`on_overlay_left_up` events from the *other* pane
+don't get misapplied to a drag that started elsewhere."""
 
-# Stores the point index currently being dragged.
 drag_index = None
+"""Index of the point currently being dragged, within that pane's point
+list. `None` when no drag is active."""
 
-# Tracks whether an explicit right button refinement drag is active.
 refine_drag_active = False
+"""Whether an explicit right-button refinement drag is active. Distinct
+from `drag_active`: refinement only starts on an existing point that
+already has a matched point on the opposite pane (see
+`on_overlay_right_down`), and on release runs the scanline matcher to snap
+to a nearby feature rather than just placing the point wherever the mouse
+was."""
 
-# Stores which pane owns the point currently being refined: "L" or "R".
 refine_drag_which = None
+"""Which pane, "L" or "R", owns the point currently being refined."""
 
-# Stores the point index currently being refined.
 refine_drag_index = None
+"""Index of the point currently being refined, within that pane's point
+list. `None` when no refine drag is active."""
 
 
-# -----------------------------------------------------------------------------
-# set_overlay_canvases
-#
-# Inputs: left_canvas is the overlay canvas for the left video pane, and
-# right_canvas is the overlay canvas for the right video pane.
-# Outputs: stores both overlay canvas references in this module; returns nothing.
-#
-# Registers the overlay canvases used for drawing and editing measurement points.
-# The canvases are created by the main viewer layout code, but the references are
-# stored here so overlay drawing and mouse handling stay grouped in this module.
-# -----------------------------------------------------------------------------
 def set_overlay_canvases(left_canvas, right_canvas):
+    """Register the left/right overlay canvases for this module to use.
+
+    Registers the overlay canvases used for drawing and editing
+    measurement points. The canvases are created by the main viewer layout
+    code, but the references are stored here so overlay drawing and mouse
+    handling stay grouped in this module.
+
+    Args:
+        left_canvas (tkinter.Canvas): Overlay canvas for the left video
+            pane.
+        right_canvas (tkinter.Canvas): Overlay canvas for the right video
+            pane.
+
+    Returns:
+        None
+    """
 
     # Use module level canvas references owned by the video overlay module.
     global left_overlay_canvas
@@ -107,19 +128,25 @@ def set_overlay_canvases(left_canvas, right_canvas):
     left_overlay_canvas = left_canvas
     right_overlay_canvas = right_canvas
 
-# -----------------------------------------------------------------------------
-# create_overlay_canvases
-#
-# Inputs: app provides the left and right viewport frames and overlay event
-# handlers needed by the overlay canvases.
-# Outputs: creates the left and right overlay canvases, stores them in this
-# module, binds overlay events, and returns nothing.
-#
-# Creates the overlay canvases used for point drawing and point interaction over
-# the video panes. The main app owns the viewer layout, while this module owns the
-# overlay canvas widgets and their mouse input bindings.
-# -----------------------------------------------------------------------------
+
 def create_overlay_canvases(app):
+    """Create the left/right overlay canvases and bind their mouse events.
+
+    Creates the overlay canvases used for point drawing and point
+    interaction over the video panes. The main app owns the viewer layout,
+    while this module owns the overlay canvas widgets and their mouse
+    input bindings.
+
+    Args:
+        app: The main application object, used for the left/right viewport
+            frames (`app.left_viewport`/`app.right_viewport`) that the
+            canvases are placed over, and for the resize/zoom callbacks
+            (`app.on_canvas_resized`, `app.on_mouse_wheel`) they're bound
+            to.
+
+    Returns:
+        None
+    """
 
     # Use module level canvas references owned by the video overlay module.
     global left_overlay_canvas
@@ -179,19 +206,26 @@ def create_overlay_canvases(app):
     left_overlay_canvas.bind("<MouseWheel>", lambda e: app.on_mouse_wheel("L", e))
     right_overlay_canvas.bind("<MouseWheel>", lambda e: app.on_mouse_wheel("R", e))
 
-# -----------------------------------------------------------------------------
-# get_pane_scale
-#
-# Inputs: app provides the fit to window setting and video metadata, which selects
-# the left or right pane, and canvas is the Tkinter canvas being measured.
-# Outputs: returns the current image to screen scale factor for the selected pane.
-#
-# Computes the scale used to draw image coordinate overlays on top of the video
-# pane. When fit to window is disabled, image pixels map directly to screen
-# pixels. When fit to window is enabled, the image is scaled by canvas width only,
-# matching the current video display behavior.
-# -----------------------------------------------------------------------------
+
 def get_pane_scale(app, which, canvas):
+    """Compute the image-to-screen scale factor for one video pane.
+
+    Computes the scale used to draw image coordinate overlays on top of
+    the video pane. When fit to window is disabled, image pixels map
+    directly to screen pixels. When fit to window is enabled, the image is
+    scaled by canvas width only, matching the current video display
+    behavior.
+
+    Args:
+        app: The main application object, used to read the fit-to-window
+            setting (`app.fit_to_window`) and video metadata
+            (`app.metaL`/`app.metaR`).
+        which (str): Which pane to compute the scale for, "L" or "R".
+        canvas (tkinter.Canvas): The overlay canvas being measured.
+
+    Returns:
+        float: The image-to-screen scale factor for the selected pane.
+    """
 
     # If fit to window is disabled, use native image pixel mapping.
     if not app.fit_to_window.get():
@@ -222,17 +256,22 @@ def get_pane_scale(app, which, canvas):
     # Match the current fit to window behavior by scaling from width only.
     return canvas_w / src_w
 
-# -----------------------------------------------------------------------------
-# redraw_overlays
-#
-# Inputs: app provides the current left and right measurement point lists.
-# Outputs: redraws overlay graphics for both video panes; returns nothing.
-#
-# Clears and redraws the measurement point overlays for the left and right video
-# panes. The overlay canvas references are owned by this module, while the point
-# lists still come from the main application state.
-# -----------------------------------------------------------------------------
+
 def redraw_overlays(app):
+    """Redraw the measurement point overlays for both video panes.
+
+    Clears and redraws the measurement point overlays for the left and
+    right video panes. The overlay canvas references are owned by this
+    module, while the point lists still come from the main application
+    state.
+
+    Args:
+        app: The main application object, used to read the current
+            left/right measurement point lists (`app.ptsL`, `app.ptsR`).
+
+    Returns:
+        None
+    """
 
     # If either overlay canvas has not been registered yet, there is nothing safe
     # to redraw.
@@ -246,18 +285,20 @@ def redraw_overlays(app):
     draw_overlay_for_pane(app, "R", right_overlay_canvas, app.ptsR)
 
 
-# -----------------------------------------------------------------------------
-# get_overlay_canvas
-#
-# Inputs: which identifies the video pane, either "L" for left or "R" for right.
-# Outputs: returns the matching overlay canvas, or None if the pane is invalid or
-# the canvas has not been created.
-#
-# Returns the module owned overlay canvas for the requested video pane. Keeping
-# this lookup in one place avoids repeating left/right canvas selection logic
-# throughout the overlay mouse handlers.
-# -----------------------------------------------------------------------------
 def get_overlay_canvas(which):
+    """Look up the overlay canvas for a given video pane.
+
+    Returns the module owned overlay canvas for the requested video pane.
+    Keeping this lookup in one place avoids repeating left/right canvas
+    selection logic throughout the overlay mouse handlers.
+
+    Args:
+        which (str): Which pane's canvas to return, "L" or "R".
+
+    Returns:
+        tkinter.Canvas | None: The matching overlay canvas, or None if the
+        pane identifier is invalid or the canvas has not been created.
+    """
 
     # Return the left overlay canvas for the left pane.
     if which == "L":
@@ -271,22 +312,25 @@ def get_overlay_canvas(which):
     return None
 
 
-# -----------------------------------------------------------------------------
-# on_overlay_left_down
-#
-# Inputs: app provides point lists and measurement update behavior, which
-# identifies the clicked pane, and event provides the mouse position in overlay
-# canvas coordinates.
-# Outputs: either starts dragging an existing point handle or creates a new point;
-# returns nothing.
-#
-# Handles a left mouse button press on one of the overlay canvases. If the click
-# hits an existing point handle, the function enters drag mode for that point. If
-# the click lands on empty overlay space, the function adds a new image space
-# point to the clicked pane and optionally creates an initial stereo mate guess on
-# the opposite pane.
-# -----------------------------------------------------------------------------
 def on_overlay_left_down(app, which, event):
+    """Handle a left mouse button press on an overlay canvas.
+
+    Handles a left mouse button press on one of the overlay canvases. If
+    the click hits an existing point handle, the function enters drag mode
+    for that point. If the click lands on empty overlay space, the
+    function adds a new image space point to the clicked pane and
+    optionally creates an initial stereo mate guess on the opposite pane.
+
+    Args:
+        app: The main application object, used for point lists and
+            measurement update behavior.
+        which (str): Which pane was clicked, "L" or "R".
+        event (tkinter.Event): The Tkinter mouse event, in overlay canvas
+            coordinates.
+
+    Returns:
+        None
+    """
 
     # Use module level drag state owned by the overlay system.
     global drag_active
@@ -362,21 +406,25 @@ def on_overlay_left_down(app, which, event):
     # Redraw overlays and update measurement status after the point change.
     on_points_changed(app)
 
-# -----------------------------------------------------------------------------
-# on_overlay_left_drag
-#
-# Inputs: app provides the point lists and measurement update behavior, which
-# identifies the pane being dragged, and event provides the current mouse
-# position in overlay canvas coordinates.
-# Outputs: updates the dragged point position if a valid drag is active; returns
-# nothing.
-#
-# Handles mouse movement while the left button is held on an overlay canvas. If a
-# point handle drag is active for the requested pane, the cursor position is
-# converted from screen coordinates to image coordinates and written back into the
-# matching point list.
-# -----------------------------------------------------------------------------
+
 def on_overlay_left_drag(app, which, event):
+    """Handle mouse movement while dragging a point handle (left button).
+
+    Handles mouse movement while the left button is held on an overlay
+    canvas. If a point handle drag is active for the requested pane, the
+    cursor position is converted from screen coordinates to image
+    coordinates and written back into the matching point list.
+
+    Args:
+        app: The main application object, used for point lists and
+            measurement update behavior.
+        which (str): Which pane the drag event is for, "L" or "R".
+        event (tkinter.Event): The Tkinter mouse event, in overlay canvas
+            coordinates.
+
+    Returns:
+        None
+    """
 
     # Use module level drag state owned by the overlay system.
     global drag_active
@@ -424,19 +472,22 @@ def on_overlay_left_drag(app, which, event):
     on_points_changed(app)
 
 
-# -----------------------------------------------------------------------------
-# on_overlay_left_up
-#
-# Inputs: app provides measurement update behavior, which identifies the pane
-# receiving the mouse release, and _event is the unused Tkinter mouse event.
-# Outputs: clears active drag state for the pane and refreshes overlays and
-# measurements; returns nothing.
-#
-# Handles release of the left mouse button after dragging a point handle. The
-# drag only ends if the active drag belongs to the pane that received the release
-# event.
-# -----------------------------------------------------------------------------
 def on_overlay_left_up(app, which, _event):
+    """Handle release of the left mouse button after a point handle drag.
+
+    Handles release of the left mouse button after dragging a point
+    handle. The drag only ends if the active drag belongs to the pane that
+    received the release event.
+
+    Args:
+        app: The main application object, used for measurement update
+            behavior.
+        which (str): Which pane received the release event, "L" or "R".
+        _event (tkinter.Event): The Tkinter mouse event (unused).
+
+    Returns:
+        None
+    """
 
     # Use module level drag state owned by the overlay system.
     global drag_active
@@ -456,20 +507,23 @@ def on_overlay_left_up(app, which, _event):
     on_points_changed(app)
 
 
-# -----------------------------------------------------------------------------
-# on_overlay_right_down
-#
-# Inputs: app provides point lists, which identifies the clicked pane, and event
-# provides the mouse position in overlay canvas coordinates.
-# Outputs: starts explicit refine drag mode for an existing paired point, or
-# returns without changing state if no valid paired point was clicked.
-#
-# Handles a right mouse button press on one of the overlay canvases. Right button
-# input is used for explicit refinement, so it only starts dragging when the user
-# clicks an existing point handle that already has a corresponding mate point on
-# the opposite pane.
-# -----------------------------------------------------------------------------
 def on_overlay_right_down(app, which, event):
+    """Handle a right mouse button press on an overlay canvas.
+
+    Handles a right mouse button press on one of the overlay canvases.
+    Right button input is used for explicit refinement, so it only starts
+    dragging when the user clicks an existing point handle that already
+    has a corresponding mate point on the opposite pane.
+
+    Args:
+        app: The main application object, used for point lists.
+        which (str): Which pane was clicked, "L" or "R".
+        event (tkinter.Event): The Tkinter mouse event, in overlay canvas
+            coordinates.
+
+    Returns:
+        None
+    """
 
     # Use module level refine drag state owned by the overlay system.
     global refine_drag_active
@@ -516,21 +570,24 @@ def on_overlay_right_down(app, which, event):
     refine_drag_index = idx
 
 
-# -----------------------------------------------------------------------------
-# on_overlay_right_drag
-#
-# Inputs: app provides point lists and measurement update behavior, which
-# identifies the pane being refined, and event provides the current mouse
-# position in overlay canvas coordinates.
-# Outputs: updates the refined point position if a valid refine drag is active;
-# returns nothing.
-#
-# Handles mouse movement while the right button is held on an overlay canvas.
-# Right button dragging is explicit refinement mode: the selected point is moved
-# manually in image coordinates while overlays and measurement output update
-# continuously.
-# -----------------------------------------------------------------------------
 def on_overlay_right_drag(app, which, event):
+    """Handle mouse movement while explicitly refining a point (right button).
+
+    Handles mouse movement while the right button is held on an overlay
+    canvas. Right button dragging is explicit refinement mode: the
+    selected point is moved manually in image coordinates while overlays
+    and measurement output update continuously.
+
+    Args:
+        app: The main application object, used for point lists and
+            measurement update behavior.
+        which (str): Which pane the refine drag is for, "L" or "R".
+        event (tkinter.Event): The Tkinter mouse event, in overlay canvas
+            coordinates.
+
+    Returns:
+        None
+    """
 
     # Use module level refine drag state owned by the overlay system.
     global refine_drag_active
@@ -578,21 +635,25 @@ def on_overlay_right_drag(app, which, event):
     on_points_changed(app)
 
 
-# -----------------------------------------------------------------------------
-# on_overlay_right_up
-#
-# Inputs: app provides point lists and stereo matching state, which identifies the
-# pane receiving the mouse release, and _event is the unused Tkinter mouse event.
-# Outputs: optionally refines the released point using local scanline matching,
-# clears refine drag state, redraws overlays, and updates measurements.
-#
-# Handles release of the right mouse button after explicit refine dragging. The
-# point is first manually positioned during the drag. On release, the stereo
-# matcher is run in a narrow local search window near the user placed X position
-# so the point can be snapped to a nearby matching feature without jumping far
-# away from the user's intended placement.
-# -----------------------------------------------------------------------------
 def on_overlay_right_up(app, which, _event):
+    """Handle release of the right mouse button after an explicit refine drag.
+
+    Handles release of the right mouse button after explicit refine
+    dragging. The point is first manually positioned during the drag. On
+    release, the stereo matcher is run in a narrow local search window near
+    the user placed X position so the point can be snapped to a nearby
+    matching feature without jumping far away from the user's intended
+    placement.
+
+    Args:
+        app: The main application object, used for point lists and stereo
+            matching state.
+        which (str): Which pane received the release event, "L" or "R".
+        _event (tkinter.Event): The Tkinter mouse event (unused).
+
+    Returns:
+        None
+    """
 
     # Use module level refine drag state owned by the overlay system.
     global refine_drag_active
@@ -653,19 +714,21 @@ def on_overlay_right_up(app, which, _event):
     on_points_changed(app)
 
 
-# -----------------------------------------------------------------------------
-# on_points_changed
-#
-# Inputs: app provides measurement status update behavior and current point state.
-# Outputs: redraws point overlays, refreshes measurement status, and returns
-# nothing.
-#
-# Handles the common follow up work after overlay points are added, moved,
-# refined, or cleared. Keeping this as the single point change hook makes it less
-# likely that one mouse path updates the overlay but forgets to refresh
-# measurement feedback.
-# -----------------------------------------------------------------------------
 def on_points_changed(app):
+    """Refresh overlays and measurement status after a point change.
+
+    Handles the common follow up work after overlay points are added,
+    moved, refined, or cleared. Keeping this as the single point change
+    hook makes it less likely that one mouse path updates the overlay but
+    forgets to refresh measurement feedback.
+
+    Args:
+        app: The main application object, used for measurement status
+            update behavior (`app._update_measurement_status_stub`).
+
+    Returns:
+        None
+    """
 
     # Redraw the current point overlays for both video panes.
     redraw_overlays(app)
@@ -674,19 +737,23 @@ def on_points_changed(app):
     app._update_measurement_status_stub()
 
 
-# -----------------------------------------------------------------------------
-# get_points_list
-#
-# Inputs: app provides the left and right overlay point lists, and which identifies
-# the requested pane as "L" or "R".
-# Outputs: returns the point list for the requested pane, or None if the pane
-# identifier is invalid.
-#
-# Provides one shared left/right point list lookup for overlay drawing and mouse
-# interaction code. The point data still lives on the main app object, while the
-# overlay module uses this helper to avoid repeating pane selection logic.
-# -----------------------------------------------------------------------------
 def get_points_list(app, which):
+    """Look up the image-coordinate point list for a given video pane.
+
+    Provides one shared left/right point list lookup for overlay drawing
+    and mouse interaction code. The point data still lives on the main app
+    object, while the overlay module uses this helper to avoid repeating
+    pane selection logic.
+
+    Args:
+        app: The main application object, used for the left/right overlay
+            point lists (`app.ptsL`, `app.ptsR`).
+        which (str): Which pane's point list to return, "L" or "R".
+
+    Returns:
+        list[tuple[float, float]] | None: The point list for the requested
+        pane, or None if the pane identifier is invalid.
+    """
 
     # Return the left image point list for the left pane.
     if which == "L":
@@ -700,19 +767,22 @@ def get_points_list(app, which):
     return None
 
 
-
-# -----------------------------------------------------------------------------
-# get_handle_index_under_cursor
-#
-# Inputs: canvas is the overlay canvas receiving the mouse event.
-# Outputs: returns the integer point index for the handle currently under the
-# cursor, or None if the current canvas item is not a point handle.
-#
-# Uses Tkinter canvas item tags to detect whether the mouse is over a drawn point
-# handle. Handles are expected to have a "handle" tag and an "idx:<n>" tag that
-# stores the point index.
-# -----------------------------------------------------------------------------
 def get_handle_index_under_cursor(canvas):
+    """Detect the point handle directly under the cursor, if any.
+
+    Uses Tkinter canvas item tags to detect whether the mouse is over a
+    drawn point handle. Handles are expected to have a "handle" tag and an
+    "idx:<n>" tag that stores the point index.
+
+    Args:
+        canvas (tkinter.Canvas): The overlay canvas receiving the mouse
+            event.
+
+    Returns:
+        int | None: The integer point index for the handle currently under
+        the cursor, or None if the current canvas item is not a point
+        handle.
+    """
 
     # "current" is the Tkinter canvas item under the mouse pointer at event time.
     items = canvas.find_withtag("current")
@@ -750,20 +820,29 @@ def get_handle_index_under_cursor(canvas):
     return None
 
 
-# -----------------------------------------------------------------------------
-# get_nearest_handle_index
-#
-# Inputs: app provides point lists and handle radius settings, which identifies
-# the pane to search, canvas is the overlay canvas, and sx/sy are the screen space
-# click coordinates.
-# Outputs: returns the nearest point index if the click is close enough to a
-# handle, or None if no handle is within the hit radius.
-#
-# Provides a forgiving fallback hit test when the exact Tkinter canvas item hit
-# test misses. Each point is converted from image coordinates to screen
-# coordinates, then compared against the mouse click using a generous hit radius.
-# -----------------------------------------------------------------------------
 def get_nearest_handle_index(app, which, canvas, sx, sy):
+    """Find the nearest point handle within a generous hit radius.
+
+    Provides a forgiving fallback hit test when the exact Tkinter canvas
+    item hit test misses. Each point is converted from image coordinates
+    to screen coordinates, then compared against the mouse click using a
+    generous hit radius.
+
+    Args:
+        app: The main application object, used for point lists and the
+            handle radius setting (`app.handle_radius_px`).
+        which (str): Which pane to search, "L" or "R".
+        canvas (tkinter.Canvas): The overlay canvas for the pane being
+            searched.
+        sx (float): Click X position, in overlay canvas screen
+            coordinates.
+        sy (float): Click Y position, in overlay canvas screen
+            coordinates.
+
+    Returns:
+        int | None: The nearest point index if the click is close enough
+        to a handle, or None if no handle is within the hit radius.
+    """
 
     # Read the point list for this pane.
     pts = get_points_list(app, which)
@@ -803,21 +882,28 @@ def get_nearest_handle_index(app, which, canvas, sx, sy):
     return best_idx
 
 
-# -----------------------------------------------------------------------------
-# draw_overlay_for_pane
-#
-# Inputs: app provides overlay display settings, which identifies the pane being
-# drawn, canvas is the overlay canvas for that pane, and pts is the pane's image
-# coordinate point list.
-# Outputs: clears and redraws overlay lines, point handles, and point labels for
-# the selected pane; returns nothing.
-#
-# Draws the visible measurement overlay for one video pane. Points are stored in
-# image pixel coordinates, then converted into screen coordinates so handles and
-# connecting segments line up with the displayed video frame. Handles are tagged
-# for later mouse hit testing and dragging.
-# -----------------------------------------------------------------------------
 def draw_overlay_for_pane(app, which, canvas, pts):
+    """Draw the measurement overlay (points, handles, labels, lines) for one pane.
+
+    Draws the visible measurement overlay for one video pane. Points are
+    stored in image pixel coordinates, then converted into screen
+    coordinates so handles and connecting segments line up with the
+    displayed video frame. Handles are tagged for later mouse hit testing
+    and dragging.
+
+    Args:
+        app: The main application object, used for the point handle radius
+            setting (`app.handle_radius_px`) and coordinate conversion
+            (`app._image_to_screen`).
+        which (str): Which pane is being drawn, "L" or "R".
+        canvas (tkinter.Canvas): The overlay canvas for the pane being
+            drawn.
+        pts (list[tuple[float, float]]): The pane's image-coordinate point
+            list.
+
+    Returns:
+        None
+    """
 
     # Clear only overlay tagged items so the canvas can be redrawn from current
     # point data without affecting unrelated canvas content.
