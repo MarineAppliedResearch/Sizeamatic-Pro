@@ -316,13 +316,13 @@ class SizeamaticProApp:
 
         self.meas_win = None
         """The measurement results `Toplevel` window, or None if it hasn't
-        been built yet (or was closed). Unlike the calibration summary
-        window's equivalent state (`calibration_summary.cal_win`), this
-        lives directly on `self` rather than as a module-level global in
-        `measurement_window.py` — that module's functions read/write
-        `app.meas_win` directly. Built lazily by
+        been built yet (or was closed). Lives directly on `self` rather
+        than as a class of its own (unlike `self.cal_summary_window`) —
+        `measurement_window.py`'s functions read/write `app.meas_win`
+        directly instead. Built lazily by
         `measurement_window.ensure_measurement_window` on the first valid
-        measurement."""
+        measurement; converting this module to a class the same way is
+        Step 3 of the Phase 5 restructure."""
 
         self.meas_vars = {}
         """Unused — no code currently reads or writes this dict.
@@ -345,13 +345,9 @@ class SizeamaticProApp:
         translate pixel-level click imprecision into millimeter-level
         depth/length uncertainty estimates."""
 
-        # Calibration summary window state (created on demand) — see the
-        # attribute docstrings on cal_win/cal_tree/cal_copy_text in
-        # calibration_summary.py for what these mean; this just resets them
-        # for a fresh app instance.
-        calibration_summary.cal_win = None
-        calibration_summary.cal_tree = None
-        calibration_summary.cal_copy_text = None
+        self.cal_summary_window = calibration_summary.CalibrationSummaryWindow(self)
+        """Owns the calibration summary Toplevel window and its widgets.
+        See `calibration_summary.CalibrationSummaryWindow`."""
 
         # Anaglyph preview state (OpenCV window, independent playback) —
         # see the attribute docstrings in anaglyph_preview.py; this just
@@ -397,8 +393,8 @@ class SizeamaticProApp:
             self._set_status_mid("Load calibration first")
             return
 
-        calibration_summary.ensure_calibration_window(self)
-        calibration_summary.update_calibration_window(self)
+        self.cal_summary_window.ensure_window()
+        self.cal_summary_window.update_window()
 
     def on_mouse_wheel(self, which, event):
         """Handle mouse wheel zoom for a pane, anchored under the cursor.

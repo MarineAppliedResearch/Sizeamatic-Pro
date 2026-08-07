@@ -9,32 +9,33 @@ import calibration_summary
 def test_calibration_window_close_then_update_does_not_crash(hidden_tk_root, make_fake_app):
     """FINDINGS.md #1: closing the calibration summary window used to
     leave cal_win/cal_tree/cal_copy_text pointing at destroyed widgets
-    (because the nested _on_close was missing its own `global`
+    (because the nested _on_close closure was missing its own `global`
     declaration), crashing the next update_calibration_window call.
+
+    That failure mode is now structurally impossible:
+    `CalibrationSummaryWindow` is a real class (see calibration_summary.py's
+    "Design notes"), so there's no module-level global and no `global`
+    declaration to miss. This test just confirms the close-then-update
+    behavior still works as intended.
     """
 
-    # Start from a known-clean module state regardless of test order.
-    calibration_summary.cal_win = None
-    calibration_summary.cal_tree = None
-    calibration_summary.cal_copy_text = None
-
     app = make_fake_app(root=hidden_tk_root, cal=None)
+    win = calibration_summary.CalibrationSummaryWindow(app)
 
-    calibration_summary.ensure_calibration_window(app)
-    assert calibration_summary.cal_win is not None
-    assert calibration_summary.cal_tree is not None
+    win.ensure_window()
+    assert win.win is not None
+    assert win.tree is not None
 
     # Simulate the user closing the window — the same callback the real
     # WM_DELETE_WINDOW protocol triggers.
-    calibration_summary._on_calibration_window_close(calibration_summary.cal_win)
+    win._on_close()
 
-    assert calibration_summary.cal_win is None
-    assert calibration_summary.cal_tree is None
-    assert calibration_summary.cal_copy_text is None
+    assert win.win is None
+    assert win.tree is None
+    assert win.copy_text is None
 
-    # This used to raise TclError because cal_tree still referenced a
-    # destroyed Treeview. Should now just no-op (app.cal is also None).
-    calibration_summary.update_calibration_window(app)
+    # Should just no-op (app.cal is also None).
+    win.update_window()
 
 
 def test_stop_anaglyph_preview_without_prior_tick_does_not_raise(make_fake_app):

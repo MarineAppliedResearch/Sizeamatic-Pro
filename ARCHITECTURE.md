@@ -8,39 +8,49 @@
 > change, trust this file over your assumptions; if you find it's wrong,
 > fix it.
 
-## Current shape: one core class + function modules operating on it
+## Current shape: mid-restructure (Phase 5 in progress)
+
+Target decided (see `ROADMAP.md` Phase 5): replace the module-level-global
+state pattern with real classes owned by the app, one module at a time,
+running the test suite after each step. **Staying on Tkinter** — the
+"unacceptably slow" rendering that partly motivated considering a framework
+migration turned out to be a self-inflicted PNG-encode/base64 bottleneck in
+`main.py`'s render path, fixed directly (see `_display_bgr_on_canvas`).
 
 `main.py` (~1,900 lines) still holds the core `SizeamaticProApp` class — GUI
 construction, window/menu setup, playback/timeline state, video I/O (two
 OpenCV `VideoCapture` objects held open for the app's lifetime), calibration
-loading, and the top-level event wiring.
+loading, and the top-level event wiring. It owns one converted piece so far:
+`self.cal_summary_window`, a `calibration_summary.CalibrationSummaryWindow`
+instance.
 
-Several concerns have been pulled out of `main.py` into separate files, but
-**not as classes or a layered architecture** — each is a module of plain
-functions that take the `SizeamaticProApp` instance (`app`) as their first
-argument and read/mutate its attributes directly:
+Several concerns have been pulled out of `main.py` into separate files.
+**One has been converted to a class; the rest are still plain functions**
+that take the `SizeamaticProApp` instance (`app`) as their first argument
+and read/mutate its attributes directly, or (worse) keep their own state as
+module-level globals:
 
 - **`stereo_matching.py`** — stereo point matching and triangulation math
   (scanline mate-point search, triangulation, reprojection error,
-  uncertainty estimation)
-- **`measurement_window.py`** — the Tkinter measurement-results window and
-  its update logic
-- **`calibration_summary.py`** — the Tkinter calibration-summary window and
-  its update logic
-- **`anaglyph_preview.py`** — anaglyph (red/cyan) stereo preview generation
-  and its start/stop/tick lifecycle
-- **`video_overlay.py`** — overlay canvases, point-handle drag/drop
-  interaction, and overlay redraw logic
+  uncertainty estimation). Pure functions, no GUI code, no restructuring
+  needed here — this one's fine as-is.
+- **`calibration_summary.py`** — `CalibrationSummaryWindow` class (done).
+  Owns the Tkinter calibration-summary window and its update logic as
+  instance attributes/methods instead of module-level globals — this
+  conversion is what removed the fragility that caused `FINDINGS.md` #1
+  (a nested closure needing, but missing, its own `global` declaration).
+- **`measurement_window.py`** — still plain functions + `app.meas_win`/etc.
+  attributes on the app. Next in line for the same class conversion.
+- **`anaglyph_preview.py`** — still plain functions + module-level globals
+  (`anaglyph_active`, `anaglyph_after_id`, etc.). Not yet converted.
+- **`video_overlay.py`** — still plain functions + module-level globals
+  (`drag_active`, `left_overlay_canvas`, etc.). Not yet converted.
 
-This means the *file* boundaries now roughly track feature areas, but there's
-still no real encapsulation — every module reaches back into `app`'s
-attributes rather than being handed the specific state it needs, so nothing
-here is unit-testable in isolation yet. `main.py` imports all five modules
-and calls into them from its event handlers.
-
-No target architecture (classes/layers, or whether module-per-feature is the
-end state) has been decided yet. That decision is explicitly deferred to
-Phase 5 in `ROADMAP.md`.
+Once fully converted, each piece will be independently unit-testable without
+constructing a real Tk root — `tests/conftest.py`'s `FakeApp` stand-in
+already anticipates this for the pure-logic functions, and
+`CalibrationSummaryWindow` can now be tested by constructing an instance
+directly (see `tests/test_regressions.py`).
 
 ## Other first-party scripts
 
