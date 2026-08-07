@@ -99,16 +99,42 @@ Deliberately out of scope: simulated GUI interaction testing (clicks/drags
 in `video_overlay.py`) — its module-level mutable state makes it awkward
 to test in isolation before the Phase 5 restructure.
 
-## Phase 5 — Architecture restructure `[ ]`
+## Phase 5 — Architecture restructure `[~]`
 
 Using everything learned in Phases 3-4, break `main.py` out of the monolith
-into a real module structure, with the Phase 4 test suite as a safety net
-against regressions. The specific shape is intentionally undecided as of
-Phase 1 — see the "Architecture" section of `AGENTS.md`.
+into real classes, with the Phase 4 test suite as a safety net against
+regressions. Executing incrementally, one module at a time, with the test
+suite run after each step.
 
-- [ ] Decide target architecture/module layout
-- [ ] Decide whether to keep Tkinter or migrate GUI frameworks
-- [ ] Execute the restructure
+- [x] Decide target architecture/module layout — real classes replacing the
+      module-level-global pattern in `video_overlay.py`,
+      `calibration_summary.py`, `anaglyph_preview.py`, and
+      `measurement_window.py` (removes the fragility that caused
+      `FINDINGS.md` #1)
+- [x] Decide whether to keep Tkinter or migrate GUI frameworks — **staying
+      on Tkinter**. The "unacceptably slow" rectified rendering (one of two
+      migration motivations) turned out to be a self-inflicted bottleneck,
+      not a Tkinter limitation: the old per-frame PNG-encode + base64 +
+      `tk.PhotoImage`-parses-base64 round trip in `_display_bgr_on_canvas`
+      benchmarked at 42ms/frame against a real captured frame from
+      `examples/`; switching to Pillow's `ImageTk.PhotoImage` (wraps the
+      numpy array directly, no encoding step) dropped that to 2.36ms/frame
+      — a 17.9x speedup, confirmed live. The other motivation (visual
+      polish) remains a standing, separate consideration for later if it
+      still matters once the rest of the restructure is done.
+- [ ] Execute the restructure:
+  - [x] Fix the render-path performance bottleneck (`main.py`,
+        `_display_bgr_on_canvas`) — see above
+  - [ ] `calibration_summary.py` → `CalibrationSummaryWindow` class
+  - [ ] `measurement_window.py` → `MeasurementWindow` class
+  - [ ] `anaglyph_preview.py` → `AnaglyphPreview` class
+  - [ ] `video_overlay.py` → `VideoOverlay` class
+  - [ ] Pull calibration file loading/validation out of `main.py` into its
+        own module
+  - [ ] `main.py` ends up as a thin `SizeamaticProApp` wiring the pieces
+        together
+  - [ ] Update `tests/` as each piece becomes a class; update
+        `ARCHITECTURE.md` to describe the new shape
 
 ## Phase 6 — Open source readiness `[ ]`
 

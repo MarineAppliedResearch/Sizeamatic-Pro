@@ -635,6 +635,7 @@ dependencies = [
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "opencv-python" },
+    { name = "pillow" },
     { name = "reportlab" },
 ]
 
@@ -650,6 +651,7 @@ requires-dist = [
     { name = "matplotlib", specifier = ">=3.11.1" },
     { name = "numpy", specifier = ">=2.5.1" },
     { name = "opencv-python", specifier = ">=5.0.0.93" },
+    { name = "pillow", specifier = ">=12.3.0" },
     { name = "reportlab", specifier = ">=5.0.0" },
 ]
 

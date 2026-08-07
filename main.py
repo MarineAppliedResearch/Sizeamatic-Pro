@@ -19,7 +19,8 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 import cv2
-import base64
+
+from PIL import Image, ImageTk
 
 import numpy as np
 import math
@@ -2304,13 +2305,22 @@ class SizeamaticProApp:
         return frame_bgr
 
     def _display_bgr_on_canvas(self, canvas, frame_bgr, which):
-        """Display a BGR frame on a Tk canvas using Tk's PNG decoder.
+        """Display a BGR frame on a Tk canvas via Pillow's ImageTk.
 
         Crops to the currently visible (pan/zoom) region in image space,
-        resizes to the pane's display rect, encodes to PNG, and draws it
-        via a `tkinter.PhotoImage`. Uses PNG encoding rather than Pillow or
-        raw PPM data to avoid Pillow as a dependency and PPM decoding
-        quirks in some Tk builds.
+        resizes to the pane's display rect, converts BGR to RGB, and draws
+        it via `PIL.Image.fromarray` + `ImageTk.PhotoImage` — wrapping the
+        numpy array directly with no encode/decode round-trip.
+
+        Note:
+            This used to encode each frame to PNG, base64-encode that, and
+            hand the base64 string to `tkinter.PhotoImage` (deliberately
+            avoiding Pillow, per a comment in an earlier version of this
+            method). That round-trip, redone on every single render for
+            both panes, was the actual cause of the "unacceptably slow"
+            rectified rendering the README used to warn about — not
+            Tkinter itself. Switching to Pillow's direct-numpy-array path
+            fixed it; see ROADMAP.md Phase 5.
 
         Note:
             If this pane's image size isn't known yet (`_get_image_size`
@@ -2390,15 +2400,13 @@ class SizeamaticProApp:
         crop = frame_bgr[ry0:ry1, rx0:rx1]
         crop = cv2.resize(crop, (int(dw), int(dh)), interpolation=cv2.INTER_LINEAR)
 
-        # Encode to PNG for Tk PhotoImage.
-        encode_params = [cv2.IMWRITE_PNG_COMPRESSION, 0]
-        ok, png_bytes = cv2.imencode(".png", crop, encode_params)
-        if not ok:
-            self._draw_missing_frame(canvas, "ENCODE", 0)
-            return
-
-        png_b64 = base64.b64encode(png_bytes.tobytes()).decode("ascii")
-        tk_img = tk.PhotoImage(data=png_b64)
+        # Convert BGR (OpenCV) to RGB (PIL) and wrap directly as a Tk image.
+        # No encode/decode round-trip: this is what actually fixed the
+        # "unacceptably slow" rectified rendering — the previous PNG-encode
+        # + base64 + Tk-parses-base64 path re-encoded a full frame on every
+        # single render, for both panes.
+        crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        tk_img = ImageTk.PhotoImage(image=Image.fromarray(crop_rgb))
 
         if which == "L":
             self.tkimg_left = tk_img
