@@ -14,18 +14,22 @@ Target decided (see `ROADMAP.md` Phase 5): replace the module-level-global
 state pattern with real classes owned by the app, one module at a time,
 running the test suite after each step. **Staying on Tkinter** — the
 "unacceptably slow" rendering that partly motivated considering a framework
-migration turned out to be a self-inflicted PNG-encode/base64 bottleneck in
-`main.py`'s render path, fixed directly (see `_display_bgr_on_canvas`).
+migration turned out to be two self-inflicted bottlenecks in `main.py`, both
+fixed directly: a PNG-encode/base64 round trip in `_display_bgr_on_canvas`,
+and an unconditional `cap.set(CAP_PROP_POS_FRAMES)` seek on every frame read
+in `_read_frame_at` (bigger of the two — 19x slower than sequential reads).
 
-`main.py` (~1,900 lines) still holds the core `SizeamaticProApp` class — GUI
+`main.py` (~1,750 lines) still holds the core `SizeamaticProApp` class — GUI
 construction, window/menu setup, playback/timeline state, video I/O (two
-OpenCV `VideoCapture` objects held open for the app's lifetime), calibration
-loading, and the top-level event wiring. It owns one converted piece so far:
-`self.cal_summary_window`, a `calibration_summary.CalibrationSummaryWindow`
-instance.
+OpenCV `VideoCapture` objects held open for the app's lifetime), and the
+top-level event wiring. Calibration file loading/validation has been pulled
+out into `calibration_io.py`. It owns two converted pieces so far:
+`self.cal_summary_window` (a `calibration_summary.CalibrationSummaryWindow`
+instance) and `self.measurement_window` (a
+`measurement_window.MeasurementWindow` instance).
 
 Several concerns have been pulled out of `main.py` into separate files.
-**One has been converted to a class; the rest are still plain functions**
+**Two have been converted to classes; the rest are still plain functions**
 that take the `SizeamaticProApp` instance (`app`) as their first argument
 and read/mutate its attributes directly, or (worse) keep their own state as
 module-level globals:
@@ -34,23 +38,27 @@ module-level globals:
   (scanline mate-point search, triangulation, reprojection error,
   uncertainty estimation). Pure functions, no GUI code, no restructuring
   needed here — this one's fine as-is.
+- **`calibration_io.py`** — loads and validates calibration NPZ files, no
+  GUI code, no restructuring needed here either. Pulled out of `main.py`'s
+  `on_load_calibration_folder` so it's testable without a directory-chooser
+  dialog.
 - **`calibration_summary.py`** — `CalibrationSummaryWindow` class (done).
   Owns the Tkinter calibration-summary window and its update logic as
   instance attributes/methods instead of module-level globals — this
   conversion is what removed the fragility that caused `FINDINGS.md` #1
   (a nested closure needing, but missing, its own `global` declaration).
-- **`measurement_window.py`** — still plain functions + `app.meas_win`/etc.
-  attributes on the app. Next in line for the same class conversion.
+- **`measurement_window.py`** — `MeasurementWindow` class (done). Same
+  conversion as `calibration_summary.py`.
 - **`anaglyph_preview.py`** — still plain functions + module-level globals
-  (`anaglyph_active`, `anaglyph_after_id`, etc.). Not yet converted.
+  (`anaglyph_active`, `anaglyph_after_id`, etc.). Next in line.
 - **`video_overlay.py`** — still plain functions + module-level globals
   (`drag_active`, `left_overlay_canvas`, etc.). Not yet converted.
 
 Once fully converted, each piece will be independently unit-testable without
 constructing a real Tk root — `tests/conftest.py`'s `FakeApp` stand-in
-already anticipates this for the pure-logic functions, and
-`CalibrationSummaryWindow` can now be tested by constructing an instance
-directly (see `tests/test_regressions.py`).
+already anticipates this for the pure-logic functions, and both converted
+window classes can now be tested by constructing an instance directly (see
+`tests/test_regressions.py`).
 
 ## Other first-party scripts
 
@@ -64,9 +72,12 @@ These are standalone tools, not part of the `main.py` app:
 
 ## Non-app directories
 
-- `misc/` — unrelated dev-scratch scripts, not part of the app or a real test
-  suite
+- `misc/` — unrelated dev-scratch scripts, not part of the app; also
+  `misc/AprilCalibration1/` (the 4 calibration NPZ files, tracked in git —
+  the 82 source checkerboard JPGs are gitignored), a real calibration
+  fixture used by `tests/test_calibration_io.py` and
+  `tests/test_rendering_performance.py`
 - `examples/` — real stereo video + calibration fixtures, gitignored,
-  local-only (may become the source of trimmed real test fixtures in Phase 4)
+  local-only
 - `output/` — gitignored, generated artifacts land here (e.g. the ChArUco
   PDF/PNG)

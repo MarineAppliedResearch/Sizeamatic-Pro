@@ -5,26 +5,21 @@ the point diagnostics table, segment table, error/status line, and
 copyable text output for spreadsheet use.
 
 Contents:
-    - Measurement window creation.
-    - Point result table setup.
-    - Segment result table setup.
-    - Measurement status/error display.
-    - Tab separated copy block generation.
+    - `MeasurementWindow` — owns the measurement results window and its
+      widgets.
 
 Design notes:
-    Functions in this file receive the main application object (`app`) so
-    they can access Tkinter root state, measurement widgets, and display
-    settings owned by the app. This keeps measurement display behavior
-    grouped in one file while preserving the current application state
-    model.
+    `MeasurementWindow` is a plain class instance owned by the main
+    application (`app.measurement_window`), matching the same conversion
+    already done for `calibration_summary.CalibrationSummaryWindow` — see
+    that module's "Design notes" for why (removes the module-level-global
+    fragility that caused `FINDINGS.md` #1).
 
 Assumptions:
-    - Measurement rows passed into this module are already computed and
-      formatted.
+    - Measurement rows passed into `update_window` are already computed
+      and formatted.
     - This module does not perform stereo triangulation or measurement
       math.
-    - Widget references are stored on the app object so later update calls
-      can reuse or rebuild the measurement window as needed.
 
 Author:
     Isaac Travers
@@ -40,333 +35,347 @@ import tkinter as tk
 from tkinter import ttk
 
 
-def _on_measurement_window_close(app, win):
-    """Handle the user manually closing the measurement window.
+class MeasurementWindow:
+    """Owns the measurement results Toplevel window and its widgets.
 
-    Destroys the Tkinter window and clears the stored widget references on
-    the app object. Clearing the app references is important because the
-    next measurement update needs to know that the widgets no longer exist
-    and must be rebuilt.
-
-    Note:
-        This used to be a closure nested inside `ensure_measurement_window`
-        (`_on_close`). It's a top-level function instead so it shows up as
-        its own documented entry on the generated docs site — a function
-        defined inside another function isn't visible to `mkdocstrings` at
-        all, no matter how good its own docstring is.
-
-    Args:
-        app: The main application object, whose measurement window widget
-            references get cleared.
-        win (tkinter.Toplevel): The measurement window being closed.
-
-    Returns:
-        None
+    One instance lives on the main application (`app.measurement_window`),
+    created once and reused for the lifetime of the app.
     """
 
-    # Destroy the Tkinter window.
-    win.destroy()
+    def __init__(self, app):
+        """Store the owning app and initialize widget references to None.
 
-    # Clear the stored measurement window reference.
-    app.meas_win = None
+        Args:
+            app: The main application object, used for the Tk root window
+                that owns the measurement Toplevel, and for the assumed
+                click uncertainty setting (`app.click_sigma_px`) shown in
+                the status line.
 
-    # Clear the stored table references because the widgets were destroyed.
-    app.points_tree = None
-    app.segs_tree = None
+        Returns:
+            None
+        """
+        self.app = app
 
-    # Clear the copy text widget reference because the widget was destroyed.
-    app.meas_copy_text = None
+        self.win = None
+        """The measurement results Toplevel window, or None if it hasn't
+        been built yet (or was closed)."""
 
-    # Clear the error text variable reference because the window was destroyed.
-    app.meas_error_var = None
+        self.points_tree = None
+        """The per-point diagnostics Treeview table, or None if the
+        window hasn't been built yet."""
 
+        self.segs_tree = None
+        """The segment measurements Treeview table, or None if the window
+        hasn't been built yet."""
 
-def ensure_measurement_window(app):
-    """Create the measurement results window if it doesn't already exist.
+        self.copy_text = None
+        """The copyable measurement results Text widget, or None if the
+        window hasn't been built yet."""
 
-    Creates the measurement results window, including the point diagnostics
-    table, segment measurement table, error message line, and copyable
-    text area. If the window already exists, the function exits without
-    creating another one. This function only builds the UI widgets;
-    measurement values are filled in later by `update_measurement_window`.
+        self.error_var = None
+        """The `tkinter.StringVar` backing the error/status line, or None
+        if the window hasn't been built yet."""
 
-    Args:
-        app: The main application object. Provides the Tk root window, and
-            receives the created widget references (`app.meas_win`,
-            `app.points_tree`, `app.segs_tree`, `app.meas_copy_text`,
-            `app.meas_error_var`) for later measurement display updates.
+    def _on_close(self):
+        """Handle the user manually closing the measurement window.
 
-    Returns:
-        None
-    """
+        Destroys the Tkinter window and clears the stored widget
+        references. Clearing these references is important because the
+        next `update_window` call needs to know the widgets no longer
+        exist and must be rebuilt via `ensure_window` first.
 
-    # If the measurement window already exists, reuse it instead of creating a
-    # duplicate Toplevel window.
-    if app.meas_win is not None:
-        return
+        Returns:
+            None
+        """
 
-    # Create a separate top level window owned by the main application root.
-    win = tk.Toplevel(app.root)
+        # Destroy the Tkinter window.
+        self.win.destroy()
 
-    # Set the user visible title for the measurement results window.
-    win.title("Measurement")
+        # Clear the stored references because the widgets were destroyed.
+        self.win = None
+        self.points_tree = None
+        self.segs_tree = None
+        self.copy_text = None
+        self.error_var = None
 
-    # Give the window an initial size large enough for both result tables and the
-    # copyable text box.
-    win.geometry("620x520")
+    def ensure_window(self):
+        """Create the measurement results window if it doesn't already exist.
 
-    # Use the cleanup callback when the user closes the measurement window.
-    win.protocol("WM_DELETE_WINDOW", lambda: _on_measurement_window_close(app, win))
+        Creates the measurement results window, including the point
+        diagnostics table, segment measurement table, error message
+        line, and copyable text area. If the window already exists, the
+        function exits without creating another one. Only builds the UI
+        widgets; measurement values are filled in later by
+        `update_window`.
 
-    # Create one padded outer frame to hold all measurement window content.
-    outer = ttk.Frame(win, padding=(10, 10))
-    outer.grid(row=0, column=0, sticky="nsew")
+        Returns:
+            None
+        """
 
-    # Let the outer frame expand with the measurement window.
-    win.grid_rowconfigure(0, weight=1)
-    win.grid_columnconfigure(0, weight=1)
+        # If the measurement window already exists, reuse it instead of
+        # creating a duplicate Toplevel window.
+        if self.win is not None:
+            return
 
-    # Let the table rows and main content column expand when the window resizes.
-    outer.grid_rowconfigure(1, weight=1)
-    outer.grid_rowconfigure(3, weight=1)
-    outer.grid_columnconfigure(0, weight=1)
+        # Create a separate top level window owned by the main application root.
+        win = tk.Toplevel(self.app.root)
 
-    # Create the error/status line used for triangulation failures or other
-    # measurement warnings.
-    app.meas_error_var = tk.StringVar(value="")
-    ttk.Label(
-        outer,
-        textvariable=app.meas_error_var,
-        foreground="red",
-    ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        # Set the user visible title for the measurement results window.
+        win.title("Measurement")
 
-    # -------------------------------------------------------------------------
-    # Points table.
-    # -------------------------------------------------------------------------
+        # Give the window an initial size large enough for both result tables and the
+        # copyable text box.
+        win.geometry("620x520")
 
-    # Add the section label for the per point measurement diagnostics.
-    ttk.Label(
-        outer,
-        text="Points (mm)",
-        font=("Segoe UI", 10, "bold"),
-    ).grid(row=1, column=0, sticky="w")
+        # Use the cleanup callback when the user closes the measurement window.
+        win.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    # Define the point result columns shown in the table.
-    points_cols = (
-        "idx",
-        "X",
-        "Y",
-        "Z",
-        "Range",
-        "Disp",
-        "dY",
-        "ReprojRMS",
-        "sZ",
-        "sRange",
-    )
+        # Create one padded outer frame to hold all measurement window content.
+        outer = ttk.Frame(win, padding=(10, 10))
+        outer.grid(row=0, column=0, sticky="nsew")
 
-    # Create the points table widget using heading only columns.
-    points_tree = ttk.Treeview(
-        outer,
-        columns=points_cols,
-        show="headings",
-        height=8,
-    )
-    points_tree.grid(row=2, column=0, sticky="nsew", pady=(4, 12))
+        # Let the outer frame expand with the measurement window.
+        win.grid_rowconfigure(0, weight=1)
+        win.grid_columnconfigure(0, weight=1)
 
-    # Label each point table column.
-    points_tree.heading("idx", text="#")
-    points_tree.heading("X", text="X")
-    points_tree.heading("Y", text="Y")
-    points_tree.heading("Z", text="Z")
-    points_tree.heading("Range", text="Range")
-    points_tree.heading("Disp", text="Disp (px)")
-    points_tree.heading("dY", text="dY (px)")
-    points_tree.heading("ReprojRMS", text="Reproj RMS (px)")
-    points_tree.heading("sZ", text="σZ")
-    points_tree.heading("sRange", text="σRange")
+        # Let the table rows and main content column expand when the window resizes.
+        outer.grid_rowconfigure(1, weight=1)
+        outer.grid_rowconfigure(3, weight=1)
+        outer.grid_columnconfigure(0, weight=1)
 
-    # Set point table column widths and alignment.
-    points_tree.column("idx", width=40, anchor="center")
-    points_tree.column("X", width=85, anchor="e")
-    points_tree.column("Y", width=85, anchor="e")
-    points_tree.column("Z", width=85, anchor="e")
-    points_tree.column("Range", width=95, anchor="e")
-    points_tree.column("Disp", width=85, anchor="e")
-    points_tree.column("dY", width=75, anchor="e")
-    points_tree.column("ReprojRMS", width=105, anchor="e")
-    points_tree.column("sZ", width=80, anchor="e")
-    points_tree.column("sRange", width=95, anchor="e")
+        # Create the error/status line used for triangulation failures or other
+        # measurement warnings.
+        error_var = tk.StringVar(value="")
+        ttk.Label(
+            outer,
+            textvariable=error_var,
+            foreground="red",
+        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
 
-    # -------------------------------------------------------------------------
-    # Segments table.
-    # -------------------------------------------------------------------------
+        # -------------------------------------------------------------------------
+        # Points table.
+        # -------------------------------------------------------------------------
 
-    # Add the section label for segment measurements between point pairs.
-    ttk.Label(
-        outer,
-        text="Segments (mm)",
-        font=("Segoe UI", 10, "bold"),
-    ).grid(row=3, column=0, sticky="w")
+        # Add the section label for the per point measurement diagnostics.
+        ttk.Label(
+            outer,
+            text="Points (mm)",
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=1, column=0, sticky="w")
 
-    # Define the segment result columns shown in the table.
-    seg_cols = ("seg", "dX", "dY", "dZ", "Len", "sLen")
+        # Define the point result columns shown in the table.
+        points_cols = (
+            "idx",
+            "X",
+            "Y",
+            "Z",
+            "Range",
+            "Disp",
+            "dY",
+            "ReprojRMS",
+            "sZ",
+            "sRange",
+        )
 
-    # Create the segments table widget using heading only columns.
-    segs_tree = ttk.Treeview(
-        outer,
-        columns=seg_cols,
-        show="headings",
-        height=8,
-    )
-    segs_tree.grid(row=4, column=0, sticky="nsew", pady=(4, 12))
+        # Create the points table widget using heading only columns.
+        points_tree = ttk.Treeview(
+            outer,
+            columns=points_cols,
+            show="headings",
+            height=8,
+        )
+        points_tree.grid(row=2, column=0, sticky="nsew", pady=(4, 12))
 
-    # Label each segment table column.
-    segs_tree.heading("seg", text="Seg")
-    segs_tree.heading("dX", text="dX")
-    segs_tree.heading("dY", text="dY")
-    segs_tree.heading("dZ", text="dZ")
-    segs_tree.heading("Len", text="Len")
-    segs_tree.heading("sLen", text="σLen")
+        # Label each point table column.
+        points_tree.heading("idx", text="#")
+        points_tree.heading("X", text="X")
+        points_tree.heading("Y", text="Y")
+        points_tree.heading("Z", text="Z")
+        points_tree.heading("Range", text="Range")
+        points_tree.heading("Disp", text="Disp (px)")
+        points_tree.heading("dY", text="dY (px)")
+        points_tree.heading("ReprojRMS", text="Reproj RMS (px)")
+        points_tree.heading("sZ", text="σZ")
+        points_tree.heading("sRange", text="σRange")
 
-    # Set segment table column widths and alignment.
-    segs_tree.column("seg", width=60, anchor="center")
-    segs_tree.column("dX", width=120, anchor="e")
-    segs_tree.column("dY", width=120, anchor="e")
-    segs_tree.column("dZ", width=120, anchor="e")
-    segs_tree.column("Len", width=140, anchor="e")
-    segs_tree.column("sLen", width=110, anchor="e")
+        # Set point table column widths and alignment.
+        points_tree.column("idx", width=40, anchor="center")
+        points_tree.column("X", width=85, anchor="e")
+        points_tree.column("Y", width=85, anchor="e")
+        points_tree.column("Z", width=85, anchor="e")
+        points_tree.column("Range", width=95, anchor="e")
+        points_tree.column("Disp", width=85, anchor="e")
+        points_tree.column("dY", width=75, anchor="e")
+        points_tree.column("ReprojRMS", width=105, anchor="e")
+        points_tree.column("sZ", width=80, anchor="e")
+        points_tree.column("sRange", width=95, anchor="e")
 
-    # -------------------------------------------------------------------------
-    # Copy box.
-    # -------------------------------------------------------------------------
+        # -------------------------------------------------------------------------
+        # Segments table.
+        # -------------------------------------------------------------------------
 
-    # Add the section label for copyable measurement output.
-    ttk.Label(
-        outer,
-        text="Copy",
-        font=("Segoe UI", 10, "bold"),
-    ).grid(row=5, column=0, sticky="w")
+        # Add the section label for segment measurements between point pairs.
+        ttk.Label(
+            outer,
+            text="Segments (mm)",
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=3, column=0, sticky="w")
 
-    # Create a disabled text widget that later receives copyable measurement text.
-    txt = tk.Text(outer, height=7, width=1, wrap="none")
-    txt.grid(row=6, column=0, sticky="nsew")
+        # Define the segment result columns shown in the table.
+        seg_cols = ("seg", "dX", "dY", "dZ", "Len", "sLen")
 
-    # Keep the copy box from consuming extra vertical stretch by default.
-    outer.grid_rowconfigure(6, weight=0)
+        # Create the segments table widget using heading only columns.
+        segs_tree = ttk.Treeview(
+            outer,
+            columns=seg_cols,
+            show="headings",
+            height=8,
+        )
+        segs_tree.grid(row=4, column=0, sticky="nsew", pady=(4, 12))
 
-    # Start disabled so users do not accidentally edit generated measurement text.
-    txt.configure(state="disabled")
+        # Label each segment table column.
+        segs_tree.heading("seg", text="Seg")
+        segs_tree.heading("dX", text="dX")
+        segs_tree.heading("dY", text="dY")
+        segs_tree.heading("dZ", text="dZ")
+        segs_tree.heading("Len", text="Len")
+        segs_tree.heading("sLen", text="σLen")
 
-    # Store the window and widgets on the app object for later update calls.
-    app.meas_win = win
-    app.points_tree = points_tree
-    app.segs_tree = segs_tree
-    app.meas_copy_text = txt
+        # Set segment table column widths and alignment.
+        segs_tree.column("seg", width=60, anchor="center")
+        segs_tree.column("dX", width=120, anchor="e")
+        segs_tree.column("dY", width=120, anchor="e")
+        segs_tree.column("dZ", width=120, anchor="e")
+        segs_tree.column("Len", width=140, anchor="e")
+        segs_tree.column("sLen", width=110, anchor="e")
 
+        # -------------------------------------------------------------------------
+        # Copy box.
+        # -------------------------------------------------------------------------
 
-def update_measurement_window(app, points_rows, seg_rows, error_msg):
-    """Refresh the measurement window with the latest computed rows.
+        # Add the section label for copyable measurement output.
+        ttk.Label(
+            outer,
+            text="Copy",
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=5, column=0, sticky="w")
 
-    Refreshes the measurement results window using computed point and
-    segment rows. The function clears any previous table contents, inserts
-    the latest rows, and builds a tab separated copy block that can be
-    pasted into a spreadsheet. This function only updates display widgets;
-    it does not compute measurement values.
+        # Create a disabled text widget that later receives copyable measurement text.
+        txt = tk.Text(outer, height=7, width=1, wrap="none")
+        txt.grid(row=6, column=0, sticky="nsew")
 
-    Args:
-        app: The main application object. Provides the measurement window
-            widgets (created via `ensure_measurement_window`) and the
-            assumed click uncertainty setting (`app.click_sigma_px`).
-        points_rows (list[tuple]): Already-formatted point diagnostic rows,
-            each `(idx, X, Y, Z, Range, Disp, dY, ReprojRMS, sZ, sRange)`,
-            matching the points table column order.
-        seg_rows (list[tuple]): Already-formatted segment rows, each
-            `(seg, dX, dY, dZ, Len, sLen)`, matching the segments table
-            column order.
-        error_msg (str | None): Optional measurement error message to show
-            in the status line instead of the assumed click uncertainty.
+        # Keep the copy box from consuming extra vertical stretch by default.
+        outer.grid_rowconfigure(6, weight=0)
 
-    Returns:
-        None
-    """
+        # Start disabled so users do not accidentally edit generated measurement text.
+        txt.configure(state="disabled")
 
-    # Make sure the measurement window and its child widgets exist before trying
-    # to update table rows or copy text.
-    ensure_measurement_window(app)
+        # Store the window and widgets for later update calls.
+        self.win = win
+        self.points_tree = points_tree
+        self.segs_tree = segs_tree
+        self.copy_text = txt
+        self.error_var = error_var
 
-    # Show the measurement error message if one was provided.
-    app.meas_error_var.set(error_msg if error_msg else "")
+    def update_window(self, points_rows, seg_rows, error_msg):
+        """Refresh the measurement window with the latest computed rows.
 
-    # If there is no error, show the assumed click uncertainty used for the
-    # uncertainty estimates.
-    if not error_msg:
-        app.meas_error_var.set(f"Assumed click σ = {app.click_sigma_px:.1f} px")
+        Clears any previous table contents, inserts the latest rows, and
+        builds a tab separated copy block that can be pasted into a
+        spreadsheet. Only updates display widgets; does not compute
+        measurement values.
 
-    # Clear all existing point rows from the previous measurement update.
-    for item in app.points_tree.get_children():
-        app.points_tree.delete(item)
+        Args:
+            points_rows (list[tuple]): Already-formatted point diagnostic
+                rows, each `(idx, X, Y, Z, Range, Disp, dY, ReprojRMS, sZ,
+                sRange)`, matching the points table column order.
+            seg_rows (list[tuple]): Already-formatted segment rows, each
+                `(seg, dX, dY, dZ, Len, sLen)`, matching the segments
+                table column order.
+            error_msg (str | None): Optional measurement error message to
+                show in the status line instead of the assumed click
+                uncertainty.
 
-    # Clear all existing segment rows from the previous measurement update.
-    for item in app.segs_tree.get_children():
-        app.segs_tree.delete(item)
+        Returns:
+            None
+        """
 
-    # Insert the latest formatted point rows into the points table.
-    for row in points_rows:
+        # Make sure the measurement window and its child widgets exist before trying
+        # to update table rows or copy text.
+        self.ensure_window()
 
-        # Each row is expected to match the points table column order:
-        # idx, X, Y, Z, Range, Disp, dY, ReprojRMS, sZ, sRange.
-        app.points_tree.insert("", "end", values=row)
+        # Show the measurement error message if one was provided.
+        self.error_var.set(error_msg if error_msg else "")
 
-    # Insert the latest formatted segment rows into the segments table.
-    for row in seg_rows:
+        # If there is no error, show the assumed click uncertainty used for the
+        # uncertainty estimates.
+        if not error_msg:
+            self.error_var.set(f"Assumed click σ = {self.app.click_sigma_px:.1f} px")
 
-        # Each row is expected to match the segments table column order:
-        # seg, dX, dY, dZ, Len, sLen.
-        app.segs_tree.insert("", "end", values=row)
+        # Clear all existing point rows from the previous measurement update.
+        for item in self.points_tree.get_children():
+            self.points_tree.delete(item)
 
-    # Build a tab separated copy block so the results can be pasted directly into
-    # Excel, LibreOffice Calc, Google Sheets, or a text file.
-    lines = []
+        # Clear all existing segment rows from the previous measurement update.
+        for item in self.segs_tree.get_children():
+            self.segs_tree.delete(item)
 
-    # Add the points section title.
-    lines.append("Points")
+        # Insert the latest formatted point rows into the points table.
+        for row in points_rows:
 
-    # Add the point diagnostics header in the same order as the points table.
-    lines.append(
-        "idx\tX(mm)\tY(mm)\tZ(mm)\tRange(mm)\tDisp(px)\tdY(px)"
-        "\tReprojRMS(px)\tSigmaZ(mm)\tSigmaRange(mm)"
-    )
+            # Each row is expected to match the points table column order:
+            # idx, X, Y, Z, Range, Disp, dY, ReprojRMS, sZ, sRange.
+            self.points_tree.insert("", "end", values=row)
 
-    # Copy each point row in the same order as the table.
-    for idx, X, Y, Z, R, disp, dy, erms, sZ, sR in points_rows:
-        lines.append(f"{idx}\t{X}\t{Y}\t{Z}\t{R}\t{disp}\t{dy}\t{erms}\t{sZ}\t{sR}")
+        # Insert the latest formatted segment rows into the segments table.
+        for row in seg_rows:
 
-    # Add the segments section only when segment rows exist.
-    if seg_rows:
+            # Each row is expected to match the segments table column order:
+            # seg, dX, dY, dZ, Len, sLen.
+            self.segs_tree.insert("", "end", values=row)
 
-        # Separate point and segment sections with a blank line.
-        lines.append("")
+        # Build a tab separated copy block so the results can be pasted directly into
+        # Excel, LibreOffice Calc, Google Sheets, or a text file.
+        lines = []
 
-        # Add the segments section title and header.
-        lines.append("Segments")
-        lines.append("seg\tdX(mm)\tdY(mm)\tdZ(mm)\tLen(mm)\tSigmaLen(mm)")
+        # Add the points section title.
+        lines.append("Points")
 
-        # Copy each segment row in the same order as the table.
-        for seg, dX, dY, dZ, L, sL in seg_rows:
-            lines.append(f"{seg}\t{dX}\t{dY}\t{dZ}\t{L}\t{sL}")
+        # Add the point diagnostics header in the same order as the points table.
+        lines.append(
+            "idx\tX(mm)\tY(mm)\tZ(mm)\tRange(mm)\tDisp(px)\tdY(px)"
+            "\tReprojRMS(px)\tSigmaZ(mm)\tSigmaRange(mm)"
+        )
 
-    # Join the output lines into one text block.
-    copy_block = "\n".join(lines)
+        # Copy each point row in the same order as the table.
+        for idx, X, Y, Z, R, disp, dy, erms, sZ, sR in points_rows:
+            lines.append(f"{idx}\t{X}\t{Y}\t{Z}\t{R}\t{disp}\t{dy}\t{erms}\t{sZ}\t{sR}")
 
-    # Temporarily enable the text widget so generated output can be replaced.
-    app.meas_copy_text.configure(state="normal")
+        # Add the segments section only when segment rows exist.
+        if seg_rows:
 
-    # Clear the previous copy block.
-    app.meas_copy_text.delete("1.0", "end")
+            # Separate point and segment sections with a blank line.
+            lines.append("")
 
-    # Insert the latest copyable measurement output.
-    app.meas_copy_text.insert("1.0", copy_block)
+            # Add the segments section title and header.
+            lines.append("Segments")
+            lines.append("seg\tdX(mm)\tdY(mm)\tdZ(mm)\tLen(mm)\tSigmaLen(mm)")
 
-    # Disable editing again so users do not accidentally modify generated output.
-    app.meas_copy_text.configure(state="disabled")
+            # Copy each segment row in the same order as the table.
+            for seg, dX, dY, dZ, L, sL in seg_rows:
+                lines.append(f"{seg}\t{dX}\t{dY}\t{dZ}\t{L}\t{sL}")
+
+        # Join the output lines into one text block.
+        copy_block = "\n".join(lines)
+
+        # Temporarily enable the text widget so generated output can be replaced.
+        self.copy_text.configure(state="normal")
+
+        # Clear the previous copy block.
+        self.copy_text.delete("1.0", "end")
+
+        # Insert the latest copyable measurement output.
+        self.copy_text.insert("1.0", copy_block)
+
+        # Disable editing again so users do not accidentally modify generated output.
+        self.copy_text.configure(state="disabled")

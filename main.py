@@ -318,28 +318,9 @@ class SizeamaticProApp:
         `calibration_io.load_calibration_bundle`, which builds this dict;
         `on_load_calibration_folder` is the only caller."""
 
-        self.meas_win = None
-        """The measurement results `Toplevel` window, or None if it hasn't
-        been built yet (or was closed). Lives directly on `self` rather
-        than as a class of its own (unlike `self.cal_summary_window`) —
-        `measurement_window.py`'s functions read/write `app.meas_win`
-        directly instead. Built lazily by
-        `measurement_window.ensure_measurement_window` on the first valid
-        measurement; converting this module to a class the same way is
-        Step 3 of the Phase 5 restructure."""
-
-        self.meas_vars = {}
-        """Unused — no code currently reads or writes this dict.
-        Measurement display state actually lives in the widget references
-        `measurement_window.py` attaches directly to `self` instead
-        (`meas_win`, `points_tree`, `segs_tree`, `meas_copy_text`,
-        `meas_error_var`, none of which are pre-declared here — they only
-        exist once `ensure_measurement_window` has run)."""
-
-        self.meas_copy_text = None
-        """The measurement window's copyable results `Text` widget, or
-        None if the window hasn't been built yet. See the note on
-        `self.meas_win` — same "lives directly on `self`" pattern."""
+        self.measurement_window = measurement_window.MeasurementWindow(self)
+        """Owns the measurement results Toplevel window and its widgets.
+        See `measurement_window.MeasurementWindow`."""
 
         self.click_sigma_px = 3.0
         """Assumed user click-placement uncertainty, in image pixels. An
@@ -793,7 +774,7 @@ class SizeamaticProApp:
             self._set_status_right("Measured 1 point")
 
         # Update popup window (creates it on first valid measurement).
-        measurement_window.update_measurement_window(self, points_rows, seg_rows, err_msg)
+        self.measurement_window.update_window(points_rows, seg_rows, err_msg)
 
     # -------------------------------------------------------------------------
     # Menu bar
