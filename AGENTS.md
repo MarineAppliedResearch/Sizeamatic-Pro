@@ -28,8 +28,13 @@ calibration. See `README.md` for the user-facing description.
 
 ## Coding conventions
 
-These apply to `main.py`, `generate_calibration_report.py`, and
-`create_charuco_calibration_target.py`. They do not apply to `misc/`.
+These apply to every first-party file in the repo — `main.py` and its
+supporting modules (see `ARCHITECTURE.md`), `generate_calibration_report.py`,
+`create_charuco_calibration_target.py`, and `tests/`. They do not apply to
+`misc/`. This includes test files: every test function gets a docstring
+too, not just the fixtures and helpers around them — it's easy to assume
+"the test name says what it checks" is enough and skip it, but the
+convention doesn't carve out an exception for tests.
 
 ### Comments — dense and explanatory (not minimal)
 
@@ -108,6 +113,42 @@ it a very misleading way to check whether documentation content was
 actually there. If you want to preview the docs, always build fresh and
 open the static file — don't trust a running dev server, live-reloaded or
 not.
+
+## Testing
+
+Run the suite: `uv run pytest`. Everything lives under `tests/`.
+
+- **Prefer a `FakeApp` stand-in over the real GUI.** Most of the app's
+  actual logic (`stereo_matching.py`, `calibration_summary.py`'s
+  `map_oob_percent`, etc.) takes an `app` parameter but only reads a
+  handful of specific attributes off it. Use the `make_fake_app` fixture
+  (see `tests/conftest.py`) to build a minimal object with just those
+  attributes set, rather than constructing a real `SizeamaticProApp`. Much
+  faster, and avoids the Tk pitfalls below entirely.
+- **Only one real `tk.Tk()` per test session, ever.** Confirmed
+  empirically: Tcl/Tk does not reliably support creating and fully
+  destroying more than one interpreter within a single process on this
+  setup — it fails with `TclError: invalid command name "tcl_findLibrary"`
+  or a broken `init.tcl` path lookup, intermittently, after the second or
+  third such cycle. `tests/conftest.py`'s `hidden_tk_root` fixture is
+  session-scoped for exactly this reason — reuse it (and the
+  `sizeamatic_app` fixture built on it) rather than calling `tk.Tk()`
+  directly in a new test.
+- **If a test needs to exercise code that calls `self.root.destroy()`**
+  (like `on_app_close`), don't let it actually destroy the shared session
+  root — redirect it first. Use `root.quit` (stops `mainloop()` without
+  destroying anything) if the code under test calls `mainloop()`, or a
+  plain no-op lambda if it doesn't. See `test_smoke.py` and
+  `test_regressions.py`'s `on_app_close` test for both patterns.
+- **Prefer synthetic fixtures with known-correct expected values over real
+  captured calibration data.** `tests/conftest.py`'s `synthetic_cal`/
+  `known_point_pixels` build a small hand-picked rectified stereo rig
+  specifically so tests can compute the exact expected triangulation
+  result analytically and assert against it — real calibration files have
+  no such "known correct answer" to check against.
+- Every test function gets a docstring too, same as any other code — see
+  the "Coding conventions" section above; it isn't scoped to exclude
+  `tests/`.
 
 ## Git workflow
 
