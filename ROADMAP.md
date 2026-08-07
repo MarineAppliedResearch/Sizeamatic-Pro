@@ -125,12 +125,31 @@ suite run after each step.
 - [ ] Execute the restructure:
   - [x] Fix the render-path performance bottleneck (`main.py`,
         `_display_bgr_on_canvas`) — see above
-  - [ ] `calibration_summary.py` → `CalibrationSummaryWindow` class
+  - [x] Fix the video-seek performance bottleneck (`main.py`,
+        `_read_frame_at`) — found while writing an end-to-end rendering
+        test against real footage (`examples/left_20260309_171631.mp4`)
+        and the real `misc/AprilCalibration1/` calibration fixture: even
+        after the render-path fix, full rectified playback only achieved
+        10.2 fps. `cap.set(CAP_PROP_POS_FRAMES)` before every read (even
+        for a one-frame sequential advance) forces an expensive keyframe
+        seek — benchmarked at 54ms/frame vs. 2.8ms/frame for a plain
+        sequential `cap.read()`, a ~19x difference, bigger than the
+        render-path fix itself. Fixed by checking the capture's own
+        reported position (`cap.get(CAP_PROP_POS_FRAMES)`, ~0.0002ms) and
+        only seeking when it doesn't already match the requested index —
+        this is correct (not just "assume sequential") even when
+        `anaglyph_preview.py`'s independent preview tick reads from the
+        same capture in between. End-to-end fps went from 10.2 to 110.7.
+        See `tests/test_rendering_performance.py` and
+        `tests/test_main.py`'s seek-correctness test.
+  - [x] `calibration_summary.py` → `CalibrationSummaryWindow` class
+  - [x] Pull calibration file loading/validation out of `main.py` into its
+        own module (`calibration_io.py`) — pulled forward from its own
+        step since testing the new performance test needed a dialog-free
+        load path anyway
   - [ ] `measurement_window.py` → `MeasurementWindow` class
   - [ ] `anaglyph_preview.py` → `AnaglyphPreview` class
   - [ ] `video_overlay.py` → `VideoOverlay` class
-  - [ ] Pull calibration file loading/validation out of `main.py` into its
-        own module
   - [ ] `main.py` ends up as a thin `SizeamaticProApp` wiring the pieces
         together
   - [ ] Update `tests/` as each piece becomes a class; update

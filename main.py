@@ -22,9 +22,6 @@ import cv2
 
 from PIL import Image, ImageTk
 
-import numpy as np
-import math
-
 import ctypes # For App Model ID
 
 # Local Imports
@@ -32,6 +29,7 @@ import stereo_matching
 import measurement_window  # measurement_window contains the Tkinter measurement results window and update helpers.
 import anaglyph_preview    # Manages the anaglyph_preview functionality
 import calibration_summary # calibration_summary contains the Tkinter calibration summary window and update helpers.
+import calibration_io      # Loads and validates calibration NPZ files, without the directory-chooser dialog.
 import video_overlay # Manages drawing the overlay on the video
 
 
@@ -131,9 +129,14 @@ class SizeamaticProApp:
         # ---- OpenCV video captures ----
         self.capL = None
         """The left video's `cv2.VideoCapture`, or None if not loaded.
-        Stays open for the lifetime of the app once loaded, so seeking is
-        fast — released and reopened on a fresh load
-        (`on_load_left_video`) or on app close (`on_app_close`)."""
+        Stays open for the lifetime of the app once loaded, so re-opening
+        the file isn't needed on every frame — released and reopened on a
+        fresh load (`on_load_left_video`) or on app close
+        (`on_app_close`). Note that keeping this open does **not** by
+        itself make seeking fast — `cap.set(CAP_PROP_POS_FRAMES)` forces
+        an expensive keyframe seek regardless; see `_read_frame_at`, which
+        checks the capture's own reported position before deciding
+        whether to seek at all."""
 
         self.capR = None
         """The right video's `cv2.VideoCapture`, or None if not loaded.
@@ -311,8 +314,9 @@ class SizeamaticProApp:
         ("mtxL"/"distL"/"mtxR"/"distR"), extrinsics ("R"/"T"/"E"/"F"/
         "stereo_rms"), rectification ("RL"/"RR"/"PL"/"PR"/"Q"/"roiL"/
         "roiR"), remap arrays ("mapLx"/"mapLy"/"mapRx"/"mapRy"), and
-        calibrated size ("w"/"h") — see `on_load_calibration_folder`,
-        which is the only place that builds this dict."""
+        calibrated size ("w"/"h") — see
+        `calibration_io.load_calibration_bundle`, which builds this dict;
+        `on_load_calibration_folder` is the only caller."""
 
         self.meas_win = None
         """The measurement results `Toplevel` window, or None if it hasn't
@@ -1242,10 +1246,10 @@ class SizeamaticProApp:
     def on_load_calibration_folder(self):
         """Prompt for and load a stereo calibration folder.
 
-        Verifies the four expected NPZ files exist, loads them, validates
-        the calibrated resolution against any already-loaded video
-        resolutions, and stores the resulting calibration bundle on
-        `self.cal`. On any failure, clears `self.cal`, disables rectified
+        Delegates the actual file loading/validation to
+        `calibration_io.load_calibration_bundle` — this method just
+        handles the directory dialog and updating UI state from the
+        result. On any failure, clears `self.cal`, disables rectified
         view, and shows a status message explaining why.
 
         Returns:
@@ -1258,124 +1262,16 @@ class SizeamaticProApp:
         # Store the folder path for status display.
         self.calibration_folder = folder
 
-        # Build expected file paths.
-        intr_path = os.path.join(folder, "calibration_intrinsics.npz")
-        extr_path = os.path.join(folder, "calibration_extrinsics.npz")
-        rect_path = os.path.join(folder, "calibration_rectification.npz")
-        maps_path = os.path.join(folder, "calibration_maps.npz")
+        cal, err = calibration_io.load_calibration_bundle(folder, self.metaL, self.metaR)
 
-        # Verify required files exist.
-        missing = []
-        for p in [intr_path, extr_path, rect_path, maps_path]:
-            if not os.path.isfile(p):
-                missing.append(os.path.basename(p))
-
-        # Handle the case where a calibration file doesn't exist
-        if missing:
+        if err is not None:
             self.cal = None
             self.view_rectified.set(False)
-            self._set_status_mid(f"Missing calibration files: {', '.join(missing)}")
+            self._set_status_mid(err)
             self._refresh_status_left()
             return
 
-        try:
-            intr = np.load(intr_path)
-            rect = np.load(rect_path)
-            maps = np.load(maps_path)
-            extr = np.load(extr_path)
-
-            # Pull required matrices/maps.
-            PL = rect["PL"]
-            PR = rect["PR"]
-            Q = rect["Q"]
-
-            mapLx = maps["mapLx"]
-            mapLy = maps["mapLy"]
-            mapRx = maps["mapRx"]
-            mapRy = maps["mapRy"]
-
-            # Intrinsics
-            mtxL = intr["mtxL"]
-            distL = intr["distL"]
-            mtxR = intr["mtxR"]
-            distR = intr["distR"]
-
-            # Extrinsics
-            R = extr["R"]
-            T = extr["T"]
-            E = extr["E"]
-            F = extr["F"]
-            stereo_rms = float(extr["stereo_rms"]) if "stereo_rms" in extr.files else None
-
-            # Rectification
-            RL = rect["RL"] if "RL" in rect.files else None
-            RR = rect["RR"] if "RR" in rect.files else None
-            roiL = rect["roiL"] if "roiL" in rect.files else None
-            roiR = rect["roiR"] if "roiR" in rect.files else None
-
-            # Intrinsics file stores expected calibration resolution.
-            cal_w = int(intr["image_width"])
-            cal_h = int(intr["image_height"])
-
-        except Exception as e:
-            self.cal = None
-            self.view_rectified.set(False)
-            self._set_status_mid(f"Failed to load calibration: {e}")
-            self._refresh_status_left()
-            return
-
-        # If we have a loaded video, enforce resolution match now.
-        # Rectification maps must match the decoded frame size.
-        if self.metaL:
-            if self.metaL["width"] != cal_w or self.metaL["height"] != cal_h:
-                self.cal = None
-                self.view_rectified.set(False)
-                self._set_status_mid("Calibration resolution does not match LEFT video")
-                self._refresh_status_left()
-                return
-
-        if self.metaR:
-            if self.metaR["width"] != cal_w or self.metaR["height"] != cal_h:
-                self.cal = None
-                self.view_rectified.set(False)
-                self._set_status_mid("Calibration resolution does not match RIGHT video")
-                self._refresh_status_left()
-                return
-
-        # Store calibration bundle.
-        self.cal = {
-            # Sizes
-            "w": cal_w,
-            "h": cal_h,
-
-            # Intrinsics
-            "mtxL": mtxL,
-            "distL": distL,
-            "mtxR": mtxR,
-            "distR": distR,
-
-            # Extrinsics
-            "R": R,
-            "T": T,
-            "E": E,
-            "F": F,
-            "stereo_rms": stereo_rms,
-
-            # Rectification
-            "RL": RL,
-            "RR": RR,
-            "PL": PL,
-            "PR": PR,
-            "Q": Q,
-            "roiL": roiL,
-            "roiR": roiR,
-
-            # Maps
-            "mapLx": mapLx,
-            "mapLy": mapLy,
-            "mapRx": mapRx,
-            "mapRy": mapRy,
-        }
+        self.cal = cal
 
         self._set_status_mid("Calibration loaded")
         self._refresh_status_left()
@@ -2280,18 +2176,42 @@ class SizeamaticProApp:
         self._update_frame_labels()
 
     def _read_frame_at(self, cap, index):
-        """Seek to a specific frame index and decode a single frame.
+        """Decode the frame at a specific index, seeking only if needed.
+
+        Skips the explicit `cap.set(CAP_PROP_POS_FRAMES)` seek when the
+        capture's own reported position (`cap.get(CAP_PROP_POS_FRAMES)`)
+        is already at the requested index — checking the position is
+        essentially free (~0.0002ms measured), while `cap.set` forces an
+        expensive keyframe seek even for a one-frame advance, benchmarked
+        at ~19x slower than reading sequentially (54ms vs 2.8ms per frame
+        on a real 1080p capture). This was the dominant remaining cost in
+        rectified playback fps, bigger than the render path itself; see
+        ROADMAP.md Phase 5.
+
+        Checking the capture's actual reported position (rather than
+        tracking "the last index this method itself read") matters
+        because more than one part of the app can read from the same
+        capture — the main render loop and `anaglyph_preview.py`'s
+        independent preview tick both call this with `app.capL`/
+        `app.capR`, each with their own frame index sequence. Tracking
+        only this method's own last call would get confused by an
+        interleaved read from a different sequence; asking the capture
+        directly is correct regardless of who else touched it in between.
 
         Args:
             cap (cv2.VideoCapture): The capture to read from.
-            index (int): The zero-based frame index to seek to.
+            index (int): The zero-based frame index to read.
 
         Returns:
             numpy.ndarray | None: The decoded BGR frame, or None if the
             seek/decode failed.
         """
-        # Seek to the requested frame index.
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(index))
+        index = int(index)
+
+        # Only seek if the capture isn't already positioned to read this
+        # exact frame next.
+        if int(cap.get(cv2.CAP_PROP_POS_FRAMES)) != index:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, index)
 
         # Decode a single frame.
         ok, frame_bgr = cap.read()
