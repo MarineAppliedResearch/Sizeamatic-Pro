@@ -334,22 +334,19 @@ class SizeamaticProApp:
         """Owns the calibration summary Toplevel window and its widgets.
         See `calibration_summary.CalibrationSummaryWindow`."""
 
-        # Anaglyph preview state (OpenCV window, independent playback) —
-        # see the attribute docstrings in anaglyph_preview.py; this just
-        # resets them for a fresh app instance (and renames the window
-        # title to match this app rather than that module's generic
-        # default).
-        anaglyph_preview.anaglyph_active = False
-        anaglyph_preview.anaglyph_playing = False
-        anaglyph_preview.anaglyph_after_id = None
-        anaglyph_preview.anaglyph_index = 0
-        anaglyph_preview.anaglyph_window_name = "Sizeamatic Pro - Anaglyph 3D"
+        self.anaglyph_preview = anaglyph_preview.AnaglyphPreview(self)
+        """Owns the anaglyph preview's OpenCV window and playback state.
+        See `anaglyph_preview.AnaglyphPreview`."""
+
+        # Rename the preview window title to match this app rather than
+        # that class's generic default.
+        self.anaglyph_preview.window_name = "Sizeamatic Pro - Anaglyph 3D"
 
     def on_toggle_anaglyph_preview(self):
         """Start or stop the anaglyph preview window.
 
         Requires both videos to be loaded. Toggles based on the current
-        `anaglyph_preview.anaglyph_active` state.
+        `self.anaglyph_preview.active` state.
 
         Returns:
             None
@@ -360,11 +357,11 @@ class SizeamaticProApp:
             return
 
         # Toggle behavior.
-        if anaglyph_preview.anaglyph_active:
-            anaglyph_preview.stop_anaglyph_preview(self)
+        if self.anaglyph_preview.active:
+            self.anaglyph_preview.stop()
             return
 
-        anaglyph_preview.start_anaglyph_preview(self)
+        self.anaglyph_preview.start()
 
     def on_show_calibration_summary(self):
         """Open (or focus) the calibration summary window.
@@ -447,8 +444,8 @@ class SizeamaticProApp:
             self.play_after_id = None
 
         # Close the anaglyph viewer if it is running.
-        if anaglyph_preview.anaglyph_active:
-            anaglyph_preview.stop_anaglyph_preview(self)
+        if self.anaglyph_preview.active:
+            self.anaglyph_preview.stop()
 
         # Release capture objects if open.
         if self.capL:

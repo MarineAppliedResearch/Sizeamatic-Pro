@@ -23,15 +23,16 @@ in `_read_frame_at` (bigger of the two — 19x slower than sequential reads).
 construction, window/menu setup, playback/timeline state, video I/O (two
 OpenCV `VideoCapture` objects held open for the app's lifetime), and the
 top-level event wiring. Calibration file loading/validation has been pulled
-out into `calibration_io.py`. It owns two converted pieces so far:
+out into `calibration_io.py`. It owns three converted pieces so far:
 `self.cal_summary_window` (a `calibration_summary.CalibrationSummaryWindow`
-instance) and `self.measurement_window` (a
-`measurement_window.MeasurementWindow` instance).
+instance), `self.measurement_window` (a
+`measurement_window.MeasurementWindow` instance), and
+`self.anaglyph_preview` (an `anaglyph_preview.AnaglyphPreview` instance).
 
 Several concerns have been pulled out of `main.py` into separate files.
-**Two have been converted to classes; the rest are still plain functions**
-that take the `SizeamaticProApp` instance (`app`) as their first argument
-and read/mutate its attributes directly, or (worse) keep their own state as
+**Three have been converted to classes; one is still plain functions** that
+take the `SizeamaticProApp` instance (`app`) as their first argument and
+read/mutate its attributes directly, or (worse) keep their own state as
 module-level globals:
 
 - **`stereo_matching.py`** — stereo point matching and triangulation math
@@ -49,16 +50,19 @@ module-level globals:
   (a nested closure needing, but missing, its own `global` declaration).
 - **`measurement_window.py`** — `MeasurementWindow` class (done). Same
   conversion as `calibration_summary.py`.
-- **`anaglyph_preview.py`** — still plain functions + module-level globals
-  (`anaglyph_active`, `anaglyph_after_id`, etc.). Next in line.
+- **`anaglyph_preview.py`** — `AnaglyphPreview` class (done). Same
+  conversion again — this one also structurally eliminates `FINDINGS.md`
+  #2 (an uninitialized module global) and #3 (a bound method can't be
+  called with a missing `app` argument the way a free function could).
 - **`video_overlay.py`** — still plain functions + module-level globals
-  (`drag_active`, `left_overlay_canvas`, etc.). Not yet converted.
+  (`drag_active`, `left_overlay_canvas`, etc.). Not yet converted — last
+  one left.
 
 Once fully converted, each piece will be independently unit-testable without
 constructing a real Tk root — `tests/conftest.py`'s `FakeApp` stand-in
-already anticipates this for the pure-logic functions, and both converted
-window classes can now be tested by constructing an instance directly (see
-`tests/test_regressions.py`).
+already anticipates this for the pure-logic functions, and all three
+converted classes can now be tested by constructing an instance directly
+(see `tests/test_regressions.py`).
 
 ## Other first-party scripts
 
