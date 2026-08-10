@@ -49,9 +49,17 @@ def load_calibration_bundle(folder, meta_left=None, meta_right=None):
         if not os.path.isfile(p):
             missing.append(os.path.basename(p))
 
-    # Report the specific missing files rather than failing generically.
+    # Report the specific missing files, plus a reminder of the full set a
+    # calibration folder needs, rather than failing generically — this is
+    # the first thing a new user sees if they point the loader at the
+    # wrong folder, so it needs to be self-explanatory on its own.
     if missing:
-        return None, f"Missing calibration files: {', '.join(missing)}"
+        return None, (
+            f"Missing calibration files: {', '.join(missing)}. A calibration "
+            "folder must contain all four: calibration_intrinsics.npz, "
+            "calibration_extrinsics.npz, calibration_rectification.npz, "
+            "calibration_maps.npz."
+        )
 
     try:
         intr = np.load(intr_path)

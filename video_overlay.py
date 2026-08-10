@@ -198,6 +198,17 @@ class VideoOverlay:
         self.left_canvas.bind("<MouseWheel>", lambda e: app.on_mouse_wheel("L", e))
         self.right_canvas.bind("<MouseWheel>", lambda e: app.on_mouse_wheel("R", e))
 
+        # Middle-mouse-button drag pans each pane. A separate button from point
+        # placement (left) and explicit point refinement (right) so panning never
+        # collides with either — see main.py's `on_pan_down` docstring.
+        self.left_canvas.bind("<Button-2>", lambda e: app.on_pan_down("L", e))
+        self.left_canvas.bind("<B2-Motion>", lambda e: app.on_pan_drag("L", e))
+        self.left_canvas.bind("<ButtonRelease-2>", lambda e: app.on_pan_up("L", e))
+
+        self.right_canvas.bind("<Button-2>", lambda e: app.on_pan_down("R", e))
+        self.right_canvas.bind("<B2-Motion>", lambda e: app.on_pan_drag("R", e))
+        self.right_canvas.bind("<ButtonRelease-2>", lambda e: app.on_pan_up("R", e))
+
     def get_pane_scale(self, which, canvas):
         """Compute the image-to-screen scale factor for one video pane.
 

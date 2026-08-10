@@ -11,6 +11,40 @@ import pytest
 LEFT_VIDEO = "examples/left_20260309_171631.mp4"
 
 
+def test_middle_drag_pans_without_redecoding(sizeamatic_app):
+    """Middle-mouse-button drag should nudge the pane's pan offset by the
+    on-screen distance moved, and redraw using the already-decoded
+    current frame (ROADMAP.md Phase 7's pan feature) rather than
+    re-reading from the video capture — there's no video loaded in this
+    test at all, so a working pan that didn't crash confirms
+    `_redisplay_current_frames` really doesn't touch `capL`/`capR`.
+    """
+
+    app = sizeamatic_app
+    app.current_frameL = np.random.randint(0, 255, (48, 64, 3), dtype=np.uint8)
+
+    from types import SimpleNamespace
+
+    def event(x, y):
+        return SimpleNamespace(x=x, y=y)
+
+    app.on_pan_down("L", event(100, 50))
+    assert app.pan_active is True
+    assert app.pan_which == "L"
+
+    app.on_pan_drag("L", event(130, 65))
+    assert app.viewL["off_x"] == 30.0
+    assert app.viewL["off_y"] == 15.0
+
+    # A drag event from the other pane should be ignored.
+    app.on_pan_drag("R", event(999, 999))
+    assert app.viewR["off_x"] == 0.0
+
+    app.on_pan_up("L", event(130, 65))
+    assert app.pan_active is False
+    assert app.pan_which is None
+
+
 def test_display_bgr_on_canvas_renders_without_error(sizeamatic_app):
     """Regression test for the Phase 5 Pillow render-path fix.
 

@@ -124,6 +124,23 @@ close the main window.
 
 **Fix:** Changed the call to `anaglyph_preview.stop_anaglyph_preview(self)`.
 
+### 8. `main.py` — `current_frameL`/`current_frameR` never initialized in `__init__`
+
+Found while building the Phase 7 pan feature. `self.current_frameL`/
+`self.current_frameR` (the cached, already-decoded current frame per pane)
+only came into existence once `_render_current_frames` ran for a pane with
+a loaded capture — there was no `self.current_frameL = None` /
+`self.current_frameR = None` in `__init__`. Any code reading either
+attribute before the first successful render of that pane (or when that
+pane's video was never loaded at all) would hit `AttributeError` instead
+of a clean `None`. Not reachable before Phase 7 since nothing read these
+outside `_render_current_frames` itself; became reachable once
+`_redisplay_current_frames` (used by panning) needed to read both
+attributes regardless of which panes have ever rendered.
+
+**Fix:** Initialized both to `None` in `__init__`, alongside `metaL`/
+`metaR`.
+
 ## Flaws / risky patterns flagged, not fixed
 
 ### 4. `main.py` — `_display_bgr_on_canvas` dead fallback branch

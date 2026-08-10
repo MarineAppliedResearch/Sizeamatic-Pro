@@ -199,14 +199,62 @@ part of this phase.
       class-method-listing one-liner and a build command) from the bottom
       of `README.md`.
 
-## Phase 7 — Usability `[ ]`
+## Phase 7 — Usability `[~]`
 
-Focus on the actual user (analyst) experience of the tool, informed by real
-usage from Phases 1-6.
+Focus on the actual user (analyst) experience of the tool (issue #8). Started
+with a structured usability interview with the project owner (the primary
+analyst stakeholder) rather than guessing at friction points; other analysts'
+input may come in a later round. Executing incrementally, one item at a time,
+with tests added alongside each change — same rhythm as Phase 5.
 
-- [ ] Usability review with actual analysts using the tool
-- [ ] Address friction points (the README already flags rectification as "very
-      unacceptably slow", for example)
+- [x] Usability interview — see below for the resulting requirements
+- [ ] Calibration folder guidance — `filedialog.askdirectory` currently gives
+      no hint what's expected inside. Add a label near "Load Calibration
+      Folder…" naming the four expected NPZ files, and fold the same
+      guidance into `calibration_io.py`'s missing-files error message.
+- [ ] Pan when zoomed in — new middle-mouse-drag binding in
+      `video_overlay.py` (left-click stays point placement/drag; right-click
+      stays the existing explicit-refine gesture in `on_right_down`/
+      `on_right_drag`/`on_right_up` — deliberately not reused for panning to
+      avoid collision risk with refine). Drives the pan offset that already
+      exists per-pane (`viewL`/`viewR`'s `off_x`/`off_y`), currently only
+      touched by mouse-wheel zoom.
+- [ ] Resync control — `on_toggle_lock` already computes and stores
+      `lock_offset_frames` (see `main.py`) whenever Lock is enabled while
+      both timelines are manually scrubbed to the same moment; that's
+      already the resync mechanism in substance. Expose it as a visible,
+      directly-editable control instead of only settable implicitly via
+      re-toggling Lock. Deliberately out of scope: correcting drift that
+      changes over a video's length (a single offset can't fix that) — not
+      an observed problem yet, revisit only if it becomes one.
+- [ ] Project file — new `project_io.py` (dialog-free, testable, same
+      pattern as `calibration_io.py`): saves/loads a small JSON manifest of
+      left/right video paths, calibration folder path, and the resync
+      offset above. New File menu items "Save Project…"/"Open Project…" so
+      a session doesn't require reloading everything from scratch.
+- [ ] Measurement output overhaul — `measurement_window.py`'s copy block
+      currently has no identifying context (video/pair name, frame,
+      timestamp) and only ever shows the current measurement. Add an
+      identifying header row, and an accumulating log with one new row per
+      explicit "Record" action (not auto-logged on every recalculation, to
+      avoid flooding it with in-progress drag states).
+- [ ] Playback speed — the speed dropdown (0.25x-4x) already exists and
+      "1x" is already intended to match native fps, but it's a hardcoded
+      40ms tick, not read from the loaded video's actual fps — only
+      coincidentally correct for ~25fps footage. Fix: read native fps from
+      video metadata. Real achieved playback fps during actual use is
+      reported as much lower than the ~25fps target despite Phase 5's
+      rendering fixes (110fps in that benchmark, on the small `examples/`
+      clip) — needs profiling against real (likely higher-resolution)
+      footage to find where the gap actually is; `root.after()` only
+      guarantees a *minimum* delay, so if per-tick work exceeds the
+      scheduled interval that alone would explain it.
+- [ ] Anaglyph 3D preview — confirmed novelty-only, not a usability issue.
+      No action; deprioritized for future investment.
+- [ ] Sort the above into automated-test-covered vs. manual-judgment-only,
+      and extend `tests/` accordingly as each item lands
+- [ ] Update `ARCHITECTURE.md`/`FINDINGS.md` to reflect any new modules
+      (`project_io.py`) or structural changes
 
 ## Phase 8 — MARE API integration (future, not yet scoped) `[ ]`
 

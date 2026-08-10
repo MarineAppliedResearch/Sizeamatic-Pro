@@ -162,6 +162,19 @@ class SizeamaticProApp:
         """Metadata dict for the right video, or None if not loaded.
         Mirrors `self.metaL` for the right side."""
 
+        self.current_frameL = None
+        """The exact left image currently displayed (post-rectification,
+        if enabled), cached by `_render_current_frames` for use by stereo
+        matching and by `_redisplay_current_frames` (panning). None until
+        the first successful render, or if the last decode attempt
+        failed. Initialized here (rather than only coming into existence
+        on first render) so code that reads it before any frame has ever
+        been rendered gets a clean None instead of an AttributeError."""
+
+        self.current_frameR = None
+        """The exact right image currently displayed. Mirrors
+        `self.current_frameL` for the right side."""
+
         # ---- Timeline state ----
         self.left_frame_index = tk.IntVar(value=0)
         """Current frame index on the left timeline. This is the
@@ -320,6 +333,25 @@ class SizeamaticProApp:
         """Zoom multiplier applied per mouse wheel notch (each notch
         multiplies or divides the current zoom by this factor)."""
 
+        self.pan_active = False
+        """Whether a middle-mouse-button pan drag is currently active.
+        Deliberately a separate button from point placement (left) and
+        explicit point refinement (right) so panning never collides with
+        either — see `on_pan_down`."""
+
+        self.pan_which = None
+        """Which pane, "L" or "R", owns the pan drag currently in
+        progress. `None` when no pan is active."""
+
+        self.pan_last_x = 0
+        """Screen X coordinate of the pan drag's most recent mouse event,
+        used to compute the incremental delta on the next `on_pan_drag`
+        call."""
+
+        self.pan_last_y = 0
+        """Screen Y coordinate of the pan drag's most recent mouse event.
+        Mirrors `self.pan_last_x` for the Y axis."""
+
         self.cal = None
         """Loaded stereo calibration bundle, or None if not loaded or
         invalid. When set, this is a dict with keys for intrinsics
@@ -438,6 +470,74 @@ class SizeamaticProApp:
 
         # Redraw everything using the new transform.
         self._render_current_frames()
+
+    def on_pan_down(self, which, event):
+        """Begin a middle-mouse-button pan drag for one pane.
+
+        Records the starting cursor position so `on_pan_drag` can compute
+        an incremental delta on each subsequent move event.
+
+        Args:
+            which (str): Which pane received the button press, "L" or "R".
+            event (tkinter.Event): The Tkinter mouse event.
+
+        Returns:
+            None
+        """
+        self.pan_active = True
+        self.pan_which = which
+        self.pan_last_x = event.x
+        self.pan_last_y = event.y
+
+    def on_pan_drag(self, which, event):
+        """Continue a middle-mouse-button pan drag for one pane.
+
+        Nudges the pane's view offset by however far the cursor moved
+        since the last event, then redraws using the already-decoded
+        current frame rather than re-reading from the video capture — see
+        `_redisplay_current_frames` for why that distinction matters here.
+
+        Args:
+            which (str): Which pane the drag event belongs to, "L" or
+                "R". Ignored unless it matches the pane the drag started
+                on.
+            event (tkinter.Event): The Tkinter mouse event.
+
+        Returns:
+            None
+        """
+        # Ignore drag events unless this pane owns the active pan.
+        if not self.pan_active or self.pan_which != which:
+            return
+
+        view = self._get_view(which)
+
+        # Nudge the pan offset by the on-screen distance moved since the last event.
+        view["off_x"] += float(event.x - self.pan_last_x)
+        view["off_y"] += float(event.y - self.pan_last_y)
+
+        # Remember this position as the baseline for the next drag event.
+        self.pan_last_x = event.x
+        self.pan_last_y = event.y
+
+        # Redraw with the new offset without re-decoding the video.
+        self._redisplay_current_frames()
+
+    def on_pan_up(self, which, _event):
+        """End a middle-mouse-button pan drag for one pane.
+
+        Args:
+            which (str): Which pane received the button release, "L" or
+                "R". Ignored unless it matches the pane the drag started
+                on.
+            _event (tkinter.Event): The Tkinter mouse event (unused).
+
+        Returns:
+            None
+        """
+        if self.pan_active and self.pan_which == which:
+            self.pan_active = False
+            self.pan_which = None
 
     def on_app_close(self):
         """Close OpenCV windows and release captures before exiting.
@@ -1245,7 +1345,11 @@ class SizeamaticProApp:
         Returns:
             None
         """
-        folder = filedialog.askdirectory(title="Load Calibration Folder")
+        folder = filedialog.askdirectory(
+            title="Load Calibration Folder (must contain calibration_intrinsics.npz, "
+            "calibration_extrinsics.npz, calibration_rectification.npz, "
+            "calibration_maps.npz)"
+        )
         if not folder:
             return
 
@@ -2392,6 +2496,32 @@ class SizeamaticProApp:
         self._update_frame_labels()
 
         # Draw overlay over frame
+        self.video_overlay.redraw()
+
+    def _redisplay_current_frames(self):
+        """Redraw the already-decoded current frames without re-reading
+        from the video captures.
+
+        Used for interactions that only change the on-screen transform
+        (currently just panning, `on_pan_drag`) rather than which video
+        frame is showing. `self.current_frameL`/`self.current_frameR`
+        already hold the correct pixel data (post-rectification, if
+        enabled) — re-decoding via `_render_current_frames` on every
+        mouse-drag event, which can fire dozens of times per second,
+        would force a `cap.set()` keyframe seek on every single one (see
+        `_read_frame_at`'s docstring), reintroducing the same seek-cost
+        problem the Phase 5 sequential-playback fix solved, just through
+        a different call path.
+
+        Returns:
+            None
+        """
+        if self.current_frameL is not None:
+            self._display_bgr_on_canvas(self.video_overlay.left_canvas, self.current_frameL, "L")
+
+        if self.current_frameR is not None:
+            self._display_bgr_on_canvas(self.video_overlay.right_canvas, self.current_frameR, "R")
+
         self.video_overlay.redraw()
 
     def _get_display_rect(self, which, canvas):
