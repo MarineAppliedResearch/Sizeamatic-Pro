@@ -9,6 +9,10 @@ output/
 # Local-only test/calibration fixtures (real videos + calibration sets, too large to track)
 examples/
 
+# Real calibration fixture used by tests/ (see test_rendering_performance.py)
+# — the NPZ files are tracked, but not the 82 checkerboard source JPGs.
+misc/AprilCalibration1/*.jpg
+
 # Generated outputs from misc/ dev-scratch scripts
 misc/report_dashboard_output/
 misc/report_wordcloud_output/

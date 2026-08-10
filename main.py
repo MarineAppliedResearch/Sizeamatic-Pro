@@ -19,10 +19,8 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 import cv2
-import base64
 
-import numpy as np
-import math
+from PIL import Image, ImageTk
 
 import ctypes # For App Model ID
 
@@ -31,6 +29,7 @@ import stereo_matching
 import measurement_window  # measurement_window contains the Tkinter measurement results window and update helpers.
 import anaglyph_preview    # Manages the anaglyph_preview functionality
 import calibration_summary # calibration_summary contains the Tkinter calibration summary window and update helpers.
+import calibration_io      # Loads and validates calibration NPZ files, without the directory-chooser dialog.
 import video_overlay # Manages drawing the overlay on the video
 
 
@@ -82,6 +81,15 @@ class SizeamaticProApp:
         the app — menu, toolbar, viewer panes, status bar all attach to
         this."""
 
+        self.video_overlay = video_overlay.VideoOverlay(self)
+        """Owns the overlay canvases and overlay interaction state. See
+        `video_overlay.VideoOverlay`. Constructed this early (before
+        `_build_menu`/`_build_viewers` below) because `_build_viewers`
+        calls `self.video_overlay.create_canvases()` — unlike
+        `self.cal_summary_window`/`self.measurement_window`/
+        `self.anaglyph_preview`, which only need to exist before a user
+        action first opens them."""
+
         # ---- Window setup ----
         self.root.title("Sizeamatic Pro")
         self.root.minsize(1100, 700)
@@ -130,9 +138,14 @@ class SizeamaticProApp:
         # ---- OpenCV video captures ----
         self.capL = None
         """The left video's `cv2.VideoCapture`, or None if not loaded.
-        Stays open for the lifetime of the app once loaded, so seeking is
-        fast — released and reopened on a fresh load
-        (`on_load_left_video`) or on app close (`on_app_close`)."""
+        Stays open for the lifetime of the app once loaded, so re-opening
+        the file isn't needed on every frame — released and reopened on a
+        fresh load (`on_load_left_video`) or on app close
+        (`on_app_close`). Note that keeping this open does **not** by
+        itself make seeking fast — `cap.set(CAP_PROP_POS_FRAMES)` forces
+        an expensive keyframe seek regardless; see `_read_frame_at`, which
+        checks the capture's own reported position before deciding
+        whether to seek at all."""
 
         self.capR = None
         """The right video's `cv2.VideoCapture`, or None if not loaded.
@@ -244,7 +257,7 @@ class SizeamaticProApp:
 
         self.max_points_per_pane = 2
         """Point cap per pane. Starts at 2 (a single line/segment); raising
-        this later would let `video_overlay.draw_overlay_for_pane` and
+        this later would let `self.video_overlay`'s `draw_pane` and
         `_update_measurement_status_stub`'s segment math extend naturally
         into a multi-point polyline, since both already connect points as
         a consecutive chain rather than independent pairs."""
@@ -252,21 +265,24 @@ class SizeamaticProApp:
         self.handle_radius_px = 8
         """Point handle radius, in screen pixels (after scaling). Kept
         fairly large so handles are easy to click directly without needing
-        precise hit-test math — `video_overlay.get_nearest_handle_index`
-        also uses a multiple of this as a forgiving fallback hit radius."""
+        precise hit-test math — `self.video_overlay`'s
+        `get_nearest_handle_index` also uses a multiple of this as a
+        forgiving fallback hit radius."""
 
         self.drag_active = False
         """Vestigial. Conceptually "whether a left-button point handle
-        drag is active", but the actual drag handling in `video_overlay.py`
-        uses its own module-level `drag_active` exclusively and never
-        reads this copy — see `FINDINGS.md` #7. Only `on_clear_points`
-        still writes to it, so clicking "Clear Points" mid-drag doesn't
-        actually stop a real drag (harmless: `video_overlay.py`'s own
-        drag handlers bounds-check the point index anyway, so a stale
-        drag just no-ops once the point list is cleared)."""
+        drag is active", but the actual drag handling lives on
+        `self.video_overlay` (its own `drag_active` attribute) and never
+        reads this copy — see finding 7 in `FINDINGS.md`. Only
+        `on_clear_points` still writes to it, so clicking "Clear Points"
+        mid-drag doesn't actually stop a real drag (harmless:
+        `self.video_overlay`'s own drag handlers bounds-check the point
+        index anyway, so a stale drag just no-ops once the point list is
+        cleared)."""
 
         self.drag_which = None
-        """Vestigial, same as `self.drag_active` — see `FINDINGS.md` #7."""
+        """Vestigial, same as `self.drag_active` — see finding 7 in
+        `FINDINGS.md`."""
 
         self.drag_index = None
         """Vestigial, same as `self.drag_active` — see `FINDINGS.md` #7."""
@@ -310,31 +326,13 @@ class SizeamaticProApp:
         ("mtxL"/"distL"/"mtxR"/"distR"), extrinsics ("R"/"T"/"E"/"F"/
         "stereo_rms"), rectification ("RL"/"RR"/"PL"/"PR"/"Q"/"roiL"/
         "roiR"), remap arrays ("mapLx"/"mapLy"/"mapRx"/"mapRy"), and
-        calibrated size ("w"/"h") — see `on_load_calibration_folder`,
-        which is the only place that builds this dict."""
+        calibrated size ("w"/"h") — see
+        `calibration_io.load_calibration_bundle`, which builds this dict;
+        `on_load_calibration_folder` is the only caller."""
 
-        self.meas_win = None
-        """The measurement results `Toplevel` window, or None if it hasn't
-        been built yet (or was closed). Unlike the calibration summary
-        window's equivalent state (`calibration_summary.cal_win`), this
-        lives directly on `self` rather than as a module-level global in
-        `measurement_window.py` — that module's functions read/write
-        `app.meas_win` directly. Built lazily by
-        `measurement_window.ensure_measurement_window` on the first valid
-        measurement."""
-
-        self.meas_vars = {}
-        """Unused — no code currently reads or writes this dict.
-        Measurement display state actually lives in the widget references
-        `measurement_window.py` attaches directly to `self` instead
-        (`meas_win`, `points_tree`, `segs_tree`, `meas_copy_text`,
-        `meas_error_var`, none of which are pre-declared here — they only
-        exist once `ensure_measurement_window` has run)."""
-
-        self.meas_copy_text = None
-        """The measurement window's copyable results `Text` widget, or
-        None if the window hasn't been built yet. See the note on
-        `self.meas_win` — same "lives directly on `self`" pattern."""
+        self.measurement_window = measurement_window.MeasurementWindow(self)
+        """Owns the measurement results Toplevel window and its widgets.
+        See `measurement_window.MeasurementWindow`."""
 
         self.click_sigma_px = 3.0
         """Assumed user click-placement uncertainty, in image pixels. An
@@ -344,30 +342,23 @@ class SizeamaticProApp:
         translate pixel-level click imprecision into millimeter-level
         depth/length uncertainty estimates."""
 
-        # Calibration summary window state (created on demand) — see the
-        # attribute docstrings on cal_win/cal_tree/cal_copy_text in
-        # calibration_summary.py for what these mean; this just resets them
-        # for a fresh app instance.
-        calibration_summary.cal_win = None
-        calibration_summary.cal_tree = None
-        calibration_summary.cal_copy_text = None
+        self.cal_summary_window = calibration_summary.CalibrationSummaryWindow(self)
+        """Owns the calibration summary Toplevel window and its widgets.
+        See `calibration_summary.CalibrationSummaryWindow`."""
 
-        # Anaglyph preview state (OpenCV window, independent playback) —
-        # see the attribute docstrings in anaglyph_preview.py; this just
-        # resets them for a fresh app instance (and renames the window
-        # title to match this app rather than that module's generic
-        # default).
-        anaglyph_preview.anaglyph_active = False
-        anaglyph_preview.anaglyph_playing = False
-        anaglyph_preview.anaglyph_after_id = None
-        anaglyph_preview.anaglyph_index = 0
-        anaglyph_preview.anaglyph_window_name = "Sizeamatic Pro - Anaglyph 3D"
+        self.anaglyph_preview = anaglyph_preview.AnaglyphPreview(self)
+        """Owns the anaglyph preview's OpenCV window and playback state.
+        See `anaglyph_preview.AnaglyphPreview`."""
+
+        # Rename the preview window title to match this app rather than
+        # that class's generic default.
+        self.anaglyph_preview.window_name = "Sizeamatic Pro - Anaglyph 3D"
 
     def on_toggle_anaglyph_preview(self):
         """Start or stop the anaglyph preview window.
 
         Requires both videos to be loaded. Toggles based on the current
-        `anaglyph_preview.anaglyph_active` state.
+        `self.anaglyph_preview.active` state.
 
         Returns:
             None
@@ -378,11 +369,11 @@ class SizeamaticProApp:
             return
 
         # Toggle behavior.
-        if anaglyph_preview.anaglyph_active:
-            anaglyph_preview.stop_anaglyph_preview(self)
+        if self.anaglyph_preview.active:
+            self.anaglyph_preview.stop()
             return
 
-        anaglyph_preview.start_anaglyph_preview(self)
+        self.anaglyph_preview.start()
 
     def on_show_calibration_summary(self):
         """Open (or focus) the calibration summary window.
@@ -396,8 +387,8 @@ class SizeamaticProApp:
             self._set_status_mid("Load calibration first")
             return
 
-        calibration_summary.ensure_calibration_window(self)
-        calibration_summary.update_calibration_window(self)
+        self.cal_summary_window.ensure_window()
+        self.cal_summary_window.update_window()
 
     def on_mouse_wheel(self, which, event):
         """Handle mouse wheel zoom for a pane, anchored under the cursor.
@@ -414,7 +405,7 @@ class SizeamaticProApp:
         Returns:
             None
         """
-        canvas = video_overlay.left_overlay_canvas if which == "L" else video_overlay.right_overlay_canvas
+        canvas = self.video_overlay.left_canvas if which == "L" else self.video_overlay.right_canvas
 
         # Require metadata so we know how to map coords.
         if self._get_image_size(which) is None:
@@ -465,8 +456,8 @@ class SizeamaticProApp:
             self.play_after_id = None
 
         # Close the anaglyph viewer if it is running.
-        if anaglyph_preview.anaglyph_active:
-            anaglyph_preview.stop_anaglyph_preview(self)
+        if self.anaglyph_preview.active:
+            self.anaglyph_preview.stop()
 
         # Release capture objects if open.
         if self.capL:
@@ -792,7 +783,7 @@ class SizeamaticProApp:
             self._set_status_right("Measured 1 point")
 
         # Update popup window (creates it on first valid measurement).
-        measurement_window.update_measurement_window(self, points_rows, seg_rows, err_msg)
+        self.measurement_window.update_window(points_rows, seg_rows, err_msg)
 
     # -------------------------------------------------------------------------
     # Menu bar
@@ -935,7 +926,7 @@ class SizeamaticProApp:
         self.drag_index = None
 
         # Redraw overlays to remove handles and lines.
-        video_overlay.redraw_overlays(self)
+        self.video_overlay.redraw()
 
         # Update measurement status text.
         self._update_measurement_status_stub()
@@ -965,7 +956,7 @@ class SizeamaticProApp:
 
         Creates the resizable paned window containing the left and right
         video viewports (each a stacked video canvas with an overlay
-        canvas on top, created via `video_overlay.create_overlay_canvases`),
+        canvas on top, created via `self.video_overlay.create_canvases`),
         plus the frame-scrubbing slider and frame label under each pane.
 
         Returns:
@@ -1089,7 +1080,7 @@ class SizeamaticProApp:
         self.right_video_canvas.bind("<Configure>", self.on_canvas_resized)
 
         # Create overlay canvases for point drawing and point interaction.
-        video_overlay.create_overlay_canvases(self)
+        self.video_overlay.create_canvases()
 
 
 
@@ -1245,10 +1236,10 @@ class SizeamaticProApp:
     def on_load_calibration_folder(self):
         """Prompt for and load a stereo calibration folder.
 
-        Verifies the four expected NPZ files exist, loads them, validates
-        the calibrated resolution against any already-loaded video
-        resolutions, and stores the resulting calibration bundle on
-        `self.cal`. On any failure, clears `self.cal`, disables rectified
+        Delegates the actual file loading/validation to
+        `calibration_io.load_calibration_bundle` — this method just
+        handles the directory dialog and updating UI state from the
+        result. On any failure, clears `self.cal`, disables rectified
         view, and shows a status message explaining why.
 
         Returns:
@@ -1261,124 +1252,16 @@ class SizeamaticProApp:
         # Store the folder path for status display.
         self.calibration_folder = folder
 
-        # Build expected file paths.
-        intr_path = os.path.join(folder, "calibration_intrinsics.npz")
-        extr_path = os.path.join(folder, "calibration_extrinsics.npz")
-        rect_path = os.path.join(folder, "calibration_rectification.npz")
-        maps_path = os.path.join(folder, "calibration_maps.npz")
+        cal, err = calibration_io.load_calibration_bundle(folder, self.metaL, self.metaR)
 
-        # Verify required files exist.
-        missing = []
-        for p in [intr_path, extr_path, rect_path, maps_path]:
-            if not os.path.isfile(p):
-                missing.append(os.path.basename(p))
-
-        # Handle the case where a calibration file doesn't exist
-        if missing:
+        if err is not None:
             self.cal = None
             self.view_rectified.set(False)
-            self._set_status_mid(f"Missing calibration files: {', '.join(missing)}")
+            self._set_status_mid(err)
             self._refresh_status_left()
             return
 
-        try:
-            intr = np.load(intr_path)
-            rect = np.load(rect_path)
-            maps = np.load(maps_path)
-            extr = np.load(extr_path)
-
-            # Pull required matrices/maps.
-            PL = rect["PL"]
-            PR = rect["PR"]
-            Q = rect["Q"]
-
-            mapLx = maps["mapLx"]
-            mapLy = maps["mapLy"]
-            mapRx = maps["mapRx"]
-            mapRy = maps["mapRy"]
-
-            # Intrinsics
-            mtxL = intr["mtxL"]
-            distL = intr["distL"]
-            mtxR = intr["mtxR"]
-            distR = intr["distR"]
-
-            # Extrinsics
-            R = extr["R"]
-            T = extr["T"]
-            E = extr["E"]
-            F = extr["F"]
-            stereo_rms = float(extr["stereo_rms"]) if "stereo_rms" in extr.files else None
-
-            # Rectification
-            RL = rect["RL"] if "RL" in rect.files else None
-            RR = rect["RR"] if "RR" in rect.files else None
-            roiL = rect["roiL"] if "roiL" in rect.files else None
-            roiR = rect["roiR"] if "roiR" in rect.files else None
-
-            # Intrinsics file stores expected calibration resolution.
-            cal_w = int(intr["image_width"])
-            cal_h = int(intr["image_height"])
-
-        except Exception as e:
-            self.cal = None
-            self.view_rectified.set(False)
-            self._set_status_mid(f"Failed to load calibration: {e}")
-            self._refresh_status_left()
-            return
-
-        # If we have a loaded video, enforce resolution match now.
-        # Rectification maps must match the decoded frame size.
-        if self.metaL:
-            if self.metaL["width"] != cal_w or self.metaL["height"] != cal_h:
-                self.cal = None
-                self.view_rectified.set(False)
-                self._set_status_mid("Calibration resolution does not match LEFT video")
-                self._refresh_status_left()
-                return
-
-        if self.metaR:
-            if self.metaR["width"] != cal_w or self.metaR["height"] != cal_h:
-                self.cal = None
-                self.view_rectified.set(False)
-                self._set_status_mid("Calibration resolution does not match RIGHT video")
-                self._refresh_status_left()
-                return
-
-        # Store calibration bundle.
-        self.cal = {
-            # Sizes
-            "w": cal_w,
-            "h": cal_h,
-
-            # Intrinsics
-            "mtxL": mtxL,
-            "distL": distL,
-            "mtxR": mtxR,
-            "distR": distR,
-
-            # Extrinsics
-            "R": R,
-            "T": T,
-            "E": E,
-            "F": F,
-            "stereo_rms": stereo_rms,
-
-            # Rectification
-            "RL": RL,
-            "RR": RR,
-            "PL": PL,
-            "PR": PR,
-            "Q": Q,
-            "roiL": roiL,
-            "roiR": roiR,
-
-            # Maps
-            "mapLx": mapLx,
-            "mapLy": mapLy,
-            "mapRx": mapRx,
-            "mapRy": mapRy,
-        }
+        self.cal = cal
 
         self._set_status_mid("Calibration loaded")
         self._refresh_status_left()
@@ -1877,10 +1760,10 @@ class SizeamaticProApp:
 
         Note:
             This is currently unused/superseded by the overlay canvas
-            click handling in `video_overlay.py`
-            (`on_overlay_left_down`/`on_overlay_right_down`), which is
-            bound to the overlay canvases instead of this handler. Kept as
-            a minimal placeholder that just reports click coordinates.
+            click handling in `self.video_overlay`
+            (`on_left_down`/`on_right_down`), which is bound to the
+            overlay canvases instead of this handler. Kept as a minimal
+            placeholder that just reports click coordinates.
 
         Args:
             which (str): Which pane was clicked, "L" or "R".
@@ -1992,8 +1875,8 @@ class SizeamaticProApp:
             self._render_current_frames()
             return
 
-        self._draw_placeholder(video_overlay.left_overlay_canvas, "LEFT", self.view_rectified.get())
-        self._draw_placeholder(video_overlay.right_overlay_canvas, "RIGHT", self.view_rectified.get())
+        self._draw_placeholder(self.video_overlay.left_canvas, "LEFT", self.view_rectified.get())
+        self._draw_placeholder(self.video_overlay.right_canvas, "RIGHT", self.view_rectified.get())
 
         self._update_frame_labels()
 
@@ -2283,18 +2166,42 @@ class SizeamaticProApp:
         self._update_frame_labels()
 
     def _read_frame_at(self, cap, index):
-        """Seek to a specific frame index and decode a single frame.
+        """Decode the frame at a specific index, seeking only if needed.
+
+        Skips the explicit `cap.set(CAP_PROP_POS_FRAMES)` seek when the
+        capture's own reported position (`cap.get(CAP_PROP_POS_FRAMES)`)
+        is already at the requested index — checking the position is
+        essentially free (~0.0002ms measured), while `cap.set` forces an
+        expensive keyframe seek even for a one-frame advance, benchmarked
+        at ~19x slower than reading sequentially (54ms vs 2.8ms per frame
+        on a real 1080p capture). This was the dominant remaining cost in
+        rectified playback fps, bigger than the render path itself; see
+        ROADMAP.md Phase 5.
+
+        Checking the capture's actual reported position (rather than
+        tracking "the last index this method itself read") matters
+        because more than one part of the app can read from the same
+        capture — the main render loop and `anaglyph_preview.py`'s
+        independent preview tick both call this with `app.capL`/
+        `app.capR`, each with their own frame index sequence. Tracking
+        only this method's own last call would get confused by an
+        interleaved read from a different sequence; asking the capture
+        directly is correct regardless of who else touched it in between.
 
         Args:
             cap (cv2.VideoCapture): The capture to read from.
-            index (int): The zero-based frame index to seek to.
+            index (int): The zero-based frame index to read.
 
         Returns:
             numpy.ndarray | None: The decoded BGR frame, or None if the
             seek/decode failed.
         """
-        # Seek to the requested frame index.
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(index))
+        index = int(index)
+
+        # Only seek if the capture isn't already positioned to read this
+        # exact frame next.
+        if int(cap.get(cv2.CAP_PROP_POS_FRAMES)) != index:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, index)
 
         # Decode a single frame.
         ok, frame_bgr = cap.read()
@@ -2304,13 +2211,22 @@ class SizeamaticProApp:
         return frame_bgr
 
     def _display_bgr_on_canvas(self, canvas, frame_bgr, which):
-        """Display a BGR frame on a Tk canvas using Tk's PNG decoder.
+        """Display a BGR frame on a Tk canvas via Pillow's ImageTk.
 
         Crops to the currently visible (pan/zoom) region in image space,
-        resizes to the pane's display rect, encodes to PNG, and draws it
-        via a `tkinter.PhotoImage`. Uses PNG encoding rather than Pillow or
-        raw PPM data to avoid Pillow as a dependency and PPM decoding
-        quirks in some Tk builds.
+        resizes to the pane's display rect, converts BGR to RGB, and draws
+        it via `PIL.Image.fromarray` + `ImageTk.PhotoImage` — wrapping the
+        numpy array directly with no encode/decode round-trip.
+
+        Note:
+            This used to encode each frame to PNG, base64-encode that, and
+            hand the base64 string to `tkinter.PhotoImage` (deliberately
+            avoiding Pillow, per a comment in an earlier version of this
+            method). That round-trip, redone on every single render for
+            both panes, was the actual cause of the "unacceptably slow"
+            rectified rendering the README used to warn about — not
+            Tkinter itself. Switching to Pillow's direct-numpy-array path
+            fixed it; see ROADMAP.md Phase 5.
 
         Note:
             If this pane's image size isn't known yet (`_get_image_size`
@@ -2390,15 +2306,13 @@ class SizeamaticProApp:
         crop = frame_bgr[ry0:ry1, rx0:rx1]
         crop = cv2.resize(crop, (int(dw), int(dh)), interpolation=cv2.INTER_LINEAR)
 
-        # Encode to PNG for Tk PhotoImage.
-        encode_params = [cv2.IMWRITE_PNG_COMPRESSION, 0]
-        ok, png_bytes = cv2.imencode(".png", crop, encode_params)
-        if not ok:
-            self._draw_missing_frame(canvas, "ENCODE", 0)
-            return
-
-        png_b64 = base64.b64encode(png_bytes.tobytes()).decode("ascii")
-        tk_img = tk.PhotoImage(data=png_b64)
+        # Convert BGR (OpenCV) to RGB (PIL) and wrap directly as a Tk image.
+        # No encode/decode round-trip: this is what actually fixed the
+        # "unacceptably slow" rectified rendering — the previous PNG-encode
+        # + base64 + Tk-parses-base64 path re-encoded a full frame on every
+        # single render, for both panes.
+        crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        tk_img = ImageTk.PhotoImage(image=Image.fromarray(crop_rgb))
 
         if which == "L":
             self.tkimg_left = tk_img
@@ -2442,14 +2356,14 @@ class SizeamaticProApp:
                 self.current_frameL = None
 
                 # Draw the missing-frame placeholder on the left pane.
-                self._draw_missing_frame(video_overlay.left_overlay_canvas, "LEFT", li)
+                self._draw_missing_frame(self.video_overlay.left_canvas, "LEFT", li)
             else:
                 # Cache the exact left image currently being displayed.
                 # If rectified view is enabled, this is the rectified frame.
                 self.current_frameL = frameL
 
                 # Display the current left frame on the left pane.
-                self._display_bgr_on_canvas(video_overlay.left_overlay_canvas, frameL, "L")
+                self._display_bgr_on_canvas(self.video_overlay.left_canvas, frameL, "L")
 
         # Right side render.
         if self.capR:
@@ -2465,20 +2379,20 @@ class SizeamaticProApp:
                 self.current_frameR = None
 
                 # Draw the missing-frame placeholder on the right pane.
-                self._draw_missing_frame(video_overlay.right_overlay_canvas, "RIGHT", ri)
+                self._draw_missing_frame(self.video_overlay.right_canvas, "RIGHT", ri)
             else:
                 # Cache the exact right image currently being displayed.
                 # If rectified view is enabled, this is the rectified frame.
                 self.current_frameR = frameR
 
                 # Display the current right frame on the right pane.
-                self._display_bgr_on_canvas(video_overlay.right_overlay_canvas, frameR, "R")
+                self._display_bgr_on_canvas(self.video_overlay.right_canvas, frameR, "R")
 
         # Update the slider frame labels after rendering.
         self._update_frame_labels()
 
         # Draw overlay over frame
-        video_overlay.redraw_overlays(self)
+        self.video_overlay.redraw()
 
     def _get_display_rect(self, which, canvas):
         """Compute the on-canvas rectangle where video should be drawn.

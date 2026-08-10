@@ -5,21 +5,18 @@ frame stepping controls, and red/cyan anaglyph image generation used to
 visually inspect the current stereo video pair.
 
 Contents:
-    - Anaglyph preview active and playback state.
-    - OpenCV preview window creation and cleanup.
-    - Preview tick/update loop.
-    - Keyboard controls for play, pause, stepping, and closing.
-    - Optional rectified frame display when calibration is loaded.
-    - Red/cyan anaglyph frame generation.
+    - `AnaglyphPreview` — owns the preview window and playback state.
+    - `make_anaglyph_red_cyan` — standalone red/cyan image generation, no
+      state needed, independently testable.
 
 Design notes:
     The View menu command remains in the main application class because it
-    is part of the main GUI menu wiring. This module owns the preview state
-    and implementation details for the anaglyph preview feature itself.
-
-    Functions in this module receive the main application object (`app`)
-    when they need access to video captures, frame indexes, calibration
-    maps, frame reading helpers, Tkinter scheduling, or status bar updates.
+    is part of the main GUI menu wiring. `AnaglyphPreview` owns the preview
+    state and implementation details for the feature itself, as a class
+    instance on the app (`app.anaglyph_preview`) — the same conversion
+    already done for `calibration_summary.CalibrationSummaryWindow` and
+    `measurement_window.MeasurementWindow` (removes the module-level-global
+    fragility that caused `FINDINGS.md` #1 and #2).
 
     The preview loop mixes OpenCV's own window/event handling
     (`cv2.imshow`/`cv2.waitKey`) with Tkinter's `after()` scheduling. This
@@ -50,246 +47,229 @@ import cv2
 # NumPy is used to build OpenCV-compatible point arrays and perform vector math.
 import numpy as np
 
-anaglyph_active = False
-"""Whether the anaglyph preview loop is currently active. Set True by
-`start_anaglyph_preview`, False by `stop_anaglyph_preview`; `anaglyph_tick`
-checks this first thing on every tick to decide whether to keep
-rescheduling itself."""
 
-anaglyph_playing = False
-"""Whether the preview auto-advances frames. The preview always opens
-paused (so the user can inspect the first frame before anything moves) —
-pressing Space toggles this in `anaglyph_tick`'s keyboard handling."""
+class AnaglyphPreview:
+    """Owns the anaglyph preview's OpenCV window and playback state.
 
-anaglyph_index = 0
-"""Frame index currently shown in the preview window. Deliberately
-separate from the main app's left/right timeline indices — the preview
-has its own scrubbing position, only seeded from the left timeline's
-current index at the moment the preview opens."""
-
-anaglyph_window_name = "Anaglyph 3D Preview"
-"""OpenCV window title for the preview. `main.py` overrides this to
-"Sizeamatic Pro - Anaglyph 3D" when constructing `SizeamaticProApp`, so
-what the user actually sees matches the app's branding rather than this
-module's generic default."""
-
-anaglyph_after_id = None
-"""Tkinter `after()` job ID for the scheduled preview tick, so it can be
-cancelled when the preview stops. Initialized to `None` up front — rather
-than only coming into existence the first time `anaglyph_tick` reaches its
-own assignment to this variable — specifically so `stop_anaglyph_preview`
-can safely check it even if the very first tick fails before getting that
-far. See `FINDINGS.md` #2 for the bug this was guarding against."""
-
-
-def start_anaglyph_preview(app):
-    """Open the anaglyph preview window and start the preview loop.
-
-    Starts the anaglyph preview at the current left video frame so the
-    preview opens near the user's current timeline position. The preview
-    starts paused by default, allowing the user to inspect the first
-    anaglyph frame before playing.
-
-    Args:
-        app: The main application object, used to read the current left
-            frame index (`app.left_frame_index`) and to display status
-            text (`app._set_status_mid`).
-
-    Returns:
-        None
+    One instance lives on the main application (`app.anaglyph_preview`).
     """
 
-    # Use module level state so anaglyph preview state lives with the feature
-    # implementation instead of on the main application object.
-    global anaglyph_active
-    global anaglyph_playing
-    global anaglyph_index
+    def __init__(self, app):
+        """Store the owning app and initialize preview state.
 
-    # Start at the current left timeline index for convenience.
-    anaglyph_index = int(app.left_frame_index.get())
+        Args:
+            app: The main application object, used for video captures,
+                frame metadata, calibration state, the frame reading
+                helper, and Tk root scheduling/status updates.
 
-    # Mark the preview active, but start paused so the user controls playback.
-    anaglyph_active = True
-    anaglyph_playing = False
+        Returns:
+            None
+        """
+        self.app = app
 
-    # Create a resizable OpenCV window for the preview image.
-    cv2.namedWindow(anaglyph_window_name, cv2.WINDOW_NORMAL)
+        self.active = False
+        """Whether the preview loop is currently active. Set True by
+        `start`, False by `stop`; `tick` checks this first thing on every
+        call to decide whether to keep rescheduling itself."""
 
-    # Show the keyboard controls in the main application status bar.
-    app._set_status_mid("Anaglyph preview opened (Space: play/pause, A/D: step, Q: quit)")
+        self.playing = False
+        """Whether the preview auto-advances frames. The preview always
+        opens paused (so the user can inspect the first frame before
+        anything moves) — pressing Space toggles this in `tick`'s
+        keyboard handling."""
 
-    # Start the preview update loop.
-    anaglyph_tick(app)
+        self.index = 0
+        """Frame index currently shown in the preview window. Deliberately
+        separate from the main app's left/right timeline indices — the
+        preview has its own scrubbing position, only seeded from the left
+        timeline's current index at the moment the preview opens."""
 
+        self.window_name = "Anaglyph 3D Preview"
+        """OpenCV window title for the preview. `main.py` overrides this
+        to "Sizeamatic Pro - Anaglyph 3D" after constructing this
+        instance, so what the user actually sees matches the app's
+        branding rather than this generic default."""
 
-def stop_anaglyph_preview(app):
-    """Stop the anaglyph preview and close its OpenCV window.
+        self.after_id = None
+        """Tkinter `after()` job ID for the scheduled preview tick, so it
+        can be cancelled when the preview stops. `stop` checks this
+        defensively even though it's always set by the time a real
+        window is open — see `FINDINGS.md` #2 for the bug this guarded
+        against when this state lived as an uninitialized module
+        global."""
 
-    Stops the red/cyan anaglyph preview feature. This function is safe to
-    call from the menu toggle, from the preview tick when the OpenCV window
-    is closed, or from keyboard handling when the user presses Q or ESC.
+    def start(self):
+        """Open the anaglyph preview window and start the preview loop.
 
-    Args:
-        app: The main application object, used to cancel the scheduled
-            Tkinter tick (`app.root.after_cancel`) and to display status
-            text (`app._set_status_mid`).
+        Starts the anaglyph preview at the current left video frame so
+        the preview opens near the user's current timeline position. The
+        preview starts paused by default, allowing the user to inspect
+        the first anaglyph frame before playing.
 
-    Returns:
-        None
-    """
+        Returns:
+            None
+        """
 
-    # Use module level state so the preview state stays inside this feature file.
-    global anaglyph_active
-    global anaglyph_playing
-    global anaglyph_after_id
+        # Start at the current left timeline index for convenience.
+        self.index = int(self.app.left_frame_index.get())
 
-    # Cancel any scheduled Tkinter after() tick so the preview loop does not keep
-    # running after the preview has been stopped.
-    if anaglyph_after_id is not None:
-        app.root.after_cancel(anaglyph_after_id)
-        anaglyph_after_id = None
+        # Mark the preview active, but start paused so the user controls playback.
+        self.active = True
+        self.playing = False
 
-    # Reset the preview state flags.
-    anaglyph_active = False
-    anaglyph_playing = False
+        # Create a resizable OpenCV window for the preview image.
+        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
 
-    # Try to close the OpenCV preview window. Ignore failures because OpenCV may
-    # already consider the window closed depending on how the user exited it.
-    try:
-        cv2.destroyWindow(anaglyph_window_name)
-    except Exception:
-        pass
+        # Show the keyboard controls in the main application status bar.
+        self.app._set_status_mid("Anaglyph preview opened (Space: play/pause, A/D: step, Q: quit)")
 
-    # Update the main application status bar.
-    app._set_status_mid("Anaglyph preview closed")
+        # Start the preview update loop.
+        self.tick()
 
+    def stop(self):
+        """Stop the anaglyph preview and close its OpenCV window.
 
-def anaglyph_tick(app):
-    """Run one update pass of the anaglyph preview loop.
+        Safe to call from the menu toggle, from the preview tick when the
+        OpenCV window is closed, or from keyboard handling when the user
+        presses Q or ESC.
 
-    Runs one update pass of the anaglyph preview loop. The function reads
-    the left and right frames at the current anaglyph index, optionally
-    remaps them into rectified view, builds a red/cyan anaglyph image,
-    displays it in the OpenCV preview window, handles keyboard controls,
-    and schedules the next tick.
+        Returns:
+            None
+        """
 
-    Args:
-        app: The main application object, used for video captures
-            (`app.capL`/`app.capR`), frame metadata, calibration state
-            (`app.cal`), the frame reading helper (`app._read_frame_at`),
-            and Tk root scheduling (`app.root.after`).
+        # Cancel any scheduled Tkinter after() tick so the preview loop does not keep
+        # running after the preview has been stopped.
+        if self.after_id is not None:
+            self.app.root.after_cancel(self.after_id)
+            self.after_id = None
 
-    Returns:
-        None
-    """
+        # Reset the preview state flags.
+        self.active = False
+        self.playing = False
 
-    # Use module level state so the preview state stays inside this feature file.
-    global anaglyph_active
-    global anaglyph_playing
-    global anaglyph_index
-    global anaglyph_after_id
+        # Try to close the OpenCV preview window. Ignore failures because OpenCV may
+        # already consider the window closed depending on how the user exited it.
+        try:
+            cv2.destroyWindow(self.window_name)
+        except Exception:
+            pass
 
-    # If the preview was stopped, exit without scheduling another tick.
-    if not anaglyph_active:
-        return
+        # Update the main application status bar.
+        self.app._set_status_mid("Anaglyph preview closed")
 
-    # Check whether the OpenCV preview window is still visible. If the user closed
-    # it directly, stop the preview cleanly.
-    try:
-        vis = cv2.getWindowProperty(anaglyph_window_name, cv2.WND_PROP_VISIBLE)
-        if vis < 1:
-            stop_anaglyph_preview(app)
+    def tick(self):
+        """Run one update pass of the anaglyph preview loop.
+
+        Reads the left and right frames at the current preview index,
+        optionally remaps them into rectified view, builds a red/cyan
+        anaglyph image, displays it in the OpenCV preview window, handles
+        keyboard controls, and schedules the next tick.
+
+        Returns:
+            None
+        """
+
+        # If the preview was stopped, exit without scheduling another tick.
+        if not self.active:
             return
 
-    # If OpenCV raises while checking the window, assume the window is gone and
-    # stop the preview cleanly.
-    except Exception:
-        stop_anaglyph_preview(app)
-        return
+        # Check whether the OpenCV preview window is still visible. If the user closed
+        # it directly, stop the preview cleanly.
+        try:
+            vis = cv2.getWindowProperty(self.window_name, cv2.WND_PROP_VISIBLE)
+            if vis < 1:
+                self.stop()
+                return
 
-    # Clamp the preview index to the shorter of the two video streams so frame
-    # reads stay inside both videos.
-    max_i = int(min(app.left_frame_max, app.right_frame_max))
+        # If OpenCV raises while checking the window, assume the window is gone and
+        # stop the preview cleanly.
+        except Exception:
+            self.stop()
+            return
 
-    # Prevent negative frame indexes.
-    if anaglyph_index < 0:
-        anaglyph_index = 0
+        # Clamp the preview index to the shorter of the two video streams so frame
+        # reads stay inside both videos.
+        max_i = int(min(self.app.left_frame_max, self.app.right_frame_max))
 
-    # Prevent seeking past the end of the shorter stream.
-    if anaglyph_index > max_i:
-        anaglyph_index = max_i
+        # Prevent negative frame indexes.
+        if self.index < 0:
+            self.index = 0
 
-    # Read the left and right frames at the current anaglyph preview index.
-    frameL = app._read_frame_at(app.capL, anaglyph_index)
-    frameR = app._read_frame_at(app.capR, anaglyph_index)
+        # Prevent seeking past the end of the shorter stream.
+        if self.index > max_i:
+            self.index = max_i
 
-    # If either frame fails to read, show a black placeholder frame and keep the
-    # preview loop alive.
-    if frameL is None or frameR is None:
-        blank = np.zeros(
-            (int(app.metaL["height"]), int(app.metaL["width"]), 3),
-            dtype=np.uint8,
-        )
-        cv2.imshow(anaglyph_window_name, blank)
+        # Read the left and right frames at the current anaglyph preview index.
+        frameL = self.app._read_frame_at(self.app.capL, self.index)
+        frameR = self.app._read_frame_at(self.app.capR, self.index)
 
-    else:
-        # Prefer rectified frames when rectified view is enabled and calibration
-        # data is available.
-        if app.view_rectified.get() and app.cal is not None:
-            frameL = cv2.remap(
-                frameL,
-                app.cal["mapLx"],
-                app.cal["mapLy"],
-                interpolation=cv2.INTER_LINEAR,
+        # If either frame fails to read, show a black placeholder frame and keep the
+        # preview loop alive.
+        if frameL is None or frameR is None:
+            blank = np.zeros(
+                (int(self.app.metaL["height"]), int(self.app.metaL["width"]), 3),
+                dtype=np.uint8,
             )
-            frameR = cv2.remap(
-                frameR,
-                app.cal["mapRx"],
-                app.cal["mapRy"],
-                interpolation=cv2.INTER_LINEAR,
-            )
+            cv2.imshow(self.window_name, blank)
 
-        # Build the red/cyan anaglyph frame from the current left/right frames.
-        ana = make_anaglyph_red_cyan(frameL, frameR)
+        else:
+            # Prefer rectified frames when rectified view is enabled and calibration
+            # data is available.
+            if self.app.view_rectified.get() and self.app.cal is not None:
+                frameL = cv2.remap(
+                    frameL,
+                    self.app.cal["mapLx"],
+                    self.app.cal["mapLy"],
+                    interpolation=cv2.INTER_LINEAR,
+                )
+                frameR = cv2.remap(
+                    frameR,
+                    self.app.cal["mapRx"],
+                    self.app.cal["mapRy"],
+                    interpolation=cv2.INTER_LINEAR,
+                )
 
-        # Display the anaglyph frame in the OpenCV preview window.
-        cv2.imshow(anaglyph_window_name, ana)
+            # Build the red/cyan anaglyph frame from the current left/right frames.
+            ana = make_anaglyph_red_cyan(frameL, frameR)
 
-    # Read one key press from the OpenCV window. Space toggles play/pause, A/D
-    # step backward/forward, and Q or ESC closes the preview.
-    key = cv2.waitKey(1) & 0xFF
+            # Display the anaglyph frame in the OpenCV preview window.
+            cv2.imshow(self.window_name, ana)
 
-    # Q or ESC stops and closes the preview.
-    if key == ord("q") or key == 27:
-        stop_anaglyph_preview(app)
-        return
+        # Read one key press from the OpenCV window. Space toggles play/pause, A/D
+        # step backward/forward, and Q or ESC closes the preview.
+        key = cv2.waitKey(1) & 0xFF
 
-    # Space toggles playback.
-    if key == 32:
-        anaglyph_playing = not anaglyph_playing
+        # Q or ESC stops and closes the preview.
+        if key == ord("q") or key == 27:
+            self.stop()
+            return
 
-    # A steps one frame backward and pauses playback.
-    if key == ord("a"):
-        anaglyph_playing = False
-        anaglyph_index -= 1
+        # Space toggles playback.
+        if key == 32:
+            self.playing = not self.playing
 
-    # D steps one frame forward and pauses playback.
-    if key == ord("d"):
-        anaglyph_playing = False
-        anaglyph_index += 1
+        # A steps one frame backward and pauses playback.
+        if key == ord("a"):
+            self.playing = False
+            self.index -= 1
 
-    # Advance one frame if playback is active.
-    if anaglyph_playing:
-        anaglyph_index += 1
+        # D steps one frame forward and pauses playback.
+        if key == ord("d"):
+            self.playing = False
+            self.index += 1
 
-        # Stop playback at the end of the shorter stream.
-        if anaglyph_index > max_i:
-            anaglyph_index = max_i
-            anaglyph_playing = False
+        # Advance one frame if playback is active.
+        if self.playing:
+            self.index += 1
 
-    # Schedule the next preview tick using the Tkinter event loop. A 40 ms delay
-    # targets roughly 25 frames per second.
-    anaglyph_after_id = app.root.after(40, lambda: anaglyph_tick(app))
+            # Stop playback at the end of the shorter stream.
+            if self.index > max_i:
+                self.index = max_i
+                self.playing = False
+
+        # Schedule the next preview tick using the Tkinter event loop. A 40 ms delay
+        # targets roughly 25 frames per second.
+        self.after_id = self.app.root.after(40, self.tick)
 
 
 def make_anaglyph_red_cyan(frameL_bgr, frameR_bgr):

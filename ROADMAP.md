@@ -99,16 +99,79 @@ Deliberately out of scope: simulated GUI interaction testing (clicks/drags
 in `video_overlay.py`) — its module-level mutable state makes it awkward
 to test in isolation before the Phase 5 restructure.
 
-## Phase 5 — Architecture restructure `[ ]`
+## Phase 5 — Architecture restructure `[x]`
 
 Using everything learned in Phases 3-4, break `main.py` out of the monolith
-into a real module structure, with the Phase 4 test suite as a safety net
-against regressions. The specific shape is intentionally undecided as of
-Phase 1 — see the "Architecture" section of `AGENTS.md`.
+into real classes, with the Phase 4 test suite as a safety net against
+regressions. Executed incrementally, one module at a time, with the test
+suite run after each step.
 
-- [ ] Decide target architecture/module layout
-- [ ] Decide whether to keep Tkinter or migrate GUI frameworks
-- [ ] Execute the restructure
+**Scope note:** this phase closes with the concrete, identified goal done
+(the four supporting modules converted from module-globals to classes,
+plus the two performance fixes found along the way) — not with `main.py`
+itself fully "thinned." `main.py` (~1,750 lines) still bundles window/menu
+construction, video I/O, playback/timeline/slider logic, rendering, and
+zoom/pan state in one class. Talked through the breakdown (see
+`ARCHITECTURE.md`'s "Still open" note) and deliberately deferred deciding
+whether/how to split it further to a future phase, rather than deciding
+that open-ended design question as an afterthought at the tail of this
+one — it deserves its own dedicated planning round the way Phase 5 itself
+got at the start.
+
+- [x] Decide target architecture/module layout — real classes replacing the
+      module-level-global pattern in `video_overlay.py`,
+      `calibration_summary.py`, `anaglyph_preview.py`, and
+      `measurement_window.py` (removes the fragility that caused
+      `FINDINGS.md` #1)
+- [x] Decide whether to keep Tkinter or migrate GUI frameworks — **staying
+      on Tkinter**. The "unacceptably slow" rectified rendering (one of two
+      migration motivations) turned out to be a self-inflicted bottleneck,
+      not a Tkinter limitation: the old per-frame PNG-encode + base64 +
+      `tk.PhotoImage`-parses-base64 round trip in `_display_bgr_on_canvas`
+      benchmarked at 42ms/frame against a real captured frame from
+      `examples/`; switching to Pillow's `ImageTk.PhotoImage` (wraps the
+      numpy array directly, no encoding step) dropped that to 2.36ms/frame
+      — a 17.9x speedup, confirmed live. The other motivation (visual
+      polish) remains a standing, separate consideration for later if it
+      still matters once the rest of the restructure is done.
+- [x] Execute the restructure:
+  - [x] Fix the render-path performance bottleneck (`main.py`,
+        `_display_bgr_on_canvas`) — see above
+  - [x] Fix the video-seek performance bottleneck (`main.py`,
+        `_read_frame_at`) — found while writing an end-to-end rendering
+        test against real footage (`examples/left_20260309_171631.mp4`)
+        and the real `misc/AprilCalibration1/` calibration fixture: even
+        after the render-path fix, full rectified playback only achieved
+        10.2 fps. `cap.set(CAP_PROP_POS_FRAMES)` before every read (even
+        for a one-frame sequential advance) forces an expensive keyframe
+        seek — benchmarked at 54ms/frame vs. 2.8ms/frame for a plain
+        sequential `cap.read()`, a ~19x difference, bigger than the
+        render-path fix itself. Fixed by checking the capture's own
+        reported position (`cap.get(CAP_PROP_POS_FRAMES)`, ~0.0002ms) and
+        only seeking when it doesn't already match the requested index —
+        this is correct (not just "assume sequential") even when
+        `anaglyph_preview.py`'s independent preview tick reads from the
+        same capture in between. End-to-end fps went from 10.2 to 110.7.
+        See `tests/test_rendering_performance.py` and
+        `tests/test_main.py`'s seek-correctness test.
+  - [x] `calibration_summary.py` → `CalibrationSummaryWindow` class
+  - [x] Pull calibration file loading/validation out of `main.py` into its
+        own module (`calibration_io.py`) — pulled forward from its own
+        step since testing the new performance test needed a dialog-free
+        load path anyway
+  - [x] `measurement_window.py` → `MeasurementWindow` class
+  - [x] `anaglyph_preview.py` → `AnaglyphPreview` class
+  - [x] `video_overlay.py` → `VideoOverlay` class (the biggest of the
+        four — 16 methods, the click/drag/refine state machine; also
+        removed `set_overlay_canvases`, confirmed dead code with zero
+        callers)
+  - [x] Update `tests/` as each piece becomes a class; update
+        `ARCHITECTURE.md` to describe the new shape
+  - **Deferred, not done:** `main.py` ends up as a thin `SizeamaticProApp`
+        wiring the pieces together — see the scope note above. `main.py`
+        itself still holds its own substantial logic (playback/timeline,
+        rendering, video I/O); splitting that further is an open design
+        question for a future phase.
 
 ## Phase 6 — Open source readiness `[ ]`
 
