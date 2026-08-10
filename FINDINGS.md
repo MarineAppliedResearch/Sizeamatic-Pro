@@ -141,6 +141,42 @@ attributes regardless of which panes have ever rendered.
 **Fix:** Initialized both to `None` in `__init__`, alongside `metaL`/
 `metaR`.
 
+### 9. `main.py` — `_playback_tick`'s locked branch could run playback backward
+
+Reported by the project owner while testing Phase 7's resync control:
+pressing Play with Lock on and a nonzero resync offset set made both
+timelines count *down* instead of up.
+
+Root cause: the locked branch of `_playback_tick` computed the next
+index (`nxt`) itself and set both `left_frame_index`/`right_frame_index`
+*and* both slider widgets directly — critically, always setting the
+right side to the same value as the left (ignoring
+`self.lock_offset_frames` entirely), and without wrapping the slider
+`.set()` calls in `self._suppress_slider_callbacks` the way every other
+call site that programmatically moves both sliders does. Setting a
+`ttk.Scale` widget's value directly fires its bound `command` callback,
+so each tick fired `on_left_slider_changed` then `on_right_slider_changed`
+unsuppressed. Both are wired, when Lock is on, to call
+`_jump_frames_locked_with_offset` — first with `"L"` driving (correctly
+recomputing the right index using the offset), then immediately after
+with `"R"` driving the *same* `nxt` value (since `_playback_tick` had
+just set the right slider to `nxt`, not `nxt + offset`), which recomputed
+the *left* index as `nxt - offset`. With a positive offset, that's less
+than the just-advanced value — so every tick ended by silently pulling
+the left index backward by (offset × 2) net of the forward step,
+compounding on each subsequent tick.
+
+**Repro:** Load both videos, scrub them apart, enable Lock (capturing a
+nonzero offset), then press Play.
+
+**Fix:** Replaced the locked branch's manual index/slider-setting with a
+call to `_jump_frames_locked_with_offset("L", nxt)` — the same helper the
+slider-drag and step-forward/back controls already used correctly. This
+fixes both problems at once: the offset is now preserved during
+continuous playback (previously it was silently dropped even without the
+callback-cascade bug), and the helper's own slider updates are already
+wrapped in `_suppress_slider_callbacks`.
+
 ## Flaws / risky patterns flagged, not fixed
 
 ### 4. `main.py` — `_display_bgr_on_canvas` dead fallback branch

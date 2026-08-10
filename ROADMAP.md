@@ -208,30 +208,44 @@ input may come in a later round. Executing incrementally, one item at a time,
 with tests added alongside each change — same rhythm as Phase 5.
 
 - [x] Usability interview — see below for the resulting requirements
-- [ ] Calibration folder guidance — `filedialog.askdirectory` currently gives
-      no hint what's expected inside. Add a label near "Load Calibration
-      Folder…" naming the four expected NPZ files, and fold the same
-      guidance into `calibration_io.py`'s missing-files error message.
-- [ ] Pan when zoomed in — new middle-mouse-drag binding in
-      `video_overlay.py` (left-click stays point placement/drag; right-click
-      stays the existing explicit-refine gesture in `on_right_down`/
-      `on_right_drag`/`on_right_up` — deliberately not reused for panning to
-      avoid collision risk with refine). Drives the pan offset that already
-      exists per-pane (`viewL`/`viewR`'s `off_x`/`off_y`), currently only
-      touched by mouse-wheel zoom.
-- [ ] Resync control — `on_toggle_lock` already computes and stores
-      `lock_offset_frames` (see `main.py`) whenever Lock is enabled while
-      both timelines are manually scrubbed to the same moment; that's
-      already the resync mechanism in substance. Expose it as a visible,
-      directly-editable control instead of only settable implicitly via
-      re-toggling Lock. Deliberately out of scope: correcting drift that
-      changes over a video's length (a single offset can't fix that) — not
-      an observed problem yet, revisit only if it becomes one.
-- [ ] Project file — new `project_io.py` (dialog-free, testable, same
+- [x] Calibration folder guidance — `filedialog.askdirectory`'s title now
+      names the four expected NPZ files, and `calibration_io.py`'s
+      missing-files error message restates the full requirement rather than
+      just naming what's absent.
+- [x] Pan when zoomed in — new middle-mouse-drag binding (`on_pan_down`/
+      `on_pan_drag`/`on_pan_up` in `main.py`, bound in `video_overlay.py`);
+      left-click stays point placement/drag, right-click stays the existing
+      explicit-refine gesture — panning deliberately uses a separate button
+      so it can't collide with either. Drives the pan offset that already
+      existed per-pane (`viewL`/`viewR`'s `off_x`/`off_y`), previously only
+      touched by mouse-wheel zoom. Redraws via the new
+      `_redisplay_current_frames` (reuses the already-decoded current
+      frame) rather than `_render_current_frames`, so continuous drag
+      motion doesn't force a `cap.set()` keyframe seek on every event.
+      Found and fixed an unrelated small bug along the way — see
+      `FINDINGS.md` #8.
+- [x] Resync control — `on_toggle_lock` already computed and stored
+      `lock_offset_frames` whenever Lock was enabled while both timelines
+      were manually scrubbed to the same moment; that was already the
+      resync mechanism in substance. Now exposed as a directly-editable
+      toolbar Spinbox (`self.offset_var`, `on_offset_changed`) that
+      immediately re-aligns the right timeline when Lock is on, instead of
+      only being settable implicitly via re-toggling Lock. Deliberately out
+      of scope: correcting drift that changes over a video's length (a
+      single offset can't fix that) — not an observed problem yet, revisit
+      only if it becomes one. Also found and fixed a real bug surfaced by
+      this feature: pressing Play with Lock on and a nonzero offset made
+      the timelines count backward — see `FINDINGS.md` #9.
+- [x] Project file — new `project_io.py` (dialog-free, testable, same
       pattern as `calibration_io.py`): saves/loads a small JSON manifest of
       left/right video paths, calibration folder path, and the resync
       offset above. New File menu items "Save Project…"/"Open Project…" so
       a session doesn't require reloading everything from scratch.
+      `on_load_left_video`/`on_load_right_video`/`on_load_calibration_folder`
+      were each split into a dialog-only wrapper plus a dialog-free
+      `_load_*_from_path`/`_load_calibration_from_folder` helper, so
+      `on_open_project` reuses the exact same loading/error-handling logic
+      a manual reload would use, per stage.
 - [ ] Measurement output overhaul — `measurement_window.py`'s copy block
       currently has no identifying context (video/pair name, frame,
       timestamp) and only ever shows the current measurement. Add an

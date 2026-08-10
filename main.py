@@ -30,6 +30,7 @@ import measurement_window  # measurement_window contains the Tkinter measurement
 import anaglyph_preview    # Manages the anaglyph_preview functionality
 import calibration_summary # calibration_summary contains the Tkinter calibration summary window and update helpers.
 import calibration_io      # Loads and validates calibration NPZ files, without the directory-chooser dialog.
+import project_io          # Saves/loads a project manifest (video paths, calibration folder, resync offset).
 import video_overlay # Manages drawing the overlay on the video
 
 
@@ -121,6 +122,17 @@ class SizeamaticProApp:
         """Whether the left and right timelines are locked together at a
         fixed frame offset (`self.lock_offset_frames`), so scrubbing one
         side moves the other in sync."""
+
+        self.offset_var = tk.IntVar(value=0)
+        """Tk-bound mirror of `self.lock_offset_frames` (declared much
+        later below, near the rest of the transport/lock state — this one
+        has to live here instead, before `_build_toolbar()` runs, since
+        that method's Spinbox references it as a `textvariable`; see
+        FINDINGS.md #6 for the general scattered-init-order issue this
+        runs into). Kept in sync in both directions: `on_toggle_lock`
+        updates it when lock capture computes a new offset, and
+        `on_offset_changed` updates `self.lock_offset_frames` when the
+        user edits it directly."""
 
          # ---- File state ----
         self.left_video_path = None
@@ -247,7 +259,9 @@ class SizeamaticProApp:
         (e.g. +12 means right is 12 frames ahead of left). Captured at the
         moment lock is enabled (`on_toggle_lock`) from whatever alignment
         the user had already scrubbed to manually — enabling lock never
-        jumps either timeline itself."""
+        jumps either timeline itself. Also directly editable via the
+        resync offset Spinbox (`self.offset_var`, `on_offset_changed`) for
+        manually correcting a misaligned pair — see ROADMAP.md Phase 7."""
 
         self._resize_after_id = None
         """Tkinter `after()` job ID for the debounced resize redraw, so a
@@ -904,6 +918,9 @@ class SizeamaticProApp:
         file_menu.add_separator()
         file_menu.add_command(label="Load Calibration Folder…", command=self.on_load_calibration_folder)
         file_menu.add_separator()
+        file_menu.add_command(label="Save Project…", command=self.on_save_project)
+        file_menu.add_command(label="Open Project…", command=self.on_open_project)
+        file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.quit)
         menubar.add_cascade(label="File", menu=file_menu)
 
@@ -994,6 +1011,23 @@ class SizeamaticProApp:
         )
         self.lock_check.grid(row=0, column=7, padx=(0, 12))
 
+        # ---- Resync offset control ----
+        # Directly editable mirror of self.lock_offset_frames, for correcting a
+        # pair that's out of sync without having to re-scrub both timelines and
+        # re-toggle Lock just to capture a new offset.
+        ttk.Label(self.toolbar, text="Offset:").grid(row=0, column=8, padx=(0, 2))
+        self.offset_spin = ttk.Spinbox(
+            self.toolbar,
+            from_=-100000,
+            to=100000,
+            textvariable=self.offset_var,
+            width=6,
+            command=self.on_offset_changed,
+        )
+        self.offset_spin.grid(row=0, column=9, padx=(0, 12))
+        self.offset_spin.bind("<Return>", self.on_offset_changed)
+        self.offset_spin.bind("<FocusOut>", self.on_offset_changed)
+
         # Clears all measurement points in both panes.
         # This is the only delete mechanism for now (simple and safe).
         self.btn_clear_points = ttk.Button(
@@ -1001,7 +1035,7 @@ class SizeamaticProApp:
             text="Clear Points",
             command=self.on_clear_points,
         )
-        self.btn_clear_points.grid(row=0, column=8, padx=(0, 12))
+        self.btn_clear_points.grid(row=0, column=10, padx=(0, 12))
 
         # ---- Spacer (keeps toolbar left packed, leaves room to add more) ----
         ttk.Frame(self.toolbar).grid(row=0, column=20, sticky="ew")
@@ -1220,9 +1254,9 @@ class SizeamaticProApp:
     def on_load_left_video(self):
         """Prompt for and load the left video, updating UI state.
 
-        Releases any previously open left capture, opens the newly
-        selected file, updates the header/slider/frame state, and
-        re-renders.
+        Just handles the file dialog; the actual loading logic lives in
+        `_load_left_video_from_path` so `on_open_project` can reuse it with
+        a path read from a project file instead of a dialog.
 
         Returns:
             None
@@ -1235,6 +1269,23 @@ class SizeamaticProApp:
         if not path:
             return
 
+        self._load_left_video_from_path(path)
+
+    def _load_left_video_from_path(self, path):
+        """Load the left video from an already-known path, updating UI state.
+
+        Releases any previously open left capture, opens the given file,
+        updates the header/slider/frame state, and re-renders. Dialog-free
+        so it can be driven by either `on_load_left_video` (file picker)
+        or `on_open_project` (a path stored in a project file).
+
+        Args:
+            path (str): Path to the left video file to open.
+
+        Returns:
+            bool: True if the video opened successfully, False otherwise
+            (with an error dialog already shown).
+        """
         # Close any previous capture so we do not leak file handles.
         if self.capL:
             self.capL.release()
@@ -1245,7 +1296,7 @@ class SizeamaticProApp:
         cap, meta = self._open_video_capture(path)
         if cap is None:
             messagebox.showerror("Load Left Video", "Failed to open the selected video file.")
-            return
+            return False
 
         # Save state.
         self.left_video_path = path
@@ -1270,13 +1321,14 @@ class SizeamaticProApp:
         self._set_status_mid("Loaded left video")
         self._refresh_status_left()
 
+        return True
+
     def on_load_right_video(self):
         """Prompt for and load the right video, updating UI state.
 
-        Releases any previously open right capture, opens the newly
-        selected file, updates the header/slider/frame state, and
-        re-renders. Mirrors `on_load_left_video` for the right pane and
-        works independently of whether the left video is loaded.
+        Just handles the file dialog; the actual loading logic lives in
+        `_load_right_video_from_path` so `on_open_project` can reuse it
+        with a path read from a project file instead of a dialog.
 
         Returns:
             None
@@ -1291,6 +1343,22 @@ class SizeamaticProApp:
             # User cancelled the dialog.
             return
 
+        self._load_right_video_from_path(path)
+
+    def _load_right_video_from_path(self, path):
+        """Load the right video from an already-known path, updating UI state.
+
+        Mirrors `_load_left_video_from_path` for the right pane. Dialog-free
+        so it can be driven by either `on_load_right_video` (file picker)
+        or `on_open_project` (a path stored in a project file).
+
+        Args:
+            path (str): Path to the right video file to open.
+
+        Returns:
+            bool: True if the video opened successfully, False otherwise
+            (with an error dialog already shown).
+        """
         # If we already had a right capture open, release it.
         # This avoids file handle leaks and lets the user reload different files safely.
         if self.capR:
@@ -1304,7 +1372,7 @@ class SizeamaticProApp:
         if cap is None:
             # If OpenCV cannot open it, inform the user with a clear error.
             messagebox.showerror("Load Right Video", "Failed to open the selected video file.")
-            return
+            return False
 
         # Save state so the rest of the app can render frames from this capture.
         self.right_video_path = path
@@ -1333,14 +1401,15 @@ class SizeamaticProApp:
         self._set_status_mid("Loaded right video")
         self._refresh_status_left()
 
+        return True
+
     def on_load_calibration_folder(self):
         """Prompt for and load a stereo calibration folder.
 
-        Delegates the actual file loading/validation to
-        `calibration_io.load_calibration_bundle` — this method just
-        handles the directory dialog and updating UI state from the
-        result. On any failure, clears `self.cal`, disables rectified
-        view, and shows a status message explaining why.
+        Just handles the directory dialog; the actual loading logic lives
+        in `_load_calibration_from_folder` so `on_open_project` can reuse
+        it with a folder path read from a project file instead of a
+        dialog.
 
         Returns:
             None
@@ -1353,6 +1422,26 @@ class SizeamaticProApp:
         if not folder:
             return
 
+        self._load_calibration_from_folder(folder)
+
+    def _load_calibration_from_folder(self, folder):
+        """Load a stereo calibration bundle from an already-known folder.
+
+        Delegates the actual file loading/validation to
+        `calibration_io.load_calibration_bundle` — this method just
+        updates UI state from the result. On any failure, clears
+        `self.cal`, disables rectified view, and shows a status message
+        explaining why. Dialog-free so it can be driven by either
+        `on_load_calibration_folder` (folder picker) or `on_open_project`
+        (a path stored in a project file).
+
+        Args:
+            folder (str): Path to the calibration folder to load.
+
+        Returns:
+            bool: True if the calibration loaded successfully, False
+            otherwise (with a status message already shown).
+        """
         # Store the folder path for status display.
         self.calibration_folder = folder
 
@@ -1363,7 +1452,7 @@ class SizeamaticProApp:
             self.view_rectified.set(False)
             self._set_status_mid(err)
             self._refresh_status_left()
-            return
+            return False
 
         self.cal = cal
 
@@ -1375,6 +1464,85 @@ class SizeamaticProApp:
 
         # In real wiring, you will enable "Show Rectified" only after maps load.
         # For now, we leave it togglable to test UI.
+
+        return True
+
+    def on_save_project(self):
+        """Prompt for a save location and write the current project state.
+
+        Saves the left/right video paths, calibration folder, and current
+        resync offset (whatever combination is currently set — any of
+        them can be None if not loaded yet) so this session can be
+        reopened later via `on_open_project` without reselecting
+        everything through file dialogs again.
+
+        Returns:
+            None
+        """
+        path = filedialog.asksaveasfilename(
+            title="Save Project",
+            defaultextension=".json",
+            filetypes=[("Sizeamatic Project", "*.json"), ("All Files", "*.*")],
+        )
+        if not path:
+            return
+
+        err = project_io.save_project(
+            path,
+            self.left_video_path,
+            self.right_video_path,
+            self.calibration_folder,
+            self.lock_offset_frames,
+        )
+
+        if err is not None:
+            messagebox.showerror("Save Project", err)
+            return
+
+        self._set_status_mid("Project saved")
+
+    def on_open_project(self):
+        """Prompt for a project file and reload the saved video/calibration state.
+
+        Reads the project manifest via `project_io.load_project`, then
+        reuses the same dialog-free loading helpers the file-picker menu
+        items use (`_load_left_video_from_path`,
+        `_load_right_video_from_path`, `_load_calibration_from_folder`)
+        so a saved path that's since become invalid (moved/deleted file)
+        surfaces the exact same error dialogs a manual reload would, one
+        per stage, rather than failing the whole project load silently.
+
+        Returns:
+            None
+        """
+        path = filedialog.askopenfilename(
+            title="Open Project",
+            filetypes=[("Sizeamatic Project", "*.json"), ("All Files", "*.*")],
+        )
+        if not path:
+            return
+
+        project, err = project_io.load_project(path)
+        if err is not None:
+            messagebox.showerror("Open Project", err)
+            return
+
+        if project["left_video_path"]:
+            self._load_left_video_from_path(project["left_video_path"])
+
+        if project["right_video_path"]:
+            self._load_right_video_from_path(project["right_video_path"])
+
+        if project["calibration_folder"]:
+            self._load_calibration_from_folder(project["calibration_folder"])
+
+        # Restore the resync offset last, after both videos are loaded, so it
+        # doesn't get overwritten by anything the video loads above do.
+        self.lock_offset_frames = int(project["lock_offset_frames"])
+        self.offset_var.set(self.lock_offset_frames)
+
+        self._set_status_mid("Project loaded")
+        self._refresh_status_left()
 
     # -------------------------------------------------------------------------
     # Stub handlers (view toggles)
@@ -1604,6 +1772,9 @@ class SizeamaticProApp:
             # offset = R - L
             self.lock_offset_frames = ri - li
 
+            # Keep the resync offset Spinbox showing the just-captured value.
+            self.offset_var.set(self.lock_offset_frames)
+
             # Do not jump any frames here.
             # The current point in time is already aligned by the user's manual scrubbing.
             self._set_status_mid(f"Lock enabled (offset {self.lock_offset_frames:+d} frames)")
@@ -1617,6 +1788,41 @@ class SizeamaticProApp:
         if self.lock_lr.get():
             master = int(round(self.left_slider.get()))
             self._jump_frames_locked_or_single(target_index=master)
+
+    def on_offset_changed(self, _evt=None):
+        """Handle a manually edited resync offset (the toolbar Spinbox).
+
+        Reads the Spinbox's current value into `self.lock_offset_frames`
+        and, if Lock is enabled with both videos loaded, immediately
+        re-aligns the right timeline to the left's current position using
+        the new offset — so a manual resync correction is visible right
+        away instead of only taking effect on the next scrub.
+
+        Args:
+            _evt (tkinter.Event | None): The Spinbox's `<Return>`/
+                `<FocusOut>` event, when triggered by one of those
+                bindings rather than the Spinbox's own arrow-click
+                `command` (unused either way).
+
+        Returns:
+            None
+        """
+        # Spinbox text can be temporarily empty while editing; ignore that rather
+        # than raising.
+        try:
+            new_offset = int(self.offset_var.get())
+        except (ValueError, tk.TclError):
+            return
+
+        self.lock_offset_frames = new_offset
+        self._set_status_mid(f"Resync offset set to {new_offset:+d} frames")
+
+        # Re-align immediately if locked, using the left timeline's current
+        # position as the anchor — matches _jump_frames_locked_with_offset's own
+        # "offset = R - L" convention.
+        if self.lock_lr.get() and self._both_videos_loaded():
+            li = int(self.left_frame_index.get())
+            self._jump_frames_locked_with_offset("L", li)
 
     def _playback_tick(self):
         """Advance the timeline by one playback step and schedule the next tick.
@@ -1665,11 +1871,18 @@ class SizeamaticProApp:
                 self.play_after_id = None
                 return
 
-            # Advance both indices in lock mode.
-            self.left_frame_index.set(nxt)
-            self.right_frame_index.set(nxt)
-            self.left_slider.set(nxt)
-            self.right_slider.set(nxt)
+            # Advance the master (left) timeline; the right timeline follows,
+            # preserving the resync offset, via the same helper the slider and
+            # step controls already use (this also renders internally, so
+            # there's no separate render call for this branch below). See
+            # FINDINGS.md #9 for why this replaced setting both sliders
+            # directly: that skipped the resync offset entirely (always
+            # setting right to the same index as left) and, worse, fired
+            # each slider's `command` callback unsuppressed, which chained
+            # into `_jump_frames_locked_with_offset` twice with
+            # contradictory targets and could net-decrease the index every
+            # tick — i.e. exactly the reported "Play runs backward" bug.
+            self._jump_frames_locked_with_offset("L", nxt)
         else:
             # Unlocked playback advances each loaded stream independently.
             if self.metaL:
@@ -1686,8 +1899,9 @@ class SizeamaticProApp:
                 self.right_frame_index.set(nxtR)
                 self.right_slider.set(nxtR)
 
-        # Render the new frames.
-        self._render_current_frames()
+            # Render the new frames (the locked branch above already rendered
+            # via _jump_frames_locked_with_offset).
+            self._render_current_frames()
 
         # Schedule the next tick.
         self.play_after_id = self.root.after(delay_ms, self._playback_tick)

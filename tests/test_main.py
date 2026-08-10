@@ -8,7 +8,189 @@ import cv2
 import numpy as np
 import pytest
 
+import project_io
+
 LEFT_VIDEO = "examples/left_20260309_171631.mp4"
+RIGHT_VIDEO = "examples/right_20260309_171631.mp4"
+APRIL_CALIBRATION_DIR = "misc/AprilCalibration1"
+
+
+def test_save_project_writes_current_app_state(sizeamatic_app, monkeypatch, tmp_path):
+    """Save Project should write whatever the app's current left/right
+    video paths, calibration folder, and resync offset are — no real
+    video/calibration needs to be loaded to exercise the write path
+    itself."""
+
+    app = sizeamatic_app
+    app.left_video_path = "left.mp4"
+    app.right_video_path = "right.mp4"
+    app.calibration_folder = "some/cal/folder"
+    app.lock_offset_frames = 9
+
+    save_path = str(tmp_path / "project.json")
+    monkeypatch.setattr(
+        "main.filedialog.asksaveasfilename", lambda **_kwargs: save_path
+    )
+
+    app.on_save_project()
+
+    project, err = project_io.load_project(save_path)
+    assert err is None
+    assert project["left_video_path"] == "left.mp4"
+    assert project["right_video_path"] == "right.mp4"
+    assert project["calibration_folder"] == "some/cal/folder"
+    assert project["lock_offset_frames"] == 9
+
+
+@pytest.mark.skipif(
+    not (os.path.isfile(LEFT_VIDEO) and os.path.isfile(RIGHT_VIDEO)),
+    reason="Real example videos are gitignored/local-only, not present here.",
+)
+def test_open_project_restores_video_calibration_and_offset(
+    sizeamatic_app, monkeypatch, tmp_path
+):
+    """Opening a project file should reload the saved left/right videos
+    and calibration folder, and restore the resync offset — the whole
+    point of the project file (ROADMAP.md Phase 7) is skipping a manual
+    reselect of all three through file dialogs."""
+
+    app = sizeamatic_app
+
+    project_path = str(tmp_path / "project.json")
+    err = project_io.save_project(
+        project_path,
+        left_video_path=LEFT_VIDEO,
+        right_video_path=RIGHT_VIDEO,
+        calibration_folder=APRIL_CALIBRATION_DIR,
+        lock_offset_frames=3,
+    )
+    assert err is None
+
+    monkeypatch.setattr(
+        "main.filedialog.askopenfilename", lambda **_kwargs: project_path
+    )
+
+    app.on_open_project()
+
+    assert app.capL is not None
+    assert app.capR is not None
+    assert app.left_video_path == LEFT_VIDEO
+    assert app.right_video_path == RIGHT_VIDEO
+    assert app.cal is not None
+    assert app.lock_offset_frames == 3
+    assert app.offset_var.get() == 3
+
+
+def test_offset_changed_updates_lock_offset_frames_without_video(sizeamatic_app):
+    """Editing the resync offset Spinbox should update
+    `self.lock_offset_frames` even with no video loaded — it should just
+    skip the realignment step (`_both_videos_loaded()` is False) rather
+    than crash trying to re-render a frame that doesn't exist."""
+
+    app = sizeamatic_app
+    app.offset_var.set(7)
+
+    app.on_offset_changed()
+
+    assert app.lock_offset_frames == 7
+
+
+@pytest.mark.skipif(
+    not (os.path.isfile(LEFT_VIDEO) and os.path.isfile(RIGHT_VIDEO)),
+    reason="Real example videos are gitignored/local-only, not present here.",
+)
+def test_toggle_lock_syncs_offset_var_when_capturing_new_offset(sizeamatic_app):
+    """Enabling Lock while the two timelines are scrubbed apart captures
+    that gap as `self.lock_offset_frames` (pre-existing behavior) — the
+    resync offset Spinbox (`self.offset_var`) should reflect that
+    just-captured value immediately, not keep showing whatever it
+    displayed before (ROADMAP.md Phase 7's resync control)."""
+
+    app = sizeamatic_app
+    app.capL, app.metaL = app._open_video_capture(LEFT_VIDEO)
+    app.capR, app.metaR = app._open_video_capture(RIGHT_VIDEO)
+    app._update_slider_ranges()
+
+    app.lock_lr.set(False)
+    app.left_frame_index.set(10)
+    app.right_frame_index.set(13)
+    app.offset_var.set(0)
+
+    app.lock_lr.set(True)
+    app.on_toggle_lock()
+
+    assert app.lock_offset_frames == 3
+    assert app.offset_var.get() == 3
+
+
+@pytest.mark.skipif(
+    not (os.path.isfile(LEFT_VIDEO) and os.path.isfile(RIGHT_VIDEO)),
+    reason="Real example videos are gitignored/local-only, not present here.",
+)
+def test_offset_changed_realigns_right_timeline_when_locked(sizeamatic_app):
+    """With Lock enabled, manually editing the resync offset should
+    immediately move the right timeline to match the left timeline's
+    current position plus the new offset — the whole point of exposing
+    the offset as a directly-editable control (ROADMAP.md Phase 7)."""
+
+    app = sizeamatic_app
+    app.capL, app.metaL = app._open_video_capture(LEFT_VIDEO)
+    app.capR, app.metaR = app._open_video_capture(RIGHT_VIDEO)
+    app._update_slider_ranges()
+
+    app.lock_lr.set(True)
+    app.left_frame_index.set(20)
+    app.right_frame_index.set(20)
+    app.lock_offset_frames = 0
+
+    app.offset_var.set(5)
+    app.on_offset_changed()
+
+    assert app.lock_offset_frames == 5
+    assert int(app.left_frame_index.get()) == 20
+    assert int(app.right_frame_index.get()) == 25
+
+
+@pytest.mark.skipif(
+    not (os.path.isfile(LEFT_VIDEO) and os.path.isfile(RIGHT_VIDEO)),
+    reason="Real example videos are gitignored/local-only, not present here.",
+)
+def test_playback_advances_forward_with_nonzero_lock_offset(sizeamatic_app):
+    """Regression test for a reported "pressing Play runs the video
+    backward" bug, reproducible whenever Lock is on with a nonzero resync
+    offset (FINDINGS.md #9).
+
+    `_playback_tick`'s locked branch used to set both sliders directly
+    without suppressing their `command` callbacks, which chained into
+    `_jump_frames_locked_with_offset` twice per tick with contradictory
+    targets ("L" driving, then "R" driving) and could net-decrease the
+    left index every tick. Simulates several playback ticks and checks
+    both timelines actually move forward, with the offset preserved.
+    """
+
+    app = sizeamatic_app
+    app.capL, app.metaL = app._open_video_capture(LEFT_VIDEO)
+    app.capR, app.metaR = app._open_video_capture(RIGHT_VIDEO)
+    app._update_slider_ranges()
+
+    app.left_frame_index.set(50)
+    app.right_frame_index.set(53)
+    app.lock_lr.set(True)
+    app.on_toggle_lock()  # captures offset = 53 - 50 = +3
+    assert app.lock_offset_frames == 3
+
+    app.speed_var.set("1x")
+    app.is_playing = True
+
+    for expected_left in range(51, 57):
+        app._playback_tick()
+        assert int(app.left_frame_index.get()) == expected_left
+        assert int(app.right_frame_index.get()) == expected_left + 3
+
+    app.is_playing = False
+    if app.play_after_id is not None:
+        app.root.after_cancel(app.play_after_id)
+        app.play_after_id = None
 
 
 def test_middle_drag_pans_without_redecoding(sizeamatic_app):
