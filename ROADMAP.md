@@ -99,12 +99,24 @@ Deliberately out of scope: simulated GUI interaction testing (clicks/drags
 in `video_overlay.py`) — its module-level mutable state makes it awkward
 to test in isolation before the Phase 5 restructure.
 
-## Phase 5 — Architecture restructure `[~]`
+## Phase 5 — Architecture restructure `[x]`
 
 Using everything learned in Phases 3-4, break `main.py` out of the monolith
 into real classes, with the Phase 4 test suite as a safety net against
-regressions. Executing incrementally, one module at a time, with the test
+regressions. Executed incrementally, one module at a time, with the test
 suite run after each step.
+
+**Scope note:** this phase closes with the concrete, identified goal done
+(the four supporting modules converted from module-globals to classes,
+plus the two performance fixes found along the way) — not with `main.py`
+itself fully "thinned." `main.py` (~1,750 lines) still bundles window/menu
+construction, video I/O, playback/timeline/slider logic, rendering, and
+zoom/pan state in one class. Talked through the breakdown (see
+`ARCHITECTURE.md`'s "Still open" note) and deliberately deferred deciding
+whether/how to split it further to a future phase, rather than deciding
+that open-ended design question as an afterthought at the tail of this
+one — it deserves its own dedicated planning round the way Phase 5 itself
+got at the start.
 
 - [x] Decide target architecture/module layout — real classes replacing the
       module-level-global pattern in `video_overlay.py`,
@@ -122,7 +134,7 @@ suite run after each step.
       — a 17.9x speedup, confirmed live. The other motivation (visual
       polish) remains a standing, separate consideration for later if it
       still matters once the rest of the restructure is done.
-- [ ] Execute the restructure:
+- [x] Execute the restructure:
   - [x] Fix the render-path performance bottleneck (`main.py`,
         `_display_bgr_on_canvas`) — see above
   - [x] Fix the video-seek performance bottleneck (`main.py`,
@@ -147,13 +159,19 @@ suite run after each step.
         own module (`calibration_io.py`) — pulled forward from its own
         step since testing the new performance test needed a dialog-free
         load path anyway
-  - [ ] `measurement_window.py` → `MeasurementWindow` class
-  - [ ] `anaglyph_preview.py` → `AnaglyphPreview` class
-  - [ ] `video_overlay.py` → `VideoOverlay` class
-  - [ ] `main.py` ends up as a thin `SizeamaticProApp` wiring the pieces
-        together
-  - [ ] Update `tests/` as each piece becomes a class; update
+  - [x] `measurement_window.py` → `MeasurementWindow` class
+  - [x] `anaglyph_preview.py` → `AnaglyphPreview` class
+  - [x] `video_overlay.py` → `VideoOverlay` class (the biggest of the
+        four — 16 methods, the click/drag/refine state machine; also
+        removed `set_overlay_canvases`, confirmed dead code with zero
+        callers)
+  - [x] Update `tests/` as each piece becomes a class; update
         `ARCHITECTURE.md` to describe the new shape
+  - **Deferred, not done:** `main.py` ends up as a thin `SizeamaticProApp`
+        wiring the pieces together — see the scope note above. `main.py`
+        itself still holds its own substantial logic (playback/timeline,
+        rendering, video I/O); splitting that further is an open design
+        question for a future phase.
 
 ## Phase 6 — Open source readiness `[ ]`
 
