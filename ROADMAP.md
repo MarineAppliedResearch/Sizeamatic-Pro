@@ -173,12 +173,31 @@ got at the start.
         rendering, video I/O); splitting that further is an open design
         question for a future phase.
 
-## Phase 6 — Open source readiness `[ ]`
+## Phase 6 — Open source readiness `[x]`
 
-- [ ] Choose a license
-- [ ] Contributing guidelines (how contributors should work with us, PR
-      expectations, code of conduct if wanted)
-- [ ] Public-facing repo cleanup pass
+Groundwork for outside contributors (issue #7). Flipping the GitHub repo's
+visibility to public is a separate, deliberately deferred decision — not
+part of this phase.
+
+- [x] Choose a license — Apache License 2.0 (`LICENSE`), copyright held by
+      Marine Applied Research & Exploration
+- [x] `CONTRIBUTING.md` — branching model, commit conventions, pointer to
+      `AGENTS.md` for code/testing conventions, issue-first workflow
+- [x] `CODE_OF_CONDUCT.md` — Contributor Covenant v2.1, with the
+      Enforcement Responsibilities/Enforcement/Consequences sections
+      adapted for a single-maintainer project rather than used verbatim
+- [x] `license`/`authors` metadata added to `pyproject.toml`
+- [x] License/Contributing section added to `README.md`
+- [x] GitHub issue/PR templates under `.github/`
+- [x] Audit `misc/`, `examples/`, and git history for sensitive info —
+      came back clean (no credentials, keys, or hardcoded local paths
+      anywhere). One real finding: `misc/report.txt` (an unrelated CEC
+      grant deliverable used only as sample text for dev scratch scripts)
+      was untracked and gitignored — it stays on disk locally since the
+      scripts pick it via a file dialog, not a hardcoded path, but it's no
+      longer committed. Also cleaned up leftover scratch content (a
+      class-method-listing one-liner and a build command) from the bottom
+      of `README.md`.
 
 ## Phase 7 — Usability `[ ]`
 
