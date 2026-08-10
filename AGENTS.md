@@ -158,10 +158,11 @@ Run the suite: `uv run pytest`. Everything lives under `tests/`.
   release-only, feature branches for everything else. We haven't formally
   adopted its `release/*`/`hotfix/*` branches yet; revisit that if the need
   comes up.
-- **Branching:** create a feature branch off `develop` for each task (e.g.
-  `phase1/agents-md-setup`). Never commit directly to `develop` or `master`.
-  Open a PR into `develop` when the work is ready for review. `master` is
-  reserved for releases merged from `develop`.
+- **Branching:** create a feature branch off `develop` for each task, named
+  `issue-N/short-description` (e.g. `issue-7/open-source-readiness`). Never
+  commit directly to `develop` or `master`. `master` is reserved for
+  releases merged from `develop`; the project owner merges feature branches
+  into `develop` themselves.
 - **Commit messages:** plain, descriptive messages (no Conventional Commits
   prefix requirement) — describe what changed and why in the body if it's not
   obvious from the summary line.
