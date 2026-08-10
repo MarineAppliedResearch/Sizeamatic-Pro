@@ -19,50 +19,47 @@ fixed directly: a PNG-encode/base64 round trip in `_display_bgr_on_canvas`,
 and an unconditional `cap.set(CAP_PROP_POS_FRAMES)` seek on every frame read
 in `_read_frame_at` (bigger of the two — 19x slower than sequential reads).
 
-`main.py` (~1,750 lines) still holds the core `SizeamaticProApp` class — GUI
-construction, window/menu setup, playback/timeline state, video I/O (two
-OpenCV `VideoCapture` objects held open for the app's lifetime), and the
-top-level event wiring. Calibration file loading/validation has been pulled
-out into `calibration_io.py`. It owns three converted pieces so far:
-`self.cal_summary_window` (a `calibration_summary.CalibrationSummaryWindow`
-instance), `self.measurement_window` (a
-`measurement_window.MeasurementWindow` instance), and
-`self.anaglyph_preview` (an `anaglyph_preview.AnaglyphPreview` instance).
+All four supporting modules that used to mix GUI state into plain functions
+(or worse, module-level globals) are now real classes, each owned by an
+instance on the app:
 
-Several concerns have been pulled out of `main.py` into separate files.
-**Three have been converted to classes; one is still plain functions** that
-take the `SizeamaticProApp` instance (`app`) as their first argument and
-read/mutate its attributes directly, or (worse) keep their own state as
-module-level globals:
-
-- **`stereo_matching.py`** — stereo point matching and triangulation math
-  (scanline mate-point search, triangulation, reprojection error,
-  uncertainty estimation). Pure functions, no GUI code, no restructuring
-  needed here — this one's fine as-is.
-- **`calibration_io.py`** — loads and validates calibration NPZ files, no
-  GUI code, no restructuring needed here either. Pulled out of `main.py`'s
-  `on_load_calibration_folder` so it's testable without a directory-chooser
-  dialog.
-- **`calibration_summary.py`** — `CalibrationSummaryWindow` class (done).
-  Owns the Tkinter calibration-summary window and its update logic as
-  instance attributes/methods instead of module-level globals — this
-  conversion is what removed the fragility that caused `FINDINGS.md` #1
-  (a nested closure needing, but missing, its own `global` declaration).
-- **`measurement_window.py`** — `MeasurementWindow` class (done). Same
-  conversion as `calibration_summary.py`.
-- **`anaglyph_preview.py`** — `AnaglyphPreview` class (done). Same
-  conversion again — this one also structurally eliminates `FINDINGS.md`
-  #2 (an uninitialized module global) and #3 (a bound method can't be
+- **`calibration_summary.py`** — `CalibrationSummaryWindow`
+  (`app.cal_summary_window`). This conversion is what removed the
+  fragility that caused finding 1 in `FINDINGS.md` (a nested closure
+  needing, but missing, its own `global` declaration).
+- **`measurement_window.py`** — `MeasurementWindow`
+  (`app.measurement_window`). Same conversion.
+- **`anaglyph_preview.py`** — `AnaglyphPreview` (`app.anaglyph_preview`).
+  Same conversion again — this one also structurally eliminates findings
+  2 (an uninitialized module global) and 3 (a bound method can't be
   called with a missing `app` argument the way a free function could).
-- **`video_overlay.py`** — still plain functions + module-level globals
-  (`drag_active`, `left_overlay_canvas`, etc.). Not yet converted — last
-  one left.
+- **`video_overlay.py`** — `VideoOverlay` (`app.video_overlay`). Same
+  conversion, and the biggest of the four (16 methods, the click/drag/
+  refine state machine). Constructed earlier than the other three in
+  `SizeamaticProApp.__init__`, since `_build_viewers` calls
+  `self.video_overlay.create_canvases()` directly — the other three only
+  need to exist before a user action first opens them.
 
-Once fully converted, each piece will be independently unit-testable without
-constructing a real Tk root — `tests/conftest.py`'s `FakeApp` stand-in
-already anticipates this for the pure-logic functions, and all three
-converted classes can now be tested by constructing an instance directly
-(see `tests/test_regressions.py`).
+Each is independently unit-testable without constructing a real Tk root for
+the pure-logic parts — `tests/conftest.py`'s `FakeApp` stand-in — and can be
+tested by constructing an instance directly for anything that does need a
+real canvas/window (see `tests/test_regressions.py`,
+`tests/test_video_overlay.py`).
+
+`stereo_matching.py` (stereo point matching and triangulation math) and the
+new `calibration_io.py` (calibration NPZ loading/validation, pulled out of
+`main.py`'s `on_load_calibration_folder`) are pure functions with no GUI
+code — no restructuring needed for either.
+
+**Still open — not yet done:** `main.py` (~1,750 lines) itself hasn't been
+"thinned." It still holds the core `SizeamaticProApp` class with window/menu
+construction, video I/O (two OpenCV `VideoCapture` objects held open for the
+app's lifetime), playback/timeline/slider logic, rendering, and zoom/pan
+state all bundled together, wiring the four classes above together via
+composition (`self.cal_summary_window`, `self.measurement_window`,
+`self.anaglyph_preview`, `self.video_overlay`). Whether/how to split
+`main.py`'s own remaining concerns further is an open question for the rest
+of Phase 5.
 
 ## Other first-party scripts
 

@@ -81,6 +81,15 @@ class SizeamaticProApp:
         the app — menu, toolbar, viewer panes, status bar all attach to
         this."""
 
+        self.video_overlay = video_overlay.VideoOverlay(self)
+        """Owns the overlay canvases and overlay interaction state. See
+        `video_overlay.VideoOverlay`. Constructed this early (before
+        `_build_menu`/`_build_viewers` below) because `_build_viewers`
+        calls `self.video_overlay.create_canvases()` — unlike
+        `self.cal_summary_window`/`self.measurement_window`/
+        `self.anaglyph_preview`, which only need to exist before a user
+        action first opens them."""
+
         # ---- Window setup ----
         self.root.title("Sizeamatic Pro")
         self.root.minsize(1100, 700)
@@ -248,7 +257,7 @@ class SizeamaticProApp:
 
         self.max_points_per_pane = 2
         """Point cap per pane. Starts at 2 (a single line/segment); raising
-        this later would let `video_overlay.draw_overlay_for_pane` and
+        this later would let `self.video_overlay`'s `draw_pane` and
         `_update_measurement_status_stub`'s segment math extend naturally
         into a multi-point polyline, since both already connect points as
         a consecutive chain rather than independent pairs."""
@@ -256,21 +265,24 @@ class SizeamaticProApp:
         self.handle_radius_px = 8
         """Point handle radius, in screen pixels (after scaling). Kept
         fairly large so handles are easy to click directly without needing
-        precise hit-test math — `video_overlay.get_nearest_handle_index`
-        also uses a multiple of this as a forgiving fallback hit radius."""
+        precise hit-test math — `self.video_overlay`'s
+        `get_nearest_handle_index` also uses a multiple of this as a
+        forgiving fallback hit radius."""
 
         self.drag_active = False
         """Vestigial. Conceptually "whether a left-button point handle
-        drag is active", but the actual drag handling in `video_overlay.py`
-        uses its own module-level `drag_active` exclusively and never
-        reads this copy — see `FINDINGS.md` #7. Only `on_clear_points`
-        still writes to it, so clicking "Clear Points" mid-drag doesn't
-        actually stop a real drag (harmless: `video_overlay.py`'s own
-        drag handlers bounds-check the point index anyway, so a stale
-        drag just no-ops once the point list is cleared)."""
+        drag is active", but the actual drag handling lives on
+        `self.video_overlay` (its own `drag_active` attribute) and never
+        reads this copy — see finding 7 in `FINDINGS.md`. Only
+        `on_clear_points` still writes to it, so clicking "Clear Points"
+        mid-drag doesn't actually stop a real drag (harmless:
+        `self.video_overlay`'s own drag handlers bounds-check the point
+        index anyway, so a stale drag just no-ops once the point list is
+        cleared)."""
 
         self.drag_which = None
-        """Vestigial, same as `self.drag_active` — see `FINDINGS.md` #7."""
+        """Vestigial, same as `self.drag_active` — see finding 7 in
+        `FINDINGS.md`."""
 
         self.drag_index = None
         """Vestigial, same as `self.drag_active` — see `FINDINGS.md` #7."""
@@ -393,7 +405,7 @@ class SizeamaticProApp:
         Returns:
             None
         """
-        canvas = video_overlay.left_overlay_canvas if which == "L" else video_overlay.right_overlay_canvas
+        canvas = self.video_overlay.left_canvas if which == "L" else self.video_overlay.right_canvas
 
         # Require metadata so we know how to map coords.
         if self._get_image_size(which) is None:
@@ -914,7 +926,7 @@ class SizeamaticProApp:
         self.drag_index = None
 
         # Redraw overlays to remove handles and lines.
-        video_overlay.redraw_overlays(self)
+        self.video_overlay.redraw()
 
         # Update measurement status text.
         self._update_measurement_status_stub()
@@ -944,7 +956,7 @@ class SizeamaticProApp:
 
         Creates the resizable paned window containing the left and right
         video viewports (each a stacked video canvas with an overlay
-        canvas on top, created via `video_overlay.create_overlay_canvases`),
+        canvas on top, created via `self.video_overlay.create_canvases`),
         plus the frame-scrubbing slider and frame label under each pane.
 
         Returns:
@@ -1068,7 +1080,7 @@ class SizeamaticProApp:
         self.right_video_canvas.bind("<Configure>", self.on_canvas_resized)
 
         # Create overlay canvases for point drawing and point interaction.
-        video_overlay.create_overlay_canvases(self)
+        self.video_overlay.create_canvases()
 
 
 
@@ -1748,10 +1760,10 @@ class SizeamaticProApp:
 
         Note:
             This is currently unused/superseded by the overlay canvas
-            click handling in `video_overlay.py`
-            (`on_overlay_left_down`/`on_overlay_right_down`), which is
-            bound to the overlay canvases instead of this handler. Kept as
-            a minimal placeholder that just reports click coordinates.
+            click handling in `self.video_overlay`
+            (`on_left_down`/`on_right_down`), which is bound to the
+            overlay canvases instead of this handler. Kept as a minimal
+            placeholder that just reports click coordinates.
 
         Args:
             which (str): Which pane was clicked, "L" or "R".
@@ -1863,8 +1875,8 @@ class SizeamaticProApp:
             self._render_current_frames()
             return
 
-        self._draw_placeholder(video_overlay.left_overlay_canvas, "LEFT", self.view_rectified.get())
-        self._draw_placeholder(video_overlay.right_overlay_canvas, "RIGHT", self.view_rectified.get())
+        self._draw_placeholder(self.video_overlay.left_canvas, "LEFT", self.view_rectified.get())
+        self._draw_placeholder(self.video_overlay.right_canvas, "RIGHT", self.view_rectified.get())
 
         self._update_frame_labels()
 
@@ -2344,14 +2356,14 @@ class SizeamaticProApp:
                 self.current_frameL = None
 
                 # Draw the missing-frame placeholder on the left pane.
-                self._draw_missing_frame(video_overlay.left_overlay_canvas, "LEFT", li)
+                self._draw_missing_frame(self.video_overlay.left_canvas, "LEFT", li)
             else:
                 # Cache the exact left image currently being displayed.
                 # If rectified view is enabled, this is the rectified frame.
                 self.current_frameL = frameL
 
                 # Display the current left frame on the left pane.
-                self._display_bgr_on_canvas(video_overlay.left_overlay_canvas, frameL, "L")
+                self._display_bgr_on_canvas(self.video_overlay.left_canvas, frameL, "L")
 
         # Right side render.
         if self.capR:
@@ -2367,20 +2379,20 @@ class SizeamaticProApp:
                 self.current_frameR = None
 
                 # Draw the missing-frame placeholder on the right pane.
-                self._draw_missing_frame(video_overlay.right_overlay_canvas, "RIGHT", ri)
+                self._draw_missing_frame(self.video_overlay.right_canvas, "RIGHT", ri)
             else:
                 # Cache the exact right image currently being displayed.
                 # If rectified view is enabled, this is the rectified frame.
                 self.current_frameR = frameR
 
                 # Display the current right frame on the right pane.
-                self._display_bgr_on_canvas(video_overlay.right_overlay_canvas, frameR, "R")
+                self._display_bgr_on_canvas(self.video_overlay.right_canvas, frameR, "R")
 
         # Update the slider frame labels after rendering.
         self._update_frame_labels()
 
         # Draw overlay over frame
-        video_overlay.redraw_overlays(self)
+        self.video_overlay.redraw()
 
     def _get_display_rect(self, which, canvas):
         """Compute the on-canvas rectangle where video should be drawn.

@@ -8,8 +8,6 @@ import cv2
 import numpy as np
 import pytest
 
-import video_overlay
-
 LEFT_VIDEO = "examples/left_20260309_171631.mp4"
 
 
@@ -25,7 +23,7 @@ def test_display_bgr_on_canvas_renders_without_error(sizeamatic_app):
     sizeamatic_app.metaL = {"width": 64, "height": 48, "fps": 30.0, "frame_count": 10}
     frame = np.random.randint(0, 255, (48, 64, 3), dtype=np.uint8)
 
-    sizeamatic_app._display_bgr_on_canvas(video_overlay.left_overlay_canvas, frame, "L")
+    sizeamatic_app._display_bgr_on_canvas(sizeamatic_app.video_overlay.left_canvas, frame, "L")
 
     assert sizeamatic_app.tkimg_left is not None
 
