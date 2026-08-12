@@ -367,14 +367,17 @@ A second usability round (Phase 8) and a packaging/distribution phase
       been added to `mkdocs.yml`'s nav back in Phase 5, so it was never
       actually documented on the site despite being pure, tested code.
 
-## Phase 8 — Usability, round 2 `[ ]`
+## Phase 8 — Usability, round 2 (issue #9) `[~]`
 
 A second round of usability items — this time specified directly by the
 project owner rather than via a fresh quiz (see Phase 7 for that pattern).
-Detailed design/implementation planning (data model, exact UI, edge cases)
-still to come when this phase actually starts; scoped here just enough that
-it isn't forgotten.
 
+- [x] Point visibility — `video_overlay.py`'s `draw_pane` now draws a
+      small solid red dot (`CENTER_DOT_RADIUS_PX`, 2px screen radius,
+      fixed regardless of zoom — matching the existing handle ring's own
+      fixed-screen-size behavior) exactly at each point's center, on top
+      of the existing hollow green ring. Purely visual — not tagged
+      `"handle"`, so it doesn't change click hit-testing.
 - [ ] Video-time sync — let the user type in the real-world timestamp
       shown burned into the video image itself (e.g. a camera's on-screen
       clock overlay) at whatever frame they're currently on. The app
@@ -384,11 +387,9 @@ it isn't forgotten.
       know about (e.g. from a field log) instead of hunting for it
       visually. This offset needs to be saved in the project file
       (`project_io.py`) and restored when the video/project reloads —
-      same pattern as the Phase 7 resync offset.
-- [ ] Point visibility — give each measurement point handle a small,
-      precise dot exactly in its center, so the user can see exactly
-      where the point is actually landing, not just the surrounding
-      circle/handle shape.
+      same pattern as the Phase 7 resync offset. Detailed design
+      (anchor UI, per-pane vs. shared, exact restore behavior) still to
+      come before implementation starts.
 
 ## Phase 9 — Packaging and distribution `[ ]`
 

@@ -8,6 +8,8 @@ depends on need a real Tkinter canvas, not a FakeApp stand-in.
 
 from types import SimpleNamespace
 
+import video_overlay
+
 
 def _event(x, y):
     """Build a minimal stand-in for a Tkinter mouse event.
@@ -37,6 +39,38 @@ def test_left_click_on_empty_space_adds_a_point(sizeamatic_app):
 
     assert len(app.ptsL) == 1
     assert app.ptsL[0] == (100.0, 50.0)
+
+
+def test_draw_pane_draws_a_center_dot_pinpointing_the_exact_point(sizeamatic_app):
+    """Each point should get a small solid center dot in addition to the
+    surrounding handle ring, so the exact clicked/dragged pixel is visible
+    rather than just the ring's general vicinity (ROADMAP.md Phase 8's
+    point visibility item)."""
+
+    app = sizeamatic_app
+    app.metaL = {"width": 640, "height": 480, "fps": 30.0, "frame_count": 10}
+    app.fit_to_window.set(False)
+
+    app.ptsL.append((100.0, 50.0))
+    app.video_overlay.redraw()
+
+    canvas = app.video_overlay.left_canvas
+    r = video_overlay.CENTER_DOT_RADIUS_PX
+
+    # The center dot is a small "overlay"-tagged oval that isn't also tagged
+    # "handle" - distinct both from the larger handle-ring oval at the same
+    # center, and from the untagged placeholder graphics the "no video
+    # loaded" canvas state draws (which draw_pane's own "overlay"-tagged
+    # clear/redraw cycle deliberately leaves alone).
+    overlay_ovals = [
+        item for item in canvas.find_withtag("overlay") if canvas.type(item) == "oval"
+    ]
+    dot_candidates = [item for item in overlay_ovals if "handle" not in canvas.gettags(item)]
+
+    assert len(dot_candidates) == 1
+    bbox = canvas.coords(dot_candidates[0])
+    assert bbox == [100.0 - r, 50.0 - r, 100.0 + r, 50.0 + r]
+    assert canvas.itemcget(dot_candidates[0], "fill") == "#ff0000"
 
 
 def test_left_click_on_new_point_places_mate_at_same_image_pixel(sizeamatic_app):
