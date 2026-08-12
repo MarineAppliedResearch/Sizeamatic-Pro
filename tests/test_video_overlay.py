@@ -39,26 +39,30 @@ def test_left_click_on_empty_space_adds_a_point(sizeamatic_app):
     assert app.ptsL[0] == (100.0, 50.0)
 
 
-def test_left_click_on_new_point_also_creates_stereo_mate_guess(sizeamatic_app):
-    """Placing the first point on one pane should attempt an initial
-    stereo mate guess on the opposite pane (guess_mate_point_on_scanline
-    returning None here since there's no real frame loaded, but the
-    attempt itself — and not crashing — is what's being verified)."""
+def test_left_click_on_new_point_places_mate_at_same_image_pixel(sizeamatic_app):
+    """Placing the first point on one pane should immediately place its
+    mate on the opposite pane at the exact same image pixel coordinates
+    (ROADMAP.md Phase 7's usability quiz: the previous scanline-matcher
+    guess was found unhelpful in practice, and was replaced with this
+    simpler default — the user drags it into place manually, or
+    right-click-drags it to invoke the matcher explicitly instead).
+
+    Deliberately doesn't depend on calibration being loaded at all — no
+    stereo matching is attempted for this initial placement anymore.
+    """
 
     app = sizeamatic_app
     app.metaL = {"width": 640, "height": 480, "fps": 30.0, "frame_count": 10}
     app.metaR = {"width": 640, "height": 480, "fps": 30.0, "frame_count": 10}
     app.fit_to_window.set(False)
     app.view_rectified.set(True)
-    app.cal = None  # guess_mate_point_on_scanline requires cal is not None
+    app.cal = None  # should have no effect on this initial placement now
 
     app.video_overlay.on_left_down("L", _event(100, 50))
 
-    # No calibration loaded, so the mate guess can't succeed - but it
-    # should have been attempted without raising, and the right pane
-    # should simply have no mate point yet.
     assert len(app.ptsL) == 1
-    assert len(app.ptsR) == 0
+    assert len(app.ptsR) == 1
+    assert app.ptsR[0] == app.ptsL[0] == (100.0, 50.0)
 
 
 def test_drag_moves_an_existing_point(sizeamatic_app):
@@ -88,6 +92,35 @@ def test_drag_moves_an_existing_point(sizeamatic_app):
     app.video_overlay.on_left_up("L", _event(200, 150))
     assert app.video_overlay.drag_active is False
     assert app.video_overlay.drag_index is None
+
+
+def test_multiple_clicks_build_a_connected_chain_up_to_the_point_cap(sizeamatic_app):
+    """Clicking empty space repeatedly should keep appending points (a
+    connected chain, not just a single pair) up to `max_points_per_pane`,
+    then silently ignore further clicks past that cap.
+
+    Regression test for ROADMAP.md Phase 7's measurement output item:
+    the point cap used to be hardcoded to 2 (main.py FINDINGS.md-adjacent
+    history), which made a multi-segment chain impossible to place at
+    all regardless of whether the underlying segment math supported one.
+    """
+
+    app = sizeamatic_app
+    app.metaL = {"width": 2000, "height": 2000, "fps": 30.0, "frame_count": 10}
+    app.fit_to_window.set(False)
+
+    assert app.max_points_per_pane == 20
+
+    # Click at max_points_per_pane distinct, well-separated locations.
+    for i in range(app.max_points_per_pane):
+        app.video_overlay.on_left_down("L", _event(10 + i * 20, 10))
+
+    assert len(app.ptsL) == app.max_points_per_pane
+
+    # One more click at yet another empty location should be ignored - the
+    # pane is already at its cap.
+    app.video_overlay.on_left_down("L", _event(10 + app.max_points_per_pane * 20, 10))
+    assert len(app.ptsL) == app.max_points_per_pane
 
 
 def test_get_handle_index_under_cursor_without_a_handle_returns_none(sizeamatic_app):

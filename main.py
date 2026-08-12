@@ -14,6 +14,7 @@ files, and `README.md` for the user-facing description of the app.
 
 import os
 import sys # Used for icon resources
+import tomllib # Reads pyproject.toml's version for the project file's app_version field.
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -282,12 +283,26 @@ class SizeamaticProApp:
         expected to be the same physical point, matched between the two
         views."""
 
-        self.max_points_per_pane = 2
-        """Point cap per pane. Starts at 2 (a single line/segment); raising
-        this later would let `self.video_overlay`'s `draw_pane` and
-        `_update_measurement_status_stub`'s segment math extend naturally
-        into a multi-point polyline, since both already connect points as
-        a consecutive chain rather than independent pairs."""
+        self.last_recorded_snapshot = None
+        """Enough state to restore the most recently *Recorded*
+        measurement from a project file later: a dict with keys
+        "left_frame_index", "right_frame_index", "ptsL", "ptsR", or None
+        if nothing's been recorded this session yet. Updated by
+        `_on_measurement_recorded`, called from
+        `measurement_window.py`'s `record_current_measurement` right
+        after it successfully appends to the Log."""
+
+        self.max_points_per_pane = 20
+        """Point cap per pane. A generous fixed ceiling rather than a
+        precisely-reasoned limit — high enough that no realistic
+        multi-segment measurement chain hits it, while still bounding
+        worst-case UI/computation cost. Raised from the original cap of 2
+        (a single segment) once `self.video_overlay`'s `draw_pane` and
+        `_update_measurement_status_stub`'s segment math were confirmed to
+        already extend naturally into a multi-point polyline — both
+        already connect points as a consecutive chain rather than
+        independent pairs — see ROADMAP.md Phase 7's measurement output
+        item."""
 
         self.handle_radius_px = 8
         """Point handle radius, in screen pixels (after scaling). Kept
@@ -759,13 +774,67 @@ class SizeamaticProApp:
         iy = (float(sy) - float(dy) - float(view["off_y"])) / S
         return ix, iy
 
+    def _format_timestamp(self, frame_index, fps):
+        """Format a frame index as an HH:MM:SS.mmm timestamp.
+
+        Args:
+            frame_index (int): Zero-based frame index.
+            fps (float | None): The video's frames-per-second, or None/0
+                if unknown.
+
+        Returns:
+            str: The formatted timestamp, or "?" if `fps` isn't a usable
+            positive number (e.g. no video loaded yet).
+        """
+        if not fps or fps <= 0:
+            return "?"
+
+        total_seconds = float(frame_index) / float(fps)
+        hours = int(total_seconds // 3600)
+        minutes = int((total_seconds % 3600) // 60)
+        seconds = total_seconds % 60
+        return f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
+
+    def _current_measurement_context(self):
+        """Build the video/frame/timestamp identifying info for the current measurement.
+
+        This is what lets a copied-and-pasted measurement row still mean
+        something once it's sitting in a spreadsheet with no other
+        context — see ROADMAP.md Phase 7's measurement output item.
+        Always reads the *left* timeline/video, since measurements are
+        computed in the rectified left camera coordinate frame (see
+        `README.md`'s "Measurement notes").
+
+        Returns:
+            dict: Keys "video_name" (str), "frame_index" (int), and
+            "timestamp" (str).
+        """
+        if self.left_video_path:
+            video_name = os.path.basename(self.left_video_path)
+        else:
+            video_name = "(no video)"
+
+        frame_index = int(self.left_frame_index.get())
+        fps = self.metaL["fps"] if self.metaL else None
+
+        return {
+            "video_name": video_name,
+            "frame_index": frame_index,
+            "timestamp": self._format_timestamp(frame_index, fps),
+        }
+
     def _update_measurement_status_stub(self):
         """Recompute measurements from current points and refresh the UI.
 
-        Triangulates all currently paired left/right points, builds the
-        point diagnostics and segment rows, updates the status bar's right
-        section with a short summary (or the reason measurement isn't
-        available), and refreshes the measurement results window.
+        Triangulates all currently paired left/right points, builds one
+        unified list of result rows (a "Point" row per point, a "Segment"
+        row per consecutive pair, and — for 2+ points — one "Total" row
+        summing the connected chain's segment lengths), updates the
+        status bar's right section with a short summary (or the reason
+        measurement isn't available), and refreshes the measurement
+        results window. See `measurement_window.py`'s module docstring
+        for why points/segments/total are one flat, `Type`-tagged table
+        rather than separate shapes.
 
         Note:
             If a point in the middle of the list fails to triangulate, the
@@ -819,10 +888,16 @@ class SizeamaticProApp:
             self._set_status_right(err_msg if err_msg else "No valid points")
             return
 
-        # Build rows for the points table.
-        points_rows = []
+        # Video/frame/timestamp context, shared by every row this call produces.
+        ctx = self._current_measurement_context()
+        video_col = ctx["video_name"]
+        frame_col = str(ctx["frame_index"])
+        time_col = ctx["timestamp"]
+
+        rows = []
         sigma_px = float(self.click_sigma_px)
 
+        # Build one "Point" row per clicked point pair.
         for i, (X, Y, Z) in enumerate(pts3d):
             R = (X * X + Y * Y + Z * Z) ** 0.5
 
@@ -850,22 +925,21 @@ class SizeamaticProApp:
             # Compute rectified Y mismatch between left and right clicks.
             dy = yR - yL
 
-            # Store the formatted point row for the UI table and copy block.
-            points_rows.append((
-                str(i),
-                f"{X:.1f}",
-                f"{Y:.1f}",
-                f"{Z:.1f}",
-                f"{R:.1f}",
-                f"{disp:.2f}",
-                f"{dy:.2f}",
-                erms_str,
-                sZ_str,
-                sR_str,
+            rows.append((
+                video_col, frame_col, time_col, "",
+                "Point", str(i),
+                f"{X:.1f}", f"{Y:.1f}", f"{Z:.1f}", f"{R:.1f}",
+                f"{disp:.2f}", f"{dy:.2f}", erms_str, sZ_str, sR_str,
             ))
 
-        # Build rows for the segments table.
-        seg_rows = []
+        # Build one "Segment" row per consecutive point pair (the chain is a
+        # single connected polyline: 0-1, 1-2, 2-3, ... — see
+        # video_overlay.py's draw_pane docstring for why), plus a running
+        # total length and quadrature-summed sigma across the whole chain.
+        total_len_mm = 0.0
+        total_var_mm2 = 0.0
+        have_total_sigma = True
+
         if len(pts3d) >= 2:
             for i in range(1, len(pts3d)):
                 X0, Y0, Z0 = pts3d[i - 1]
@@ -874,30 +948,68 @@ class SizeamaticProApp:
                 dY = Y1 - Y0
                 dZ = Z1 - Z0
                 L = (dX * dX + dY * dY + dZ * dZ) ** 0.5
+                total_len_mm += L
 
                 # Segment sigma length estimate.
                 seg_est = stereo_matching.estimate_segment_sigma_len_mm(self, i - 1, i, sigma_px)
                 if seg_est is None:
                     sL_str = ""
+                    # Can't propagate a total sigma if any segment along the
+                    # chain is missing one.
+                    have_total_sigma = False
                 else:
                     _L0, sL = seg_est
                     sL_str = f"{sL:.1f}"
+                    total_var_mm2 += sL * sL
 
-                seg_rows.append((
-                    f"{i-1}-{i}",
-                    f"{dX:.1f}",
-                    f"{dY:.1f}",
-                    f"{dZ:.1f}",
-                    f"{L:.1f}",
-                    sL_str,
+                rows.append((
+                    video_col, frame_col, time_col, "",
+                    "Segment", f"{i-1}-{i}",
+                    f"{dX:.1f}", f"{dY:.1f}", f"{dZ:.1f}", f"{L:.1f}",
+                    "", "", "", sL_str, "",
                 ))
 
-            self._set_status_right(f"Measured {len(pts3d)} pts, {len(seg_rows)} segs")
+            # Total: sum of the connected chain's segment lengths. Segment
+            # sigmas are each estimated independently (see
+            # estimate_segment_sigma_len_mm), so a sum of independent errors
+            # adds in quadrature: sigma_total = sqrt(sum(sigma_i^2)).
+            total_sigma_str = f"{total_var_mm2 ** 0.5:.1f}" if have_total_sigma else ""
+            rows.append((
+                video_col, frame_col, time_col, "",
+                "Total", "",
+                "", "", "", f"{total_len_mm:.1f}",
+                "", "", "", total_sigma_str, "",
+            ))
+
+            self._set_status_right(
+                f"Measured {len(pts3d)} pts, {len(pts3d) - 1} segs, total {total_len_mm:.1f}mm"
+            )
         else:
             self._set_status_right("Measured 1 point")
 
         # Update popup window (creates it on first valid measurement).
-        self.measurement_window.update_window(points_rows, seg_rows, err_msg)
+        self.measurement_window.update_window(rows, err_msg)
+
+    def _on_measurement_recorded(self):
+        """Snapshot enough state to restore this exact measurement later.
+
+        Called by `self.measurement_window.record_current_measurement`
+        right after it successfully appends to the Log. Records which
+        frame each timeline was on and the exact clicked points at this
+        moment, so a saved project file can jump back to "the very last
+        place that was recorded" and show those same points again on
+        reopen (`on_open_project`) — see ROADMAP.md Phase 7's project
+        file item.
+
+        Returns:
+            None
+        """
+        self.last_recorded_snapshot = {
+            "left_frame_index": int(self.left_frame_index.get()),
+            "right_frame_index": int(self.right_frame_index.get()),
+            "ptsL": [list(p) for p in self.ptsL],
+            "ptsR": [list(p) for p in self.ptsR],
+        }
 
     # -------------------------------------------------------------------------
     # Menu bar
@@ -1406,21 +1518,37 @@ class SizeamaticProApp:
     def on_load_calibration_folder(self):
         """Prompt for and load a stereo calibration folder.
 
-        Just handles the directory dialog; the actual loading logic lives
-        in `_load_calibration_from_folder` so `on_open_project` can reuse
-        it with a folder path read from a project file instead of a
-        dialog.
+        Just handles the file dialog; the actual loading logic lives in
+        `_load_calibration_from_folder` so `on_open_project` can reuse it
+        with a folder path read from a project file instead of a dialog.
+
+        Note:
+            Deliberately uses `filedialog.askopenfilename` (an *open
+            file* dialog) rather than `filedialog.askdirectory`, even
+            though what's actually wanted is a folder. Windows' native
+            folder-picker dialog only shows folder names, never the files
+            inside them — so a user comparing several candidate folders
+            has no way to see which one actually contains the expected
+            NPZ files before picking. Asking for "any file inside the
+            calibration folder" instead, filtered to `calibration_*.npz`,
+            means the picker's own file list does the job the dialog
+            title alone couldn't: the four expected files are right there
+            to look at. The containing folder is then just `dirname` of
+            whichever one gets picked.
 
         Returns:
             None
         """
-        folder = filedialog.askdirectory(
-            title="Load Calibration Folder (must contain calibration_intrinsics.npz, "
-            "calibration_extrinsics.npz, calibration_rectification.npz, "
-            "calibration_maps.npz)"
+        sample_path = filedialog.askopenfilename(
+            title="Select any file inside the calibration folder — expects "
+            "calibration_intrinsics.npz, calibration_extrinsics.npz, "
+            "calibration_rectification.npz, calibration_maps.npz",
+            filetypes=[("Calibration NPZ", "calibration_*.npz"), ("All Files", "*.*")],
         )
-        if not folder:
+        if not sample_path:
             return
+
+        folder = os.path.dirname(sample_path)
 
         self._load_calibration_from_folder(folder)
 
@@ -1467,14 +1595,39 @@ class SizeamaticProApp:
 
         return True
 
+    def _get_app_version(self):
+        """Read this app's version string from `pyproject.toml`.
+
+        Read directly from `pyproject.toml` rather than a separately
+        maintained constant, so there's exactly one place the version
+        number lives. Only used informationally (stamped into saved
+        project files so you can tell what version created one) — never
+        for a compatibility check.
+
+        Returns:
+            str: The version string (e.g. "0.1.0"), or "unknown" if
+            `pyproject.toml` can't be found or parsed for any reason.
+        """
+        try:
+            pyproject_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pyproject.toml")
+            with open(pyproject_path, "rb") as f:
+                data = tomllib.load(f)
+            return str(data["project"]["version"])
+        except Exception:
+            return "unknown"
+
     def on_save_project(self):
         """Prompt for a save location and write the current project state.
 
-        Saves the left/right video paths, calibration folder, and current
-        resync offset (whatever combination is currently set — any of
-        them can be None if not loaded yet) so this session can be
-        reopened later via `on_open_project` without reselecting
-        everything through file dialogs again.
+        Saves the left/right video paths, calibration folder, current
+        resync offset, and rectified-view toggle state (whatever
+        combination is currently set — any of them can be None/False if
+        not loaded/enabled yet), the app version that created the file,
+        the Measurement window's full Log content, and enough state to
+        restore the most recently Recorded measurement, so this session
+        can be reopened later via `on_open_project` without reselecting
+        everything through file dialogs — or losing any recorded
+        measurements — again.
 
         Returns:
             None
@@ -1493,6 +1646,10 @@ class SizeamaticProApp:
             self.right_video_path,
             self.calibration_folder,
             self.lock_offset_frames,
+            self.view_rectified.get(),
+            self._get_app_version(),
+            self.measurement_window.get_log_text(),
+            self.last_recorded_snapshot,
         )
 
         if err is not None:
@@ -1536,10 +1693,47 @@ class SizeamaticProApp:
         if project["calibration_folder"]:
             self._load_calibration_from_folder(project["calibration_folder"])
 
-        # Restore the resync offset last, after both videos are loaded, so it
+        # Restore the resync offset after both videos are loaded, so it
         # doesn't get overwritten by anything the video loads above do.
         self.lock_offset_frames = int(project["lock_offset_frames"])
         self.offset_var.set(self.lock_offset_frames)
+
+        # Restore the rectified-view toggle, after calibration is loaded - go
+        # through the real toggle handler (not just the BooleanVar) so its
+        # existing resolution-mismatch validation still applies, in case the
+        # saved calibration folder no longer matches these videos.
+        self.view_rectified.set(bool(project["view_rectified"]))
+        self.on_toggle_view_rectified()
+
+        # Restore the Measurement window's full recorded history.
+        self.measurement_window.restore_log_text(project["measurement_log_text"])
+
+        # Jump back to "the very last place that was recorded" and show that
+        # same measurement on screen again - last, since it depends on the
+        # video/calibration/offset state above already being in place.
+        snapshot = project["last_recorded_snapshot"]
+        if snapshot:
+            li = int(snapshot["left_frame_index"])
+            ri = int(snapshot["right_frame_index"])
+
+            self.left_frame_index.set(li)
+            self.right_frame_index.set(ri)
+
+            # Move the slider widgets to match without re-triggering their own
+            # lock-offset jump logic.
+            self._suppress_slider_callbacks = True
+            try:
+                self.left_slider.set(li)
+                self.right_slider.set(ri)
+            finally:
+                self._suppress_slider_callbacks = False
+
+            self.ptsL = [tuple(p) for p in snapshot["ptsL"]]
+            self.ptsR = [tuple(p) for p in snapshot["ptsR"]]
+
+            self._update_frame_labels()
+            self._render_current_frames()
+            self._update_measurement_status_stub()
 
         self._set_status_mid("Project loaded")
         self._refresh_status_left()
@@ -2620,9 +2814,30 @@ class SizeamaticProApp:
             canvas.create_rectangle(0, 0, int(canvas.winfo_width()), int(canvas.winfo_height()), fill="black", outline="", tags=("frame",))
             return
 
-        # Crop and scale to the display rect size (preserves aspect because dw/dh preserves it).
+        # Crop, then scale to the ON-SCREEN size this exact pixel range actually
+        # covers — NOT unconditionally to the full (dw, dh) display rect.
+        #
+        # (rx0, ry0, rx1, ry1) can be smaller than the view's originally intended
+        # region whenever that region reached past the image's edges (e.g. fully
+        # zoomed out with even a tiny leftover pan offset from an earlier
+        # off-center zoom — reachable at zoom_min itself, not just "way outside
+        # the image"). This used to always resize the (possibly clamped) crop to
+        # fill the entire (dw, dh) rect and draw it at (dx, dy) regardless — which
+        # silently stretched a smaller-than-intended crop to fill the same space,
+        # scaling the displayed image differently from the un-clamped scale
+        # `_image_to_screen` uses for point overlays. Mapping the actual
+        # (rx0, ry0, rx1, ry1) back through the same screen transform keeps the
+        # displayed image and the overlay points using one consistent scale
+        # regardless of clamping — and is a no-op change whenever nothing was
+        # actually clamped (the common case), since then this reduces to exactly
+        # (dw, dh) at (dx, dy) as before.
+        screen_x0 = float(dx) + float(rx0) * S + off_x
+        screen_y0 = float(dy) + float(ry0) * S + off_y
+        out_w = max(1, int(round((rx1 - rx0) * S)))
+        out_h = max(1, int(round((ry1 - ry0) * S)))
+
         crop = frame_bgr[ry0:ry1, rx0:rx1]
-        crop = cv2.resize(crop, (int(dw), int(dh)), interpolation=cv2.INTER_LINEAR)
+        crop = cv2.resize(crop, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
 
         # Convert BGR (OpenCV) to RGB (PIL) and wrap directly as a Tk image.
         # No encode/decode round-trip: this is what actually fixed the
@@ -2645,8 +2860,10 @@ class SizeamaticProApp:
         ch = int(max(1, canvas.winfo_height()))
         canvas.create_rectangle(0, 0, cw, ch, fill="black", outline="", tags=("frame",))
 
-        # Draw the image inside the display rect.
-        canvas.create_image(int(dx), int(dy), anchor="nw", image=tk_img, tags=("frame",))
+        # Draw the image at the screen position this exact (possibly clamped)
+        # crop actually covers — see the comment above where screen_x0/screen_y0
+        # are computed for why this isn't always just (dx, dy).
+        canvas.create_image(int(round(screen_x0)), int(round(screen_y0)), anchor="nw", image=tk_img, tags=("frame",))
 
     def _render_current_frames(self):
         """Render the current left and right frames based on the current indices.

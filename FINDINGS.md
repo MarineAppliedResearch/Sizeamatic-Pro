@@ -177,6 +177,49 @@ continuous playback (previously it was silently dropped even without the
 callback-cascade bug), and the helper's own slider updates are already
 wrapped in `_suppress_slider_callbacks`.
 
+### 11. `main.py` — `_display_bgr_on_canvas` stretched a clamped crop to fill the full display rect
+
+Reported by the project owner as "when i zoom the right video everything
+zooms correctly, but when i try to zoom the left video, the points don't
+zoom and move correctly with the video" — investigation (numeric checks
+against the real app, then a visual repro via `PIL.ImageGrab` screenshots)
+found this wasn't actually a left/right asymmetry: every zoom/pan code
+path (`on_mouse_wheel`, `_get_view`, `_image_to_screen`, `_get_display_rect`)
+is already correctly parametrized by `which` and symmetric between panes.
+
+The real bug reproduced on *either* pane, triggered by "zoom out all the
+way" specifically: whenever the view's intended region (computed from the
+current zoom/pan) extended past the source image's edges — reachable even
+right at `zoom_min` itself with any nonzero leftover pan offset from an
+earlier off-center zoom, not just some extreme out-of-bounds case — the
+ROI gets clamped to the image's actual bounds before cropping (correct),
+but the crop was then unconditionally resized to fill the *entire*
+`(dw, dh)` display rect and drawn at the display rect's origin `(dx, dy)`
+regardless of whether clamping had actually shrunk it. That silently
+stretched a smaller-than-intended crop to fill the same on-screen space,
+scaling the displayed video differently from the un-clamped scale
+`_image_to_screen` uses to place point overlays — so points appeared to
+"jump" relative to the video content whenever this triggered.
+
+**Repro:** Zoom in several notches near one corner of a pane, then zoom
+back out (many notches, past where it visibly stops) with the cursor at a
+different position — this leaves a large residual pan offset even once
+zoom clamps back to `zoom_min`, forcing the ROI clamp.
+
+**Fix:** Map the *actual* clamped crop bounds `(rx0, ry0, rx1, ry1)` back
+through the same screen transform `_image_to_screen` uses
+(`screen = display_origin + pixel * scale + pan_offset`) to compute where
+this exact crop belongs and how large it should be on screen, instead of
+always assuming the full, unclamped display rect. Verified both
+mathematically (the fix uses the identical formula `_image_to_screen`
+uses, so a video pixel and a point overlay at that same pixel can no
+longer diverge) and empirically (a point placed inside a heavily
+clamped/panned view now lands within ~2px of the actual displayed crop's
+edge, matching sub-pixel rounding, instead of the two being scaled
+differently). No behavior change in the common, unclamped case — the fix
+reduces to exactly the old `(dw, dh)` at `(dx, dy)` whenever nothing was
+actually clamped.
+
 ## Flaws / risky patterns flagged, not fixed
 
 ### 4. `main.py` — `_display_bgr_on_canvas` dead fallback branch
@@ -238,6 +281,32 @@ practice — `on_overlay_left_drag`/`on_overlay_right_drag` bounds-check the
 point index against the (now-empty) point list and just no-op — but it's
 dead state that could confuse a future reader into thinking `on_clear_points`
 does more than it does. Worth removing during the Phase 5 restructure.
+
+### 10. `main.py` — real-world playback fps still below the native-fps target
+
+Reported by the project owner as "playback is significantly better than
+before, but still playing very slow." The suspected cause (live
+per-frame rectification, `cv2.remap` on every tick) was profiled and
+ruled out: simulating a real 4-second Play click through the actual
+self-scheduling `after()` loop, with real screen painting, measured
+19.7fps raw vs. 19.0fps rectified against a 25fps target — essentially
+no difference, meaning rectification isn't the bottleneck.
+
+Isolating compute from paint made the real cost obvious: the same
+per-tick work measured ~85-98 ticks/sec (10-12ms/tick) when the window
+was hidden and no real `root.update()` was forced, but dropped to
+~20fps (~50ms/tick) once actual screen compositing was included. So the
+gap is generic Tkinter canvas-paint/event-loop overhead for two large
+panes, not the stereo math — `root.after()` only guarantees a *minimum*
+delay, so a callback that runs longer than its scheduled interval simply
+runs slower than requested, with no error or warning.
+
+**Not fixed.** A persistent `PhotoImage` updated in place via `.paste()`
+(instead of constructing a new one every frame, the current approach in
+`_display_bgr_on_canvas`) is a plausible next step, but investigating and
+verifying that is real additional work, deliberately deferred rather than
+squeezed into the same pass that ruled out rectification. See
+`ROADMAP.md` Phase 7's playback speed item.
 
 ## Files reviewed with no bugs found
 

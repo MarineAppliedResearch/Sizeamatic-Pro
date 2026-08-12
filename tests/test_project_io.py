@@ -15,12 +15,18 @@ def test_save_then_load_project_round_trips(tmp_path):
     was saved."""
     path = str(tmp_path / "project.json")
 
+    snapshot = {"left_frame_index": 42, "right_frame_index": 45, "ptsL": [[1.0, 2.0]], "ptsR": [[3.0, 4.0]]}
+
     err = project_io.save_project(
         path,
         left_video_path="left.mp4",
         right_video_path="right.mp4",
         calibration_folder="misc/AprilCalibration1",
         lock_offset_frames=-4,
+        view_rectified=True,
+        app_version="0.1.0",
+        measurement_log_text="Video\tFrame\n...",
+        last_recorded_snapshot=snapshot,
     )
     assert err is None
 
@@ -30,6 +36,10 @@ def test_save_then_load_project_round_trips(tmp_path):
     assert project["right_video_path"] == "right.mp4"
     assert project["calibration_folder"] == "misc/AprilCalibration1"
     assert project["lock_offset_frames"] == -4
+    assert project["view_rectified"] is True
+    assert project["app_version"] == "0.1.0"
+    assert project["measurement_log_text"] == "Video\tFrame\n..."
+    assert project["last_recorded_snapshot"] == snapshot
 
 
 def test_save_project_allows_none_fields(tmp_path):
@@ -44,6 +54,10 @@ def test_save_project_allows_none_fields(tmp_path):
         right_video_path=None,
         calibration_folder=None,
         lock_offset_frames=0,
+        view_rectified=False,
+        app_version="0.1.0",
+        measurement_log_text="",
+        last_recorded_snapshot=None,
     )
     assert err is None
 
@@ -75,6 +89,10 @@ def test_load_project_rejects_missing_fields(tmp_path):
     assert "right_video_path" in err
     assert "calibration_folder" in err
     assert "lock_offset_frames" in err
+    assert "view_rectified" in err
+    assert "app_version" in err
+    assert "measurement_log_text" in err
+    assert "last_recorded_snapshot" in err
 
 
 def test_load_project_reports_missing_file():

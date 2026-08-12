@@ -200,6 +200,44 @@ def known_point_pixels(synthetic_cal):
     return {"X": X, "Y": Y, "Z": Z, "xL": xL, "yL": yL, "xR": xR, "yR": yR}
 
 
+@pytest.fixture
+def known_chain_pixels(synthetic_cal):
+    """Three known 3D points (a 2-segment connected chain) plus their
+    exact left/right pixel projections, for testing multi-point/
+    multi-segment measurement math (ROADMAP.md Phase 7's measurement
+    output item) with an exact expected answer — same rationale as
+    `known_point_pixels`, just extended to a chain instead of one point.
+
+    Args:
+        synthetic_cal (dict): The `synthetic_cal` fixture.
+
+    Returns:
+        dict: Keys "points" (list[dict], each like `known_point_pixels`'s
+        return value) and "total_length_mm" (float), the exact Euclidean
+        chain length computed directly from the 3D points (independent of
+        any triangulation math, since it's just distance between the
+        known inputs).
+    """
+    points_3d = [
+        (30.0, -20.0, 2000.0),
+        (60.0, -20.0, 2000.0),
+        (60.0, 10.0, 2200.0),
+    ]
+
+    points = []
+    for X, Y, Z in points_3d:
+        xL, yL = project_through(synthetic_cal["PL"], X, Y, Z)
+        xR, yR = project_through(synthetic_cal["PR"], X, Y, Z)
+        points.append({"X": X, "Y": Y, "Z": Z, "xL": xL, "yL": yL, "xR": xR, "yR": yR})
+
+    total_length_mm = 0.0
+    for (X0, Y0, Z0), (X1, Y1, Z1) in zip(points_3d, points_3d[1:]):
+        dX, dY, dZ = X1 - X0, Y1 - Y0, Z1 - Z0
+        total_length_mm += (dX * dX + dY * dY + dZ * dZ) ** 0.5
+
+    return {"points": points, "total_length_mm": total_length_mm}
+
+
 @pytest.fixture(scope="session")
 def hidden_tk_root():
     """A withdrawn (invisible) Tk root window, shared for the whole test

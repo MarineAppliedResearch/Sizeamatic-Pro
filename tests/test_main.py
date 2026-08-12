@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 import pytest
 
+import measurement_window
 import project_io
 
 LEFT_VIDEO = "examples/left_20260309_171631.mp4"
@@ -17,15 +18,26 @@ APRIL_CALIBRATION_DIR = "misc/AprilCalibration1"
 
 def test_save_project_writes_current_app_state(sizeamatic_app, monkeypatch, tmp_path):
     """Save Project should write whatever the app's current left/right
-    video paths, calibration folder, and resync offset are — no real
+    video paths, calibration folder, resync offset, rectified-view
+    state, Measurement Log, and last-recorded snapshot are — no real
     video/calibration needs to be loaded to exercise the write path
-    itself."""
+    itself. The Log/snapshot are populated by directly driving Record,
+    rather than a full triangulation setup, since that's already covered
+    elsewhere (test_measurement_chain_produces_point_segment_and_total_rows)."""
 
     app = sizeamatic_app
     app.left_video_path = "left.mp4"
     app.right_video_path = "right.mp4"
     app.calibration_folder = "some/cal/folder"
     app.lock_offset_frames = 9
+    app.view_rectified.set(True)
+    app.left_frame_index.set(7)
+    app.ptsL = [(1.0, 2.0)]
+    app.ptsR = [(3.0, 4.0)]
+
+    fake_row = ("left.mp4", "7", "00:00:00.233", "", "Point", "0", "1.0", "2.0", "3.0", "4.0", "5.0", "6.0", "7.0", "8.0", "9.0")
+    app.measurement_window.update_window([fake_row], None)
+    app.measurement_window.record_current_measurement()
 
     save_path = str(tmp_path / "project.json")
     monkeypatch.setattr(
@@ -40,6 +52,12 @@ def test_save_project_writes_current_app_state(sizeamatic_app, monkeypatch, tmp_
     assert project["right_video_path"] == "right.mp4"
     assert project["calibration_folder"] == "some/cal/folder"
     assert project["lock_offset_frames"] == 9
+    assert project["view_rectified"] is True
+    assert project["app_version"] == app._get_app_version()
+    assert "left.mp4" in project["measurement_log_text"]
+    assert project["last_recorded_snapshot"]["left_frame_index"] == 7
+    assert project["last_recorded_snapshot"]["ptsL"] == [[1.0, 2.0]]
+    assert project["last_recorded_snapshot"]["ptsR"] == [[3.0, 4.0]]
 
 
 @pytest.mark.skipif(
@@ -63,6 +81,10 @@ def test_open_project_restores_video_calibration_and_offset(
         right_video_path=RIGHT_VIDEO,
         calibration_folder=APRIL_CALIBRATION_DIR,
         lock_offset_frames=3,
+        view_rectified=True,
+        app_version="0.1.0",
+        measurement_log_text="",
+        last_recorded_snapshot=None,
     )
     assert err is None
 
@@ -79,6 +101,66 @@ def test_open_project_restores_video_calibration_and_offset(
     assert app.cal is not None
     assert app.lock_offset_frames == 3
     assert app.offset_var.get() == 3
+    # The calibration's resolution matches these real videos, so the saved
+    # rectified-view state should have restored successfully rather than
+    # being forced back off by on_toggle_view_rectified's validation.
+    assert app.view_rectified.get() is True
+
+
+@pytest.mark.skipif(
+    not (os.path.isfile(LEFT_VIDEO) and os.path.isfile(RIGHT_VIDEO)),
+    reason="Real example videos are gitignored/local-only, not present here.",
+)
+def test_open_project_restores_last_recorded_frame_points_and_log(
+    sizeamatic_app, monkeypatch, tmp_path
+):
+    """Opening a project file should jump the timelines back to "the very
+    last place that was recorded", restore the exact clicked points from
+    that moment (so the measurement is visibly back on screen, not just
+    a historical number in the Log), and restore the full Log text."""
+
+    app = sizeamatic_app
+
+    project_path = str(tmp_path / "project.json")
+    snapshot = {
+        "left_frame_index": 40,
+        "right_frame_index": 43,
+        "ptsL": [[100.0, 50.0]],
+        "ptsR": [[95.0, 50.0]],
+    }
+    header_line = "\t".join(measurement_window.RESULT_HEADERS[c] for c in measurement_window.RESULT_COLUMNS)
+    recorded_row = ("left.mp4", "40", "00:00:01.333", "1", "Point", "0", "100.0", "50.0", "0.0", "0.0", "5.0", "0.0", "0.5", "1.0", "2.0")
+    log_text = header_line + "\n" + "\t".join(recorded_row)
+
+    err = project_io.save_project(
+        project_path,
+        left_video_path=LEFT_VIDEO,
+        right_video_path=RIGHT_VIDEO,
+        calibration_folder=APRIL_CALIBRATION_DIR,
+        lock_offset_frames=3,
+        view_rectified=False,
+        app_version="0.1.0",
+        measurement_log_text=log_text,
+        last_recorded_snapshot=snapshot,
+    )
+    assert err is None
+
+    monkeypatch.setattr(
+        "main.filedialog.askopenfilename", lambda **_kwargs: project_path
+    )
+
+    app.on_open_project()
+
+    assert int(app.left_frame_index.get()) == 40
+    assert int(app.right_frame_index.get()) == 43
+    assert int(app.left_slider.get()) == 40
+    assert int(app.right_slider.get()) == 43
+    assert app.ptsL == [(100.0, 50.0)]
+    assert app.ptsR == [(95.0, 50.0)]
+    assert app.measurement_window.get_log_text() == log_text
+    # A later Record click should continue numbering after the restored log's
+    # highest measurement ID (1here), not restart at 1 and collide with it.
+    assert app.measurement_window._next_measurement_id == 2
 
 
 def test_offset_changed_updates_lock_offset_frames_without_video(sizeamatic_app):
@@ -191,6 +273,52 @@ def test_playback_advances_forward_with_nonzero_lock_offset(sizeamatic_app):
     if app.play_after_id is not None:
         app.root.after_cancel(app.play_after_id)
         app.play_after_id = None
+
+
+def test_measurement_chain_produces_point_segment_and_total_rows(
+    sizeamatic_app, synthetic_cal, known_chain_pixels
+):
+    """A 3-point connected chain should produce 3 "Point" rows, 2
+    "Segment" rows, and one "Total" row summing the chain's segment
+    lengths — each row carrying the same video/frame/timestamp context.
+
+    Regression/feature test for ROADMAP.md Phase 7's measurement output
+    item: this is the first test to exercise more than 2 points through
+    `_update_measurement_status_stub` at all (the point cap made it
+    impossible before), and the first to check the Total row exists and
+    is correct, since summing connected segments is new.
+    """
+
+    app = sizeamatic_app
+    app.view_rectified.set(True)
+    app.cal = dict(synthetic_cal)
+
+    points = known_chain_pixels["points"]
+    app.ptsL = [(p["xL"], p["yL"]) for p in points]
+    app.ptsR = [(p["xR"], p["yR"]) for p in points]
+
+    app.left_video_path = "some/path/lefty_test.mp4"
+    app.metaL = {"fps": 25.0}
+    app.left_frame_index.set(125)  # 125 / 25fps = exactly 5.0s
+
+    app._update_measurement_status_stub()
+
+    rows = app.measurement_window._last_rows
+    types = [row[4] for row in rows]
+    assert types == ["Point", "Point", "Point", "Segment", "Segment", "Total"]
+
+    # Every row shares the same video/frame/timestamp context (columns 0-2),
+    # and carries no measurement ID yet (column 3) - that's only stamped in
+    # once actually Recorded, not for the live/current display.
+    for row in rows:
+        assert row[0] == "lefty_test.mp4"
+        assert row[1] == "125"
+        assert row[2] == "00:00:05.000"
+        assert row[3] == ""
+
+    total_row = rows[-1]
+    assert total_row[5] == ""  # no label on the Total row
+    assert float(total_row[9]) == pytest.approx(known_chain_pixels["total_length_mm"], abs=0.05)
 
 
 def test_middle_drag_pans_without_redecoding(sizeamatic_app):
