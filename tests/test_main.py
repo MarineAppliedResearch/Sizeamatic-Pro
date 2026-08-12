@@ -2,6 +2,7 @@
 verify against the real GUI than through a FakeApp stand-in.
 """
 
+import datetime
 import os
 
 import cv2
@@ -35,7 +36,7 @@ def test_save_project_writes_current_app_state(sizeamatic_app, monkeypatch, tmp_
     app.ptsL = [(1.0, 2.0)]
     app.ptsR = [(3.0, 4.0)]
 
-    fake_row = ("left.mp4", "7", "00:00:00.233", "", "Point", "0", "1.0", "2.0", "3.0", "4.0", "5.0", "6.0", "7.0", "8.0", "9.0")
+    fake_row = ("left.mp4", "7", "00:00:00.233", "", "", "Point", "0", "1.0", "2.0", "3.0", "4.0", "5.0", "6.0", "7.0", "8.0", "9.0")
     app.measurement_window.update_window([fake_row], None)
     app.measurement_window.record_current_measurement()
 
@@ -85,6 +86,8 @@ def test_open_project_restores_video_calibration_and_offset(
         app_version="0.1.0",
         measurement_log_text="",
         last_recorded_snapshot=None,
+        real_time_anchor_frame=None,
+        real_time_anchor_iso=None,
     )
     assert err is None
 
@@ -129,7 +132,7 @@ def test_open_project_restores_last_recorded_frame_points_and_log(
         "ptsR": [[95.0, 50.0]],
     }
     header_line = "\t".join(measurement_window.RESULT_HEADERS[c] for c in measurement_window.RESULT_COLUMNS)
-    recorded_row = ("left.mp4", "40", "00:00:01.333", "1", "Point", "0", "100.0", "50.0", "0.0", "0.0", "5.0", "0.0", "0.5", "1.0", "2.0")
+    recorded_row = ("left.mp4", "40", "00:00:01.333", "2026-08-12 14:32:05.000", "1", "Point", "0", "100.0", "50.0", "0.0", "0.0", "5.0", "0.0", "0.5", "1.0", "2.0")
     log_text = header_line + "\n" + "\t".join(recorded_row)
 
     err = project_io.save_project(
@@ -142,6 +145,8 @@ def test_open_project_restores_last_recorded_frame_points_and_log(
         app_version="0.1.0",
         measurement_log_text=log_text,
         last_recorded_snapshot=snapshot,
+        real_time_anchor_frame=40,
+        real_time_anchor_iso="2026-08-12T14:32:05",
     )
     assert err is None
 
@@ -161,6 +166,129 @@ def test_open_project_restores_last_recorded_frame_points_and_log(
     # A later Record click should continue numbering after the restored log's
     # highest measurement ID (1here), not restart at 1 and collide with it.
     assert app.measurement_window._next_measurement_id == 2
+    # The real-time anchor should also be restored, and the shared readout
+    # should reflect it immediately (frame 40 == the anchor frame itself, so
+    # actual time should equal the anchor exactly, no elapsed-time math).
+    assert app.real_time_anchor_frame == 40
+    assert app.real_time_anchor_dt == datetime.datetime(2026, 8, 12, 14, 32, 5)
+    assert "2026-08-12 14:32:05" in app.time_readout_label.cget("text")
+    # The anchor Spinboxes should also reflect the restored anchor, not
+    # whatever they defaulted to at app startup.
+    assert int(app.real_time_year_var.get()) == 2026
+    assert int(app.real_time_month_var.get()) == 8
+    assert int(app.real_time_day_var.get()) == 12
+    assert int(app.real_time_hour_var.get()) == 14
+    assert int(app.real_time_minute_var.get()) == 32
+    assert int(app.real_time_second_var.get()) == 5
+
+
+def _set_real_time_spinboxes(app, dt):
+    """Set the six real-time anchor Spinboxes to match a datetime.
+
+    Args:
+        app (main.SizeamaticProApp): The app under test.
+        dt (datetime.datetime): The date/time to dial the Spinboxes to.
+
+    Returns:
+        None
+    """
+    app.real_time_year_var.set(dt.year)
+    app.real_time_month_var.set(dt.month)
+    app.real_time_day_var.set(dt.day)
+    app.real_time_hour_var.set(dt.hour)
+    app.real_time_minute_var.set(dt.minute)
+    app.real_time_second_var.set(dt.second)
+
+
+def test_format_actual_time_returns_not_set_without_anchor(sizeamatic_app):
+    """With no real-time anchor set yet, the calculated actual time
+    should read as "(not set)" rather than raising or showing a bogus
+    value."""
+
+    app = sizeamatic_app
+    assert app._format_actual_time(0) == "(not set)"
+
+
+def test_on_real_time_entered_requires_video_loaded(sizeamatic_app):
+    """Typing a valid date+time before any video is loaded should be
+    rejected with a status message, not crash trying to read fps off a
+    None metaL."""
+
+    app = sizeamatic_app
+    _set_real_time_spinboxes(app, datetime.datetime(2026, 8, 12, 14, 32, 5))
+
+    app.on_real_time_entered()
+
+    assert app.real_time_anchor_frame is None
+    assert app.real_time_anchor_dt is None
+
+
+def test_on_real_time_entered_rejects_invalid_date(sizeamatic_app, monkeypatch):
+    """A day/month combination that doesn't form a real date (e.g. day 31
+    in a 30-day month) should show an error dialog and leave any existing
+    anchor untouched, not raise."""
+
+    app = sizeamatic_app
+    errors = []
+    monkeypatch.setattr(
+        "main.messagebox.showerror", lambda title, msg: errors.append((title, msg))
+    )
+
+    app.real_time_year_var.set(2026)
+    app.real_time_month_var.set(4)  # April has 30 days
+    app.real_time_day_var.set(31)
+    app.real_time_hour_var.set(0)
+    app.real_time_minute_var.set(0)
+    app.real_time_second_var.set(0)
+    app.on_real_time_entered()
+
+    assert len(errors) == 1
+    assert app.real_time_anchor_frame is None
+    assert app.real_time_anchor_dt is None
+
+
+def test_on_real_time_entered_sets_anchor_and_updates_readout(sizeamatic_app):
+    """Setting the anchor Spinboxes with a video loaded should anchor to
+    the current left frame and immediately refresh the shared readout."""
+
+    app = sizeamatic_app
+    app.metaL = {"width": 640, "height": 480, "fps": 25.0, "frame_count": 100}
+    app.left_frame_index.set(10)
+
+    _set_real_time_spinboxes(app, datetime.datetime(2026, 8, 12, 14, 32, 5))
+    app.on_real_time_entered()
+
+    assert app.real_time_anchor_frame == 10
+    assert app.real_time_anchor_dt == datetime.datetime(2026, 8, 12, 14, 32, 5)
+
+    readout = app.time_readout_label.cget("text")
+    assert "Frame: 10" in readout
+    assert "2026-08-12 14:32:05" in readout
+
+
+def test_format_actual_time_calculates_forward_and_backward_from_anchor(sizeamatic_app):
+    """Once anchored, the actual time at other frames should be
+    calculated correctly both forward and backward from the anchor
+    frame, using the left video's fps."""
+
+    app = sizeamatic_app
+    app.metaL = {"width": 640, "height": 480, "fps": 25.0, "frame_count": 100}
+    app.left_frame_index.set(10)
+    _set_real_time_spinboxes(app, datetime.datetime(2026, 8, 12, 14, 32, 5))
+    app.on_real_time_entered()
+
+    # 25 frames forward at 25fps = exactly 1.0 second (25 whole frames) later,
+    # landing back on frame-in-second 0.
+    assert app._format_actual_time(10 + 25) == "2026-08-12 14:32:06:00"
+    # 25 frames backward = exactly 1.0 second earlier, also frame-in-second 0.
+    assert app._format_actual_time(10 - 25) == "2026-08-12 14:32:04:00"
+    # Exactly at the anchor frame itself.
+    assert app._format_actual_time(10) == "2026-08-12 14:32:05:00"
+    # A partial second forward: 3 frames in, not a fraction of a second.
+    assert app._format_actual_time(10 + 3) == "2026-08-12 14:32:05:03"
+    # A partial second backward: 3 frames before the anchor lands on the
+    # *previous* second's frame 22 (25 - 3), not frame "-3".
+    assert app._format_actual_time(10 - 3) == "2026-08-12 14:32:04:22"
 
 
 def test_offset_changed_updates_lock_offset_frames_without_video(sizeamatic_app):
@@ -275,6 +403,35 @@ def test_playback_advances_forward_with_nonzero_lock_offset(sizeamatic_app):
         app.play_after_id = None
 
 
+def test_measurement_rows_include_actual_time_once_anchored(
+    sizeamatic_app, synthetic_cal, known_point_pixels
+):
+    """Once a real-time anchor is set, every measurement row should carry
+    the calculated actual time in its own column - not just the elapsed
+    "video time" - so a recorded measurement still means something once
+    it's sitting in a spreadsheet, per the project owner's request."""
+
+    app = sizeamatic_app
+    app.view_rectified.set(True)
+    app.cal = dict(synthetic_cal)
+    app.ptsL = [(known_point_pixels["xL"], known_point_pixels["yL"])]
+    app.ptsR = [(known_point_pixels["xR"], known_point_pixels["yR"])]
+
+    app.left_video_path = "some/path/lefty_test.mp4"
+    app.metaL = {"fps": 25.0}
+    app.left_frame_index.set(10)
+    _set_real_time_spinboxes(app, datetime.datetime(2026, 8, 12, 14, 32, 5))
+    app.on_real_time_entered()
+
+    # Move forward exactly 1 second (25 frames at 25fps) from the anchor.
+    app.left_frame_index.set(35)
+    app._update_measurement_status_stub()
+
+    rows = app.measurement_window._last_rows
+    assert len(rows) == 1
+    assert rows[0][3] == "2026-08-12 14:32:06:00"
+
+
 def test_measurement_chain_produces_point_segment_and_total_rows(
     sizeamatic_app, synthetic_cal, known_chain_pixels
 ):
@@ -304,21 +461,23 @@ def test_measurement_chain_produces_point_segment_and_total_rows(
     app._update_measurement_status_stub()
 
     rows = app.measurement_window._last_rows
-    types = [row[4] for row in rows]
+    types = [row[5] for row in rows]
     assert types == ["Point", "Point", "Point", "Segment", "Segment", "Total"]
 
     # Every row shares the same video/frame/timestamp context (columns 0-2),
-    # and carries no measurement ID yet (column 3) - that's only stamped in
-    # once actually Recorded, not for the live/current display.
+    # carries no actual time (column 3, no real-time anchor set in this
+    # test), and carries no measurement ID yet (column 4) - that's only
+    # stamped in once actually Recorded, not for the live/current display.
     for row in rows:
         assert row[0] == "lefty_test.mp4"
         assert row[1] == "125"
-        assert row[2] == "00:00:05.000"
+        assert row[2] == "00:00:05:00"
         assert row[3] == ""
+        assert row[4] == ""
 
     total_row = rows[-1]
-    assert total_row[5] == ""  # no label on the Total row
-    assert float(total_row[9]) == pytest.approx(known_chain_pixels["total_length_mm"], abs=0.05)
+    assert total_row[6] == ""  # no label on the Total row
+    assert float(total_row[10]) == pytest.approx(known_chain_pixels["total_length_mm"], abs=0.05)
 
 
 def test_middle_drag_pans_without_redecoding(sizeamatic_app):

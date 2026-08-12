@@ -12,6 +12,7 @@ See `ARCHITECTURE.md` for how responsibilities are currently split across
 files, and `README.md` for the user-facing description of the app.
 """
 
+import datetime # Used for the real-world time anchor/sync feature.
 import os
 import sys # Used for icon resources
 import tomllib # Reads pyproject.toml's version for the project file's app_version field.
@@ -135,6 +136,63 @@ class SizeamaticProApp:
         `on_offset_changed` updates `self.lock_offset_frames` when the
         user edits it directly."""
 
+        # Real-world time anchor entry: six separate plain text boxes (year,
+        # month, day, hour, minute, second) rather than one free-text field to
+        # parse, or spinners — the project owner specifically didn't want
+        # either. Start empty, not pre-filled with "now": the six boxes exist
+        # to be typed into, matching whatever's burned into the video, not
+        # edited from a default that has nothing to do with the footage.
+        # Declared here for the same before-`_build_toolbar()` reason as
+        # `self.offset_var` above.
+        self.real_time_year_var = tk.StringVar(value="")
+        """Tk-bound year text box for the real-time anchor entry. Starts
+        empty; only read (and validated) when "Set Time Sync" is pressed."""
+
+        self.real_time_month_var = tk.StringVar(value="")
+        """Tk-bound month text box (expected 1-12) for the real-time anchor entry."""
+
+        self.real_time_day_var = tk.StringVar(value="")
+        """Tk-bound day-of-month text box for the real-time anchor entry.
+        Not validated against the specific month/year as you type —
+        `on_real_time_entered` catches the `ValueError` from constructing
+        the actual `datetime.datetime` (e.g. day 31 in a 30-day month) and
+        reports it rather than crashing."""
+
+        self.real_time_hour_var = tk.StringVar(value="")
+        """Tk-bound hour text box (expected 0-23) for the real-time anchor entry."""
+
+        self.real_time_minute_var = tk.StringVar(value="")
+        """Tk-bound minute text box (expected 0-59) for the real-time anchor entry."""
+
+        self.real_time_second_var = tk.StringVar(value="")
+        """Tk-bound second text box (expected 0-59) for the real-time
+        anchor entry. Together with the five boxes above, read by
+        "Set Time Sync" (`on_real_time_entered`) to build the anchor
+        `datetime.datetime` — see `self.real_time_anchor_dt` below."""
+
+        self.real_time_anchor_frame = None
+        """The left-timeline frame index the user was on when they last
+        set the real-world time anchor (`on_real_time_entered`), or None
+        if no anchor has been set. One shared anchor referenced to the
+        left/master timeline — consistent with how measurements already
+        treat left as the reference (see `_current_measurement_context`)
+        — not a separate anchor per pane. Declared here (rather than with
+        the rest of the measurement-point state below) because
+        `_update_frame_labels` — which reads it via `_format_actual_time`
+        — already runs during `__init__` itself (via
+        `_refresh_placeholder_canvases`), before that later, scattered
+        section runs; see FINDINGS.md #6."""
+
+        self.real_time_anchor_dt = None
+        """The `datetime.datetime` the user typed in at
+        `self.real_time_anchor_frame`, read off whatever real-world clock
+        is burned into the video image itself — or None if no anchor has
+        been set. Together with `self.real_time_anchor_frame` and the
+        left video's fps, this is what `_format_actual_time` uses to
+        calculate the real-world time at any other frame: anchor time +
+        (frame - anchor frame) / fps. See ROADMAP.md Phase 8's
+        video-time-sync item."""
+
          # ---- File state ----
         self.left_video_path = None
         """Path to the loaded left video file, or None if not loaded yet."""
@@ -240,7 +298,8 @@ class SizeamaticProApp:
         # Row 0: menu (handled by root.config(menu=...))
         # Row 1: toolbar
         # Row 2: main panes
-        # Row 3: status bar
+        # Row 3: shared Frame/Video Time/Actual Time readout (by the scrub bars)
+        # Row 4: status bar
         self.root.grid_rowconfigure(2, weight=1)
         self.root.grid_columnconfigure(0, weight=1)
 
@@ -775,7 +834,14 @@ class SizeamaticProApp:
         return ix, iy
 
     def _format_timestamp(self, frame_index, fps):
-        """Format a frame index as an HH:MM:SS.mmm timestamp.
+        """Format a frame index as an HH:MM:SS:FF timecode.
+
+        The trailing "FF" is the frame number *within* that second
+        (0-based, wrapping at the video's own fps) — not a fraction of a
+        second — so scrubbing to a specific frame shows exactly which
+        frame that is, the same way professional video timecode does,
+        rather than a decimal fraction that doesn't map onto anything
+        the frame slider actually understands.
 
         Args:
             frame_index (int): Zero-based frame index.
@@ -783,17 +849,181 @@ class SizeamaticProApp:
                 if unknown.
 
         Returns:
-            str: The formatted timestamp, or "?" if `fps` isn't a usable
+            str: The formatted timecode, or "?" if `fps` isn't a usable
             positive number (e.g. no video loaded yet).
         """
         if not fps or fps <= 0:
             return "?"
 
-        total_seconds = float(frame_index) / float(fps)
-        hours = int(total_seconds // 3600)
-        minutes = int((total_seconds % 3600) // 60)
-        seconds = total_seconds % 60
-        return f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
+        # Round fps to the nearest whole number of frames-per-second for the
+        # purposes of bucketing frames into seconds — exact integer
+        # arithmetic on frame_index itself, no floating-point seconds
+        # involved, so there's no rounding drift between this and the
+        # frame slider's own integer frame count.
+        fps_int = max(1, round(float(fps)))
+        frame_index = int(frame_index)
+
+        whole_seconds, frame_in_second = divmod(frame_index, fps_int)
+        hours = whole_seconds // 3600
+        minutes = (whole_seconds % 3600) // 60
+        seconds = whole_seconds % 60
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}:{frame_in_second:02d}"
+
+    def _format_actual_time(self, frame_index):
+        """Calculate and format the real-world time at a given frame.
+
+        Uses the real-world time anchor (`self.real_time_anchor_frame`/
+        `self.real_time_anchor_dt`, set by `on_real_time_entered`) plus
+        the left video's fps to project forward/backward from that one
+        known point, in whole frames rather than fractional seconds — see
+        `_format_timestamp`'s docstring for why. See ROADMAP.md Phase 8's
+        video-time-sync item.
+
+        Args:
+            frame_index (int): The left-timeline frame index to calculate
+                the real-world time for.
+
+        Returns:
+            str: The calculated real-world time as
+            "YYYY-MM-DD HH:MM:SS:FF" (FF = frame number within that
+            second), or "(not set)" if no anchor has been set yet or the
+            left video's fps isn't known.
+        """
+        if self.real_time_anchor_frame is None or self.real_time_anchor_dt is None:
+            return "(not set)"
+
+        fps = self.metaL["fps"] if self.metaL else None
+        if not fps or fps <= 0:
+            return "(not set)"
+
+        fps_int = max(1, round(float(fps)))
+        frame_delta = int(frame_index) - int(self.real_time_anchor_frame)
+
+        # divmod floors toward negative infinity for a positive divisor, so a
+        # negative frame_delta still lands on a frame_in_second in [0, fps_int)
+        # rather than a negative frame count - e.g. one frame before the
+        # anchor is "the second before, frame fps_int - 1", not "-1 frames".
+        whole_seconds_delta, frame_in_second = divmod(frame_delta, fps_int)
+
+        actual_dt = self.real_time_anchor_dt + datetime.timedelta(seconds=whole_seconds_delta)
+        return actual_dt.strftime("%Y-%m-%d %H:%M:%S") + f":{frame_in_second:02d}"
+
+    def _advance_real_time_focus(self, entry, next_entry, max_len):
+        """Move focus to the next real-time-anchor box once this one looks full.
+
+        Purely a typing convenience bound to each box's `<KeyRelease>` —
+        does not validate or apply anything; that only happens when
+        "Set Time Sync" is pressed (`on_real_time_entered`).
+
+        Args:
+            entry (ttk.Entry): The box that was just typed into.
+            next_entry (ttk.Entry | None): The box to focus next, or None
+                if this is the last one (seconds).
+            max_len (int): How many characters this box is expected to
+                hold (e.g. 4 for year, 2 for the rest) before advancing.
+
+        Returns:
+            None
+        """
+        if next_entry is not None and len(entry.get()) >= max_len:
+            next_entry.focus_set()
+            next_entry.select_range(0, "end")
+
+    def on_real_time_entered(self, _evt=None):
+        """Handle the user pressing "Set Time Sync".
+
+        Reads the six year/month/day/hour/minute/second text boxes and,
+        if they form a valid date/time, anchors it to the left
+        timeline's current frame index — from then on,
+        `_format_actual_time` can calculate the real-world time at any
+        other frame. Requires the left video to already be loaded (its
+        fps is needed for that calculation). Nothing is validated or
+        applied by typing alone — only this explicit action does that,
+        deliberately, so a half-typed date never triggers a premature
+        error dialog.
+
+        Args:
+            _evt (tkinter.Event | None): Unused; present only so this can
+                also be bound directly to a widget event if ever needed.
+
+        Returns:
+            None
+        """
+        try:
+            year = int(self.real_time_year_var.get().strip())
+            month = int(self.real_time_month_var.get().strip())
+            day = int(self.real_time_day_var.get().strip())
+            hour = int(self.real_time_hour_var.get().strip())
+            minute = int(self.real_time_minute_var.get().strip())
+            second = int(self.real_time_second_var.get().strip())
+            parsed = datetime.datetime(year, month, day, hour, minute, second)
+        except (ValueError, tk.TclError):
+            # ValueError: a box is empty/non-numeric, or the values parsed as
+            # ints fine but don't form a real date (e.g. day 31 in a 30-day
+            # month). Either way, there's nothing safe to anchor yet.
+            messagebox.showerror(
+                "Real Time",
+                "That's not a valid date/time — check that every box is "
+                "filled in and the day of month is valid.",
+            )
+            return
+
+        if not self.metaL:
+            self._set_status_mid("Load the left video before setting a real-time anchor")
+            return
+
+        self.real_time_anchor_frame = int(self.left_frame_index.get())
+        self.real_time_anchor_dt = parsed
+
+        self._set_status_mid(f"Real time anchored at frame {self.real_time_anchor_frame}")
+        self._show_time_sync_indicator()
+        self._update_frame_labels()
+
+    def _show_time_sync_indicator(self):
+        """Show the checkmark next to "Set Time Sync" confirming an anchor is set.
+
+        Returns:
+            None
+        """
+        self.time_sync_indicator.config(text="✓ Synced")
+
+    def _refresh_real_time_entries(self, frame_index):
+        """Update the six real-time anchor text boxes to the calculated
+        actual time at a given frame.
+
+        A no-op if no anchor is set yet — so the boxes stay exactly as
+        the user is typing them until "Set Time Sync" actually establishes
+        an anchor; once one exists, this keeps the boxes live-tracking the
+        calculated real-world time as the frame changes (scrubbing,
+        playback, stepping), not frozen at the original anchor value.
+        Called from `_update_frame_labels` (every frame change) and from
+        `on_open_project` (right after restoring a saved anchor, with
+        `frame_index` equal to the anchor's own frame, so the boxes show
+        exactly what was saved).
+
+        Args:
+            frame_index (int): The left-timeline frame index to display
+                the calculated actual time for.
+
+        Returns:
+            None
+        """
+        if self.real_time_anchor_frame is None or self.real_time_anchor_dt is None:
+            return
+
+        fps = self.metaL["fps"] if self.metaL else None
+        if not fps or fps <= 0:
+            return
+
+        elapsed_seconds = (float(frame_index) - float(self.real_time_anchor_frame)) / float(fps)
+        current_dt = self.real_time_anchor_dt + datetime.timedelta(seconds=elapsed_seconds)
+
+        self.real_time_year_var.set(f"{current_dt.year:04d}")
+        self.real_time_month_var.set(f"{current_dt.month:02d}")
+        self.real_time_day_var.set(f"{current_dt.day:02d}")
+        self.real_time_hour_var.set(f"{current_dt.hour:02d}")
+        self.real_time_minute_var.set(f"{current_dt.minute:02d}")
+        self.real_time_second_var.set(f"{current_dt.second:02d}")
 
     def _current_measurement_context(self):
         """Build the video/frame/timestamp identifying info for the current measurement.
@@ -806,8 +1036,11 @@ class SizeamaticProApp:
         `README.md`'s "Measurement notes").
 
         Returns:
-            dict: Keys "video_name" (str), "frame_index" (int), and
-            "timestamp" (str).
+            dict: Keys "video_name" (str), "frame_index" (int),
+            "timestamp" (str, elapsed video time since frame 0), and
+            "actual_time" (str, the calculated real-world time if a
+            real-time anchor is set — see ROADMAP.md Phase 8's
+            video-time-sync item — or "" if not).
         """
         if self.left_video_path:
             video_name = os.path.basename(self.left_video_path)
@@ -817,10 +1050,17 @@ class SizeamaticProApp:
         frame_index = int(self.left_frame_index.get())
         fps = self.metaL["fps"] if self.metaL else None
 
+        actual_time = self._format_actual_time(frame_index)
+        if actual_time == "(not set)":
+            # A spreadsheet column should be empty when there's nothing to
+            # show, not carry a placeholder string as if it were real data.
+            actual_time = ""
+
         return {
             "video_name": video_name,
             "frame_index": frame_index,
             "timestamp": self._format_timestamp(frame_index, fps),
+            "actual_time": actual_time,
         }
 
     def _update_measurement_status_stub(self):
@@ -893,6 +1133,7 @@ class SizeamaticProApp:
         video_col = ctx["video_name"]
         frame_col = str(ctx["frame_index"])
         time_col = ctx["timestamp"]
+        actual_time_col = ctx["actual_time"]
 
         rows = []
         sigma_px = float(self.click_sigma_px)
@@ -926,7 +1167,7 @@ class SizeamaticProApp:
             dy = yR - yL
 
             rows.append((
-                video_col, frame_col, time_col, "",
+                video_col, frame_col, time_col, actual_time_col, "",
                 "Point", str(i),
                 f"{X:.1f}", f"{Y:.1f}", f"{Z:.1f}", f"{R:.1f}",
                 f"{disp:.2f}", f"{dy:.2f}", erms_str, sZ_str, sR_str,
@@ -963,7 +1204,7 @@ class SizeamaticProApp:
                     total_var_mm2 += sL * sL
 
                 rows.append((
-                    video_col, frame_col, time_col, "",
+                    video_col, frame_col, time_col, actual_time_col, "",
                     "Segment", f"{i-1}-{i}",
                     f"{dX:.1f}", f"{dY:.1f}", f"{dZ:.1f}", f"{L:.1f}",
                     "", "", "", sL_str, "",
@@ -975,7 +1216,7 @@ class SizeamaticProApp:
             # adds in quadrature: sigma_total = sqrt(sum(sigma_i^2)).
             total_sigma_str = f"{total_var_mm2 ** 0.5:.1f}" if have_total_sigma else ""
             rows.append((
-                video_col, frame_col, time_col, "",
+                video_col, frame_col, time_col, actual_time_col, "",
                 "Total", "",
                 "", "", "", f"{total_len_mm:.1f}",
                 "", "", "", total_sigma_str, "",
@@ -1148,6 +1389,76 @@ class SizeamaticProApp:
             command=self.on_clear_points,
         )
         self.btn_clear_points.grid(row=0, column=10, padx=(0, 12))
+
+        # ---- Real-world time anchor ----
+        # Type in a date+time matching whatever real-world clock is burned
+        # into the video image at the current frame, so the app can
+        # calculate real-world time at any other frame too (ROADMAP.md
+        # Phase 8's video-time-sync item). Six separate plain text boxes,
+        # each labeled below it, not spinners and not pre-filled with
+        # "now" — deliberate, per the project owner. Nothing here is
+        # validated/applied until "Set Time Sync" is pressed; typing alone
+        # only moves focus to the next box once a box looks full.
+        real_time_frame = ttk.Frame(self.toolbar)
+        real_time_frame.grid(row=0, column=11, padx=(0, 12))
+
+        real_time_box_specs = [
+            (self.real_time_year_var, 4, "YYYY"),
+            (self.real_time_month_var, 2, "MM"),
+            (self.real_time_day_var, 2, "DD"),
+            (self.real_time_hour_var, 2, "HH"),
+            (self.real_time_minute_var, 2, "MM"),
+            (self.real_time_second_var, 2, "SS"),
+        ]
+        # Separator text drawn between consecutive boxes (index i sits between
+        # box i and box i+1) — one shorter than the number of boxes.
+        real_time_separators = ["-", "-", "  ", ":", ":"]
+
+        self.real_time_entries = []
+        """The six real-time-anchor Entry widgets (year/month/day/hour/
+        minute/second, in that order) — kept so each box's `<KeyRelease>`
+        auto-advance handler can focus the *next* one, and so tests can
+        drive them uniformly without naming each one."""
+
+        col = 0
+        for i, (var, max_len, label_text) in enumerate(real_time_box_specs):
+            entry = ttk.Entry(real_time_frame, textvariable=var, width=max_len + 1)
+            entry.grid(row=0, column=col, padx=(0, 1))
+            ttk.Label(real_time_frame, text=label_text).grid(row=1, column=col)
+            self.real_time_entries.append(entry)
+            col += 1
+
+            if i < len(real_time_separators):
+                ttk.Label(real_time_frame, text=real_time_separators[i]).grid(row=0, column=col)
+                col += 1
+
+        # Auto-advance to the next box once this one looks full - purely a
+        # focus convenience, not validation (nothing is checked/applied here).
+        for i, entry in enumerate(self.real_time_entries):
+            max_len = real_time_box_specs[i][1]
+            next_entry = self.real_time_entries[i + 1] if i + 1 < len(self.real_time_entries) else None
+            entry.bind(
+                "<KeyRelease>",
+                lambda _evt, e=entry, n=next_entry, m=max_len: self._advance_real_time_focus(e, n, m),
+            )
+
+        self.btn_set_time_sync = ttk.Button(
+            real_time_frame,
+            text="Set Time Sync",
+            command=self.on_real_time_entered,
+        )
+        self.btn_set_time_sync.grid(row=0, column=col, rowspan=2, padx=(6, 2))
+        col += 1
+
+        # Synced indicator: a checkmark next to the button rather than trying to
+        # recolor the button itself, since ttk buttons don't reliably support
+        # custom background colors under Windows themes. Shown by
+        # _show_time_sync_indicator once an anchor is actually set; empty
+        # (invisible) until then.
+        self.time_sync_indicator = ttk.Label(
+            real_time_frame, text="", foreground="#008000", font=("Segoe UI", 12, "bold")
+        )
+        self.time_sync_indicator.grid(row=0, column=col, rowspan=2, padx=(2, 0))
 
         # ---- Spacer (keeps toolbar left packed, leaves room to add more) ----
         ttk.Frame(self.toolbar).grid(row=0, column=20, sticky="ew")
@@ -1328,8 +1639,11 @@ class SizeamaticProApp:
         # Create overlay canvases for point drawing and point interaction.
         self.video_overlay.create_canvases()
 
-
-
+        # ---- Shared Frame/Video Time/Actual Time readout ----
+        # By the scrub bars (right below both panes), not up in the toolbar -
+        # one shared readout since it's a single anchor, not duplicated per pane.
+        self.time_readout_label = ttk.Label(self.root, text="", anchor="center")
+        self.time_readout_label.grid(row=3, column=0, sticky="ew", pady=(2, 0))
 
     # -------------------------------------------------------------------------
     # Status bar
@@ -1342,7 +1656,7 @@ class SizeamaticProApp:
             None
         """
         self.status = ttk.Frame(self.root, padding=(8, 6))
-        self.status.grid(row=3, column=0, sticky="ew")
+        self.status.grid(row=4, column=0, sticky="ew")
         self.status.grid_columnconfigure(1, weight=1)
 
         # Left: file/cal/view state.
@@ -1640,6 +1954,8 @@ class SizeamaticProApp:
         if not path:
             return
 
+        anchor_iso = self.real_time_anchor_dt.isoformat() if self.real_time_anchor_dt else None
+
         err = project_io.save_project(
             path,
             self.left_video_path,
@@ -1650,6 +1966,8 @@ class SizeamaticProApp:
             self._get_app_version(),
             self.measurement_window.get_log_text(),
             self.last_recorded_snapshot,
+            self.real_time_anchor_frame,
+            anchor_iso,
         )
 
         if err is not None:
@@ -1708,6 +2026,16 @@ class SizeamaticProApp:
         # Restore the Measurement window's full recorded history.
         self.measurement_window.restore_log_text(project["measurement_log_text"])
 
+        # Restore the real-world time anchor, if one was set - before
+        # _update_frame_labels() below, which refreshes both the shared
+        # readout and (now that an anchor exists again) the six entry
+        # boxes themselves, live-tracking whatever frame we end up on.
+        self.real_time_anchor_frame = project["real_time_anchor_frame"]
+        anchor_iso = project["real_time_anchor_iso"]
+        self.real_time_anchor_dt = datetime.datetime.fromisoformat(anchor_iso) if anchor_iso else None
+        if self.real_time_anchor_dt is not None:
+            self._show_time_sync_indicator()
+
         # Jump back to "the very last place that was recorded" and show that
         # same measurement on screen again - last, since it depends on the
         # video/calibration/offset state above already being in place.
@@ -1731,9 +2059,13 @@ class SizeamaticProApp:
             self.ptsL = [tuple(p) for p in snapshot["ptsL"]]
             self.ptsR = [tuple(p) for p in snapshot["ptsR"]]
 
-            self._update_frame_labels()
             self._render_current_frames()
             self._update_measurement_status_stub()
+
+        # Refresh the frame/video-time/actual-time readout regardless of
+        # whether a snapshot was restored above, since the real-time anchor
+        # (restored either way) affects it too.
+        self._update_frame_labels()
 
         self._set_status_mid("Project loaded")
         self._refresh_status_left()
@@ -2356,7 +2688,9 @@ class SizeamaticProApp:
         self.status_right.config(text=text)
 
     def _update_frame_labels(self):
-        """Refresh the "Frame: i/max" labels under both sliders.
+        """Refresh the "Frame: i/max" labels under both sliders, the
+        shared Frame/Video Time/Actual Time readout, and (if an anchor is
+        set) the six real-time entry boxes themselves.
 
         Returns:
             None
@@ -2371,6 +2705,19 @@ class SizeamaticProApp:
 
         self.left_frame_label.config(text=f"Frame: {li}/{lmax}")
         self.right_frame_label.config(text=f"Frame: {ri}/{rmax}")
+
+        # The shared readout is referenced to the left/master timeline, same as
+        # the real-world time anchor itself.
+        video_time = self._format_timestamp(li, self.metaL["fps"] if self.metaL else None)
+        actual_time = self._format_actual_time(li)
+        self.time_readout_label.config(
+            text=f"Frame: {li}/{lmax} | Video: {video_time} | Actual: {actual_time}"
+        )
+
+        # Keep the entry boxes live-tracking the current frame's actual time,
+        # once an anchor exists (a no-op before that, so typing a fresh anchor
+        # isn't clobbered by this running on every frame change).
+        self._refresh_real_time_entries(li)
 
     def _refresh_placeholder_canvases(self):
         """Draw placeholder graphics, or render real frames if videos are loaded.

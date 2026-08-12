@@ -27,6 +27,8 @@ def test_save_then_load_project_round_trips(tmp_path):
         app_version="0.1.0",
         measurement_log_text="Video\tFrame\n...",
         last_recorded_snapshot=snapshot,
+        real_time_anchor_frame=42,
+        real_time_anchor_iso="2026-08-12T14:32:05",
     )
     assert err is None
 
@@ -40,6 +42,8 @@ def test_save_then_load_project_round_trips(tmp_path):
     assert project["app_version"] == "0.1.0"
     assert project["measurement_log_text"] == "Video\tFrame\n..."
     assert project["last_recorded_snapshot"] == snapshot
+    assert project["real_time_anchor_frame"] == 42
+    assert project["real_time_anchor_iso"] == "2026-08-12T14:32:05"
 
 
 def test_save_project_allows_none_fields(tmp_path):
@@ -58,6 +62,8 @@ def test_save_project_allows_none_fields(tmp_path):
         app_version="0.1.0",
         measurement_log_text="",
         last_recorded_snapshot=None,
+        real_time_anchor_frame=None,
+        real_time_anchor_iso=None,
     )
     assert err is None
 
@@ -65,6 +71,8 @@ def test_save_project_allows_none_fields(tmp_path):
     assert load_err is None
     assert project["left_video_path"] is None
     assert project["calibration_folder"] is None
+    assert project["real_time_anchor_frame"] is None
+    assert project["real_time_anchor_iso"] is None
 
 
 def test_load_project_rejects_invalid_json(tmp_path):
@@ -93,6 +101,8 @@ def test_load_project_rejects_missing_fields(tmp_path):
     assert "app_version" in err
     assert "measurement_log_text" in err
     assert "last_recorded_snapshot" in err
+    assert "real_time_anchor_frame" in err
+    assert "real_time_anchor_iso" in err
 
 
 def test_load_project_reports_missing_file():

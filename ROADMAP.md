@@ -378,18 +378,61 @@ project owner rather than via a fresh quiz (see Phase 7 for that pattern).
       fixed-screen-size behavior) exactly at each point's center, on top
       of the existing hollow green ring. Purely visual — not tagged
       `"handle"`, so it doesn't change click hit-testing.
-- [ ] Video-time sync — let the user type in the real-world timestamp
-      shown burned into the video image itself (e.g. a camera's on-screen
-      clock overlay) at whatever frame they're currently on. The app
-      computes an offset from that one anchor (frame index -> real-world
-      time) and, from then on, shows the calculated real-world time while
-      scrubbing, so the user can jump straight to a moment they already
-      know about (e.g. from a field log) instead of hunting for it
-      visually. This offset needs to be saved in the project file
-      (`project_io.py`) and restored when the video/project reloads —
-      same pattern as the Phase 7 resync offset. Detailed design
-      (anchor UI, per-pane vs. shared, exact restore behavior) still to
-      come before implementation starts.
+- [x] Video-time sync — let the user set the real-world timestamp shown
+      burned into the video image itself (e.g. a camera's on-screen clock
+      overlay) at whatever frame they're currently on. One shared anchor
+      (`self.real_time_anchor_frame`/`self.real_time_anchor_dt`)
+      referenced to the left/master timeline — not per-pane, consistent
+      with measurements already treating left as the reference. Entered
+      via six plain `ttk.Entry` boxes (year/month/day/hour/minute/second,
+      each with a label underneath) near "Clear Points" — went through
+      two rejected designs first (a single free-text date string, then
+      pre-filled `ttk.Spinbox`es that auto-applied on every change) before
+      landing here: the project owner wanted empty boxes you type into,
+      with auto-advance-to-next-box on `<KeyRelease>`
+      (`_advance_real_time_focus`) and validation happening only once,
+      on an explicit "Set Time Sync" button (`on_real_time_entered`) —
+      the Spinbox version's eager FocusOut validation was firing against
+      leftover pre-filled values and throwing spurious "not a valid
+      date/time" errors. A green "✓ Synced" label
+      (`_show_time_sync_indicator`) appears next to the button once set
+      (a ttk button's own background color isn't reliably themeable on
+      Windows, hence the separate label). The six boxes keep live-tracking
+      the calculated time as playback moves (`_refresh_real_time_entries`,
+      called from `_update_frame_labels`), not just showing the anchor.
+      A shared readout row spanning both panes, directly below the scrub
+      bars (`self.time_readout_label`, grid row 3 — moved out from beside
+      the Set Time Sync button per the project owner's request) shows
+      Frame i/max, Video Time, and calculated Actual Time together rather
+      than duplicated per pane. Both `_format_timestamp` and
+      `_format_actual_time` render the sub-second part as an
+      `HH:MM:SS:FF` frame-in-second count (`divmod(frame_index, fps)`),
+      not a fractional-seconds decimal — the project owner wanted "the
+      actual frame number in this particular second, not a percentage."
+      `_format_actual_time` projects the anchor forward/backward using
+      the left video's fps: actual time = anchor time + whole seconds of
+      (frame − anchor frame) / fps, with the remaining frames as the
+      `:FF` suffix. The anchor is saved in the project file
+      (`project_io.py`'s `real_time_anchor_frame`/`real_time_anchor_iso`)
+      and restored on reopen — including refreshing the six entry boxes
+      to match — before `_update_frame_labels` runs so the readout
+      reflects it immediately, same pattern as the Phase 7 resync offset.
+      Ran into the FINDINGS.md #6 attribute-ordering pitfall twice
+      (`_update_frame_labels` already runs once during `__init__` itself,
+      before the app's later, scattered-init state is set) — first for
+      the entry StringVars, then again for the anchor frame/datetime
+      attributes themselves. Recorded measurements now also carry an
+      `actual_time` column (empty until an anchor is set), added to
+      `measurement_window.py`'s `RESULT_COLUMNS`.
+- [ ] Rectified/not-rectified indicator — measurements and clicked
+      points are only meaningful in rectified view, but nothing currently
+      makes raw (unrectified) view visually distinct. Add a status label
+      that reads "NOT RECTIFIED" in red when `view_rectified` is off and
+      "RECTIFIED" in green when it's on, and use a different color scheme
+      for the point/measurement overlays themselves while not rectified
+      (currently the same green ring/line/dot regardless), so it's
+      obvious at a glance that whatever's on screen isn't a real
+      measurement yet.
 
 ## Phase 9 — Packaging and distribution `[ ]`
 
