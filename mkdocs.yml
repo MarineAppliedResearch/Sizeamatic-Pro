@@ -13,6 +13,7 @@ watch:
   - calibration_summary.py
   - calibration_io.py
   - project_io.py
+  - recent_projects.py
   - anaglyph_preview.py
   - video_overlay.py
   - generate_calibration_report.py
@@ -30,6 +31,7 @@ nav:
       - calibration_summary.py: reference/calibration_summary.md
       - calibration_io.py: reference/calibration_io.md
       - project_io.py: reference/project_io.md
+      - recent_projects.py: reference/recent_projects.md
       - anaglyph_preview.py: reference/anaglyph_preview.md
       - video_overlay.py: reference/video_overlay.md
       - generate_calibration_report.py: reference/generate_calibration_report.md

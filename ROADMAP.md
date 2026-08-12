@@ -367,10 +367,13 @@ A second usability round (Phase 8) and a packaging/distribution phase
       been added to `mkdocs.yml`'s nav back in Phase 5, so it was never
       actually documented on the site despite being pure, tested code.
 
-## Phase 8 — Usability, round 2 (issue #9) `[~]`
+## Phase 8 — Usability, round 2 (issue #9) `[x]`
 
 A second round of usability items — this time specified directly by the
 project owner rather than via a fresh quiz (see Phase 7 for that pattern).
+Recent Projects was added mid-phase, after the other three items were
+already done and confirmed — not part of the original plan, but small
+enough to fold in rather than spin off its own phase.
 
 - [x] Point visibility — `video_overlay.py`'s `draw_pane` now draws a
       small solid red dot (`CENTER_DOT_RADIUS_PX`, 2px screen radius,
@@ -439,6 +442,27 @@ project owner rather than via a fresh quiz (see Phase 7 for that pattern).
       small red center dot from the point-visibility item above
       deliberately stays red in both modes, since it marks the exact
       clicked pixel — a concern unrelated to rectification state.
+- [x] Recent Projects — a File > Recent Projects submenu lists the last
+      `MAX_RECENT_PROJECTS` (5) project files saved or opened, so
+      reopening one doesn't need a file dialog every time. Backed by a
+      new small module, `recent_projects.py`, deliberately separate from
+      `project_io.py` (which reads/writes one project's own content) —
+      this one just persists a tiny cross-session list of *paths to*
+      project files. Stored under `%APPDATA%\SizeamaticPro\
+      recent_projects.json`, not next to the app itself, so it survives
+      the app folder being replaced/updated and works the same whether
+      running from source or (once Phase 9 packages it) a standalone
+      .exe. The submenu is rebuilt fresh every time it's about to open
+      (`self.recent_projects_menu`'s `postcommand`, wired to
+      `_refresh_recent_projects_menu`) rather than once at startup, so a
+      project that's since been moved/renamed/deleted just quietly
+      drops off the list (`load_recent_projects` filters via
+      `os.path.isfile`) instead of showing an entry that would only
+      error if clicked. `on_save_project`/`on_open_project` both call
+      `add_recent_project` on success; `on_open_project`'s actual load/
+      restore logic was pulled out into `_open_project_from_path` so the
+      submenu's click handler (`on_open_recent_project`) goes through
+      identical logic, just skipping the file dialog.
 
 ## Phase 9 — Packaging and distribution `[ ]`
 

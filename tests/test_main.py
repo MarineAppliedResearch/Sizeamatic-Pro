@@ -11,6 +11,7 @@ import pytest
 
 import measurement_window
 import project_io
+import recent_projects
 
 LEFT_VIDEO = "examples/left_20260309_171631.mp4"
 RIGHT_VIDEO = "examples/right_20260309_171631.mp4"
@@ -88,6 +89,100 @@ def test_rectified_indicator_reflects_view_rectified_state(sizeamatic_app):
     assert app.view_rectified.get() is True
     assert app.rectified_indicator.cget("text") == "RECTIFIED"
     assert str(app.rectified_indicator.cget("foreground")) == "#008000"
+
+
+def test_on_save_project_records_it_in_recent_projects(sizeamatic_app, monkeypatch, tmp_path):
+    """Saving a project should add it to the persistent recent-projects
+    list, so it shows up in the File > Recent Projects submenu next
+    time without needing a file dialog (ROADMAP.md Phase 8)."""
+
+    app = sizeamatic_app
+    save_path = str(tmp_path / "project.json")
+    recent_path = str(tmp_path / "recent_projects.json")
+
+    monkeypatch.setattr("main.filedialog.asksaveasfilename", lambda **_kwargs: save_path)
+    monkeypatch.setattr("recent_projects.get_recent_projects_path", lambda: recent_path)
+
+    app.on_save_project()
+
+    assert recent_projects.load_recent_projects(recent_path) == [save_path]
+
+
+def test_on_open_project_records_it_in_recent_projects(sizeamatic_app, monkeypatch, tmp_path):
+    """Opening a project should also add it to the recent-projects list -
+    not just Save Project - so reopening the same file later doesn't
+    require re-navigating to it manually. Uses a project with no
+    video/calibration paths set, so the load path doesn't need the real
+    example assets to exercise the recording behavior."""
+
+    app = sizeamatic_app
+    open_path = str(tmp_path / "project.json")
+    recent_path = str(tmp_path / "recent_projects.json")
+
+    err = project_io.save_project(
+        open_path,
+        left_video_path=None,
+        right_video_path=None,
+        calibration_folder=None,
+        lock_offset_frames=0,
+        view_rectified=False,
+        app_version="0.1.0",
+        measurement_log_text="",
+        last_recorded_snapshot=None,
+        real_time_anchor_frame=None,
+        real_time_anchor_iso=None,
+    )
+    assert err is None
+
+    monkeypatch.setattr("main.filedialog.askopenfilename", lambda **_kwargs: open_path)
+    monkeypatch.setattr("recent_projects.get_recent_projects_path", lambda: recent_path)
+
+    app.on_open_project()
+
+    assert recent_projects.load_recent_projects(recent_path) == [open_path]
+
+
+def test_refresh_recent_projects_menu_lists_entries_and_a_placeholder_when_empty(
+    sizeamatic_app, monkeypatch, tmp_path
+):
+    """The File > Recent Projects submenu should show a disabled
+    placeholder when nothing's been saved/opened yet, and one entry per
+    recorded project (most-recent first) once something has."""
+
+    app = sizeamatic_app
+    recent_path = str(tmp_path / "recent_projects.json")
+    monkeypatch.setattr("recent_projects.get_recent_projects_path", lambda: recent_path)
+
+    app._refresh_recent_projects_menu()
+    assert app.recent_projects_menu.index("end") == 0
+    assert app.recent_projects_menu.entrycget(0, "label") == "(none yet)"
+    assert str(app.recent_projects_menu.entrycget(0, "state")) == "disabled"
+
+    project_a = str(tmp_path / "a.json")
+    project_b = str(tmp_path / "b.json")
+    open(project_a, "w").close()
+    open(project_b, "w").close()
+    recent_projects.add_recent_project(project_a, recent_path)
+    recent_projects.add_recent_project(project_b, recent_path)
+
+    app._refresh_recent_projects_menu()
+    assert app.recent_projects_menu.index("end") == 1
+    assert app.recent_projects_menu.entrycget(0, "label") == app._short_path(project_b, max_len=60)
+    assert app.recent_projects_menu.entrycget(1, "label") == app._short_path(project_a, max_len=60)
+
+
+def test_on_open_recent_project_delegates_to_open_project_from_path(sizeamatic_app, monkeypatch):
+    """Choosing a Recent Projects submenu entry should go through the
+    exact same load/restore logic as Open Project's file dialog, just
+    skipping the dialog itself."""
+
+    app = sizeamatic_app
+    calls = []
+    monkeypatch.setattr(app, "_open_project_from_path", lambda p: calls.append(p))
+
+    app.on_open_recent_project("some/project.json")
+
+    assert calls == ["some/project.json"]
 
 
 @pytest.mark.skipif(

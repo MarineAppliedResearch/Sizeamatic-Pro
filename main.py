@@ -33,6 +33,7 @@ import anaglyph_preview    # Manages the anaglyph_preview functionality
 import calibration_summary # calibration_summary contains the Tkinter calibration summary window and update helpers.
 import calibration_io      # Loads and validates calibration NPZ files, without the directory-chooser dialog.
 import project_io          # Saves/loads a project manifest (video paths, calibration folder, resync offset).
+import recent_projects      # Persists the File > Recent Projects submenu's list of project paths.
 import video_overlay # Manages drawing the overlay on the video
 
 
@@ -1273,6 +1274,15 @@ class SizeamaticProApp:
         file_menu.add_separator()
         file_menu.add_command(label="Save Project…", command=self.on_save_project)
         file_menu.add_command(label="Open Project…", command=self.on_open_project)
+
+        # Rebuilt fresh every time it's about to be shown (via postcommand),
+        # not once at startup - so a project moved/renamed/deleted since the
+        # last time this menu opened just quietly drops out of the list
+        # instead of showing an entry that would only error if clicked.
+        self.recent_projects_menu = tk.Menu(file_menu, tearoff=False)
+        self.recent_projects_menu.config(postcommand=self._refresh_recent_projects_menu)
+        file_menu.add_cascade(label="Recent Projects", menu=self.recent_projects_menu)
+
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.quit)
         menubar.add_cascade(label="File", menu=file_menu)
@@ -1984,18 +1994,15 @@ class SizeamaticProApp:
             messagebox.showerror("Save Project", err)
             return
 
+        recent_projects.add_recent_project(path)
         self._set_status_mid("Project saved")
 
     def on_open_project(self):
         """Prompt for a project file and reload the saved video/calibration state.
 
-        Reads the project manifest via `project_io.load_project`, then
-        reuses the same dialog-free loading helpers the file-picker menu
-        items use (`_load_left_video_from_path`,
-        `_load_right_video_from_path`, `_load_calibration_from_folder`)
-        so a saved path that's since become invalid (moved/deleted file)
-        surfaces the exact same error dialogs a manual reload would, one
-        per stage, rather than failing the whole project load silently.
+        Just handles the file dialog — the actual load/restore logic is
+        shared with the File > Recent Projects submenu via
+        `_open_project_from_path`.
 
         Returns:
             None
@@ -2007,6 +2014,28 @@ class SizeamaticProApp:
         if not path:
             return
 
+        self._open_project_from_path(path)
+
+    def _open_project_from_path(self, path):
+        """Load and apply a project manifest from an already-known path.
+
+        Reads the project manifest via `project_io.load_project`, then
+        reuses the same dialog-free loading helpers the file-picker menu
+        items use (`_load_left_video_from_path`,
+        `_load_right_video_from_path`, `_load_calibration_from_folder`)
+        so a saved path that's since become invalid (moved/deleted file)
+        surfaces the exact same error dialogs a manual reload would, one
+        per stage, rather than failing the whole project load silently.
+        Shared by `on_open_project` (after its file dialog) and the File >
+        Recent Projects submenu (`on_open_recent_project`), so both go
+        through identical load/restore logic.
+
+        Args:
+            path (str): Path to the project file to open.
+
+        Returns:
+            None
+        """
         project, err = project_io.load_project(path)
         if err is not None:
             messagebox.showerror("Open Project", err)
@@ -2076,6 +2105,39 @@ class SizeamaticProApp:
         # whether a snapshot was restored above, since the real-time anchor
         # (restored either way) affects it too.
         self._update_frame_labels()
+
+        recent_projects.add_recent_project(path)
+
+    def on_open_recent_project(self, path):
+        """Open a project path chosen from the File > Recent Projects submenu.
+
+        Args:
+            path (str): The project file path to open, as listed by
+                `_refresh_recent_projects_menu`.
+
+        Returns:
+            None
+        """
+        self._open_project_from_path(path)
+
+    def _refresh_recent_projects_menu(self):
+        """Rebuild the File > Recent Projects submenu just before it's shown.
+
+        Returns:
+            None
+        """
+        self.recent_projects_menu.delete(0, "end")
+
+        recent = recent_projects.load_recent_projects()
+        if not recent:
+            self.recent_projects_menu.add_command(label="(none yet)", state="disabled")
+            return
+
+        for path in recent:
+            self.recent_projects_menu.add_command(
+                label=self._short_path(path, max_len=60),
+                command=lambda p=path: self.on_open_recent_project(p),
+            )
 
         self._set_status_mid("Project loaded")
         self._refresh_status_left()
