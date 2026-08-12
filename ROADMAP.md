@@ -367,28 +367,123 @@ A second usability round (Phase 8) and a packaging/distribution phase
       been added to `mkdocs.yml`'s nav back in Phase 5, so it was never
       actually documented on the site despite being pure, tested code.
 
-## Phase 8 — Usability, round 2 `[ ]`
+## Phase 8 — Usability, round 2 (issue #9) `[x]`
 
 A second round of usability items — this time specified directly by the
 project owner rather than via a fresh quiz (see Phase 7 for that pattern).
-Detailed design/implementation planning (data model, exact UI, edge cases)
-still to come when this phase actually starts; scoped here just enough that
-it isn't forgotten.
+Recent Projects and the window-title project name were both added
+mid-phase, after the first three items were already done and confirmed —
+not part of the original plan, but small enough to fold in rather than
+spin off their own phase.
 
-- [ ] Video-time sync — let the user type in the real-world timestamp
-      shown burned into the video image itself (e.g. a camera's on-screen
-      clock overlay) at whatever frame they're currently on. The app
-      computes an offset from that one anchor (frame index -> real-world
-      time) and, from then on, shows the calculated real-world time while
-      scrubbing, so the user can jump straight to a moment they already
-      know about (e.g. from a field log) instead of hunting for it
-      visually. This offset needs to be saved in the project file
-      (`project_io.py`) and restored when the video/project reloads —
-      same pattern as the Phase 7 resync offset.
-- [ ] Point visibility — give each measurement point handle a small,
-      precise dot exactly in its center, so the user can see exactly
-      where the point is actually landing, not just the surrounding
-      circle/handle shape.
+- [x] Point visibility — `video_overlay.py`'s `draw_pane` now draws a
+      small solid red dot (`CENTER_DOT_RADIUS_PX`, 2px screen radius,
+      fixed regardless of zoom — matching the existing handle ring's own
+      fixed-screen-size behavior) exactly at each point's center, on top
+      of the existing hollow green ring. Purely visual — not tagged
+      `"handle"`, so it doesn't change click hit-testing.
+- [x] Video-time sync — let the user set the real-world timestamp shown
+      burned into the video image itself (e.g. a camera's on-screen clock
+      overlay) at whatever frame they're currently on. One shared anchor
+      (`self.real_time_anchor_frame`/`self.real_time_anchor_dt`)
+      referenced to the left/master timeline — not per-pane, consistent
+      with measurements already treating left as the reference. Entered
+      via six plain `ttk.Entry` boxes (year/month/day/hour/minute/second,
+      each with a label underneath) near "Clear Points" — went through
+      two rejected designs first (a single free-text date string, then
+      pre-filled `ttk.Spinbox`es that auto-applied on every change) before
+      landing here: the project owner wanted empty boxes you type into,
+      with auto-advance-to-next-box on `<KeyRelease>`
+      (`_advance_real_time_focus`) and validation happening only once,
+      on an explicit "Set Time Sync" button (`on_real_time_entered`) —
+      the Spinbox version's eager FocusOut validation was firing against
+      leftover pre-filled values and throwing spurious "not a valid
+      date/time" errors. A green "✓ Synced" label
+      (`_show_time_sync_indicator`) appears next to the button once set
+      (a ttk button's own background color isn't reliably themeable on
+      Windows, hence the separate label). The six boxes keep live-tracking
+      the calculated time as playback moves (`_refresh_real_time_entries`,
+      called from `_update_frame_labels`), not just showing the anchor.
+      A shared readout row spanning both panes, directly below the scrub
+      bars (`self.time_readout_label`, grid row 3 — moved out from beside
+      the Set Time Sync button per the project owner's request) shows
+      Frame i/max, Video Time, and calculated Actual Time together rather
+      than duplicated per pane. Both `_format_timestamp` and
+      `_format_actual_time` render the sub-second part as an
+      `HH:MM:SS:FF` frame-in-second count (`divmod(frame_index, fps)`),
+      not a fractional-seconds decimal — the project owner wanted "the
+      actual frame number in this particular second, not a percentage."
+      `_format_actual_time` projects the anchor forward/backward using
+      the left video's fps: actual time = anchor time + whole seconds of
+      (frame − anchor frame) / fps, with the remaining frames as the
+      `:FF` suffix. The anchor is saved in the project file
+      (`project_io.py`'s `real_time_anchor_frame`/`real_time_anchor_iso`)
+      and restored on reopen — including refreshing the six entry boxes
+      to match — before `_update_frame_labels` runs so the readout
+      reflects it immediately, same pattern as the Phase 7 resync offset.
+      Ran into the FINDINGS.md #6 attribute-ordering pitfall twice
+      (`_update_frame_labels` already runs once during `__init__` itself,
+      before the app's later, scattered-init state is set) — first for
+      the entry StringVars, then again for the anchor frame/datetime
+      attributes themselves. Recorded measurements now also carry an
+      `actual_time` column (empty until an anchor is set), added to
+      `measurement_window.py`'s `RESULT_COLUMNS`.
+- [x] Rectified/not-rectified indicator — measurements and clicked
+      points are only real-world-accurate in rectified view, so raw view
+      needed to look visibly different. A bold toolbar label
+      (`self.rectified_indicator`, next to Clear Points) reads
+      "NOT RECTIFIED" in red or "RECTIFIED" in green, kept in sync by
+      `_refresh_rectified_indicator` — called from `_refresh_status_left`,
+      so every existing call site (toggling the view, loading/failing
+      calibration, opening a project) updates it for free without a new
+      call site of its own. `video_overlay.py`'s `draw_pane` picks between
+      `RECTIFIED_OVERLAY_COLOR` (green, the original color) and
+      `NOT_RECTIFIED_OVERLAY_COLOR` (orange) for the ring, connecting
+      line, and index label based on `app.view_rectified.get()`; the
+      small red center dot from the point-visibility item above
+      deliberately stays red in both modes, since it marks the exact
+      clicked pixel — a concern unrelated to rectification state.
+- [x] Recent Projects — a File > Recent Projects submenu lists the last
+      `MAX_RECENT_PROJECTS` (5) project files saved or opened, so
+      reopening one doesn't need a file dialog every time. Backed by a
+      new small module, `recent_projects.py`, deliberately separate from
+      `project_io.py` (which reads/writes one project's own content) —
+      this one just persists a tiny cross-session list of *paths to*
+      project files. Stored under `%APPDATA%\SizeamaticPro\
+      recent_projects.json`, not next to the app itself, so it survives
+      the app folder being replaced/updated and works the same whether
+      running from source or (once Phase 9 packages it) a standalone
+      .exe. The submenu is rebuilt fresh every time it's about to open
+      (`self.recent_projects_menu`'s `postcommand`, wired to
+      `_refresh_recent_projects_menu`) rather than once at startup, so a
+      project that's since been moved/renamed/deleted just quietly
+      drops off the list (`load_recent_projects` filters via
+      `os.path.isfile`) instead of showing an entry that would only
+      error if clicked. `on_save_project`/`on_open_project` both call
+      `add_recent_project` on success; `on_open_project`'s actual load/
+      restore logic was pulled out into `_open_project_from_path` so the
+      submenu's click handler (`on_open_recent_project`) goes through
+      identical logic, just skipping the file dialog. Shortly after this
+      shipped, running the test suite was found to be silently
+      clobbering the real per-user recent-projects file — see
+      `FINDINGS.md` #12 for the bug and the autouse test-isolation fix.
+- [x] Window titles show the loaded project name — every window's title
+      bar (main window, Measurement, Calibration Summary) reads
+      "Sizeamatic Pro" normally, or "Sizeamatic Pro - <project name>"
+      once a project has been saved or opened this session
+      (`self.current_project_name`, the file's base name without its
+      directory or ".json" extension), so it's obvious at a glance
+      which project a given window belongs to. `main.py`'s
+      `_app_window_title` builds the string; `_refresh_window_titles`
+      (called from `on_save_project`/`_open_project_from_path`) applies
+      it to the main window plus the Measurement/Calibration Summary
+      windows if they're already open. A window opened for the first
+      time *after* a project is already loaded picks up the right title
+      immediately too, since each window's own `ensure_window` reads
+      `self.app._app_window_title()` directly at creation time rather
+      than hardcoding "Measurement"/"Calibration Summary" — the
+      project-name suffix intentionally replaces those fixed labels
+      rather than appending to them, per the project owner's request.
 
 ## Phase 9 — Packaging and distribution `[ ]`
 
@@ -400,7 +495,31 @@ likely built on `pyinstaller`, given the existing build note already
 sitting in git history from before this file existed, or an alternative
 bundler if that turns out not to fit); noted here so it isn't forgotten.
 
-## Phase 10 — MARE API integration (future, not yet scoped) `[ ]`
+## Phase 10 — In-app stereo calibration workflow `[ ]`
+
+Bring the stereo camera calibration step itself into Sizeamatic Pro,
+rather than treating a calibration NPZ as something produced entirely
+outside the app and only ever loaded (`calibration_io.py`) or QA'd after
+the fact (`generate_calibration_report.py`). Today, nothing in this repo
+actually runs `cv2.calibrateCamera`/`cv2.stereoCalibrate` — the four
+calibration NPZ files are produced by some external process from
+checkerboard/ChArUco stills, then handed to the app as a finished folder.
+This phase reuses the app's existing left/right video loading exactly as
+it works today, then adds: scrubbing through the loaded pair to pick
+specific frames (with a checkerboard/ChArUco target visible) as
+calibration frames one at a time; saving each chosen calibration frame
+pair; and, once enough frames are captured, running the actual
+calibration computation in-app and immediately showing calibration
+quality stats (reusing/adapting whatever `generate_calibration_report.py`
+and `calibration_summary.py` already know how to compute and display),
+so an analyst gets fast feedback on whether a calibration run is good
+enough without leaving the app or invoking a separate offline pipeline.
+Not yet scoped in detail (frame-picking UI, how many calibration frames
+are required/recommended, whether checkerboard or ChArUco detection or
+both, where captured frame pairs get stored) — needs its own planning
+pass before implementation starts, same as Phase 9.
+
+## Phase 11 — MARE API integration (future, not yet scoped) `[ ]`
 
 Interface with the overall MARE API to record measurement data, etc. Noted
 here so it isn't forgotten, but not to be planned in detail until we reach it.

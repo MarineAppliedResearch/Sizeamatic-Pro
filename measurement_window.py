@@ -72,6 +72,7 @@ RESULT_COLUMNS = (
     "video",
     "frame",
     "timestamp",
+    "actual_time",
     "measurement_id",
     "type",
     "label",
@@ -97,12 +98,18 @@ live "current measurement" isn't part of the accumulated log, so it
 doesn't need one yet. `record_current_measurement` stamps in the actual
 ID (shared across every row from that one Record click, so a whole
 recorded chain can be found/deleted together) only when a row actually
-gets appended to the Log."""
+gets appended to the Log.
+
+"actual_time" is "" whenever no real-time anchor has been set (see
+ROADMAP.md Phase 8's video-time-sync item) — there's nothing calculated
+to show, so it's left empty rather than filled with a placeholder string
+that would otherwise pollute a spreadsheet column."""
 
 RESULT_HEADERS = {
     "video": "Video",
     "frame": "Frame",
     "timestamp": "Time",
+    "actual_time": "Actual Time",
     "measurement_id": "Measurement ID",
     "type": "Type",
     "label": "#/Seg",
@@ -234,8 +241,11 @@ class MeasurementWindow:
         # Create a separate top level window owned by the main application root.
         win = tk.Toplevel(self.app.root)
 
-        # Set the user visible title for the measurement results window.
-        win.title("Measurement")
+        # Match the main window's title (app name, plus " - <project
+        # name>" once a project has been saved/opened this session) so
+        # every window makes clear which project it belongs to, rather
+        # than a fixed "Measurement" that never reflects that.
+        win.title(self.app._app_window_title())
 
         # Give the window an initial size large enough for the results table,
         # the copy box, and the log.
@@ -292,7 +302,7 @@ class MeasurementWindow:
 
         # Narrow columns for short identifying fields, wider for the numeric
         # measurement columns.
-        narrow_cols = {"video", "frame", "timestamp", "measurement_id", "type", "label"}
+        narrow_cols = {"video", "frame", "timestamp", "actual_time", "measurement_id", "type", "label"}
         for col in RESULT_COLUMNS:
             width = 70 if col not in narrow_cols else 90
             anchor = "center" if col in ("measurement_id", "type", "label") else ("w" if col == "video" else "e")

@@ -220,6 +220,45 @@ differently). No behavior change in the common, unclamped case — the fix
 reduces to exactly the old `(dw, dh)` at `(dx, dy)` whenever nothing was
 actually clamped.
 
+### 12. `tests/test_main.py` — running the test suite clobbered the real per-user Recent Projects file
+
+Reported by the project owner as "my recent projects just disappeared
+when i did a new build" — turned out to mean the list wasn't gone, but
+had been replaced by unfamiliar entries ("the demo projects that were
+there before"). The Recent Projects feature (ROADMAP.md Phase 8) added
+a call to `recent_projects.add_recent_project(path)` inside
+`on_save_project`/`_open_project_from_path`, which by default reads and
+writes the real per-user `%APPDATA%\SizeamaticPro\recent_projects.json`
+unless a test explicitly overrides
+`recent_projects.get_recent_projects_path`. Most new tests for the
+feature did override it — but three pre-existing tests
+(`test_save_project_writes_current_app_state`,
+`test_open_project_restores_video_calibration_and_offset`,
+`test_open_project_restores_last_recorded_frame_points_and_log`) already
+called `on_save_project`/`on_open_project` for unrelated reasons, from
+before the Recent Projects feature existed, and had no reason to
+override a path they didn't know would matter. Every test run silently
+wrote pytest's own `tmp_path` project paths into the real file,
+overwriting whatever the project owner had actually saved/opened —
+confirmed by inspecting the real file directly and finding it full of
+`AppData\Local\Temp\pytest-of-isaac\...` entries instead of real
+projects.
+
+**Fix:** added an `autouse=True` fixture,
+`conftest.py`'s `_isolate_recent_projects_file`, that redirects
+`recent_projects.get_recent_projects_path` to a `tmp_path` location for
+*every* test automatically, regardless of whether that test's author
+knew to ask for it. This closes the whole class of bug rather than
+just patching the three tests caught this time — a test written next
+month that calls `on_save_project` for some unrelated reason is
+automatically protected too. Verified by temporarily setting the
+fixture's `autouse` back to `False` and confirming a new regression
+test (`test_saving_a_project_never_touches_the_real_appdata_recent_projects_file`,
+which deliberately adds no monkeypatch of its own) failed exactly as
+expected, then restoring the fix and deleting the project owner's real
+recent-projects file (by then containing only pytest debris, no real
+data) so it starts clean.
+
 ## Flaws / risky patterns flagged, not fixed
 
 ### 4. `main.py` — `_display_bgr_on_canvas` dead fallback branch

@@ -67,6 +67,23 @@ import tkinter as tk
 import stereo_matching
 
 
+CENTER_DOT_RADIUS_PX = 2
+
+# Ring/line/label color while in rectified view (measurements are meaningful)
+# versus raw view (they aren't - real-world sizes only come out right against
+# rectified pixels). The small red center dot deliberately stays red in both
+# modes - it exists to pinpoint the exact clicked pixel, a purpose unrelated
+# to rectification state.
+RECTIFIED_OVERLAY_COLOR = "#00ff66"
+NOT_RECTIFIED_OVERLAY_COLOR = "#ffa500"
+"""Screen-pixel radius of the small solid dot drawn at each point handle's
+exact center (see `VideoOverlay.draw_pane`). Deliberately much smaller than
+`app.handle_radius_px`'s ring — the ring is sized for easy clicking, this is
+sized to pinpoint exactly where the point actually landed. Fixed in screen
+pixels regardless of zoom, matching the ring's own radius (ROADMAP.md
+Phase 8's point visibility item)."""
+
+
 class VideoOverlay:
     """Owns the left/right overlay canvases and overlay interaction state.
 
@@ -791,6 +808,11 @@ class VideoOverlay:
 
         app = self.app
 
+        # Rectified measurements are real-world-accurate; raw ones aren't, so
+        # give the ring/line/label a visibly different color in raw view
+        # (ROADMAP.md Phase 8's rectified/not-rectified indicator item).
+        overlay_color = RECTIFIED_OVERLAY_COLOR if app.view_rectified.get() else NOT_RECTIFIED_OVERLAY_COLOR
+
         # Clear only overlay tagged items so the canvas can be redrawn from current
         # point data without affecting unrelated canvas content.
         canvas.delete("overlay")
@@ -815,7 +837,7 @@ class VideoOverlay:
                     sx1,
                     sy1,
                     width=2,
-                    fill="#00ff66",
+                    fill=overlay_color,
                     tags=("overlay",),
                 )
 
@@ -836,10 +858,25 @@ class VideoOverlay:
                 sy - r,
                 sx + r,
                 sy + r,
-                outline="#00ff66",
+                outline=overlay_color,
                 width=2,
                 fill="",
                 tags=("overlay", "handle", f"idx:{i}"),
+            )
+
+            # Draw a small solid dot exactly at the point's center. The ring alone
+            # doesn't pinpoint the exact clicked/dragged pixel — this does, and
+            # (like the ring's own radius) stays a fixed screen-pixel size
+            # regardless of zoom, deliberately not tagged "handle" so it stays
+            # purely visual and doesn't change hit-testing.
+            canvas.create_oval(
+                sx - CENTER_DOT_RADIUS_PX,
+                sy - CENTER_DOT_RADIUS_PX,
+                sx + CENTER_DOT_RADIUS_PX,
+                sy + CENTER_DOT_RADIUS_PX,
+                outline="",
+                fill="#ff0000",
+                tags=("overlay",),
             )
 
             # Draw the point index label near the handle.
@@ -847,7 +884,7 @@ class VideoOverlay:
                 sx + r + 6,
                 sy - r - 6,
                 text=str(i),
-                fill="#00ff66",
+                fill=overlay_color,
                 font=("Segoe UI", 11, "bold"),
                 tags=("overlay",),
             )

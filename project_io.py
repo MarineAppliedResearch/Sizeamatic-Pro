@@ -35,6 +35,8 @@ def save_project(
     app_version,
     measurement_log_text,
     last_recorded_snapshot,
+    real_time_anchor_frame,
+    real_time_anchor_iso,
 ):
     """Save a project manifest to a JSON file.
 
@@ -64,6 +66,12 @@ def save_project(
             most recently *Recorded* measurement on reopen — keys
             "left_frame_index", "right_frame_index", "ptsL", "ptsR" — or
             None if nothing's been recorded yet this session.
+        real_time_anchor_frame (int | None): The left-timeline frame
+            index the real-world time anchor was set at, or None if no
+            anchor has been set (`main.py`'s `on_real_time_entered`).
+        real_time_anchor_iso (str | None): The anchor's real-world
+            date+time, as `datetime.isoformat()`, or None if no anchor
+            has been set.
 
     Returns:
         str | None: An error message if the file couldn't be written, or
@@ -80,6 +88,8 @@ def save_project(
         "view_rectified": bool(view_rectified),
         "measurement_log_text": measurement_log_text,
         "last_recorded_snapshot": last_recorded_snapshot,
+        "real_time_anchor_frame": real_time_anchor_frame,
+        "real_time_anchor_iso": real_time_anchor_iso,
     }
 
     try:
@@ -102,9 +112,9 @@ def load_project(path):
         success, where `project` has the keys "app_version",
         "left_video_path", "right_video_path", "calibration_folder",
         "lock_offset_frames", "view_rectified", "measurement_log_text",
-        and "last_recorded_snapshot"; or `(None, error_message)` if the
-        file can't be read, isn't valid JSON, or is missing required
-        fields.
+        "last_recorded_snapshot", "real_time_anchor_frame", and
+        "real_time_anchor_iso"; or `(None, error_message)` if the file
+        can't be read, isn't valid JSON, or is missing required fields.
     """
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -123,6 +133,8 @@ def load_project(path):
         "view_rectified",
         "measurement_log_text",
         "last_recorded_snapshot",
+        "real_time_anchor_frame",
+        "real_time_anchor_iso",
     ]
 
     missing = [k for k in required_keys if k not in project]
