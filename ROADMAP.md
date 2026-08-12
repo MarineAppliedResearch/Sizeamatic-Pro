@@ -495,7 +495,31 @@ likely built on `pyinstaller`, given the existing build note already
 sitting in git history from before this file existed, or an alternative
 bundler if that turns out not to fit); noted here so it isn't forgotten.
 
-## Phase 10 — MARE API integration (future, not yet scoped) `[ ]`
+## Phase 10 — In-app stereo calibration workflow `[ ]`
+
+Bring the stereo camera calibration step itself into Sizeamatic Pro,
+rather than treating a calibration NPZ as something produced entirely
+outside the app and only ever loaded (`calibration_io.py`) or QA'd after
+the fact (`generate_calibration_report.py`). Today, nothing in this repo
+actually runs `cv2.calibrateCamera`/`cv2.stereoCalibrate` — the four
+calibration NPZ files are produced by some external process from
+checkerboard/ChArUco stills, then handed to the app as a finished folder.
+This phase reuses the app's existing left/right video loading exactly as
+it works today, then adds: scrubbing through the loaded pair to pick
+specific frames (with a checkerboard/ChArUco target visible) as
+calibration frames one at a time; saving each chosen calibration frame
+pair; and, once enough frames are captured, running the actual
+calibration computation in-app and immediately showing calibration
+quality stats (reusing/adapting whatever `generate_calibration_report.py`
+and `calibration_summary.py` already know how to compute and display),
+so an analyst gets fast feedback on whether a calibration run is good
+enough without leaving the app or invoking a separate offline pipeline.
+Not yet scoped in detail (frame-picking UI, how many calibration frames
+are required/recommended, whether checkerboard or ChArUco detection or
+both, where captured frame pairs get stored) — needs its own planning
+pass before implementation starts, same as Phase 9.
+
+## Phase 11 — MARE API integration (future, not yet scoped) `[ ]`
 
 Interface with the overall MARE API to record measurement data, etc. Noted
 here so it isn't forgotten, but not to be planned in detail until we reach it.
