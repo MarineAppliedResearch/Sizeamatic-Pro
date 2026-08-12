@@ -73,6 +73,40 @@ def test_draw_pane_draws_a_center_dot_pinpointing_the_exact_point(sizeamatic_app
     assert canvas.itemcget(dot_candidates[0], "fill") == "#ff0000"
 
 
+def test_draw_pane_uses_orange_overlay_color_when_not_rectified(sizeamatic_app):
+    """The ring/line/index-label color should switch from green to orange
+    when view_rectified is off, so it's visually obvious a measurement
+    isn't real-world-accurate yet (ROADMAP.md Phase 8's rectified/
+    not-rectified indicator item). The small red center dot is
+    deliberately unaffected - it marks the exact clicked pixel, a
+    purpose unrelated to rectification state."""
+
+    app = sizeamatic_app
+    app.metaL = {"width": 640, "height": 480, "fps": 30.0, "frame_count": 10}
+    app.fit_to_window.set(False)
+    app.view_rectified.set(False)
+
+    app.ptsL.append((100.0, 50.0))
+    app.ptsL.append((150.0, 90.0))
+    app.video_overlay.redraw()
+
+    canvas = app.video_overlay.left_canvas
+
+    ring = [item for item in canvas.find_withtag("handle")][0]
+    assert canvas.itemcget(ring, "outline") == video_overlay.NOT_RECTIFIED_OVERLAY_COLOR
+
+    line = [item for item in canvas.find_withtag("overlay") if canvas.type(item) == "line"][0]
+    assert canvas.itemcget(line, "fill") == video_overlay.NOT_RECTIFIED_OVERLAY_COLOR
+
+    label = [item for item in canvas.find_withtag("overlay") if canvas.type(item) == "text"][0]
+    assert canvas.itemcget(label, "fill") == video_overlay.NOT_RECTIFIED_OVERLAY_COLOR
+
+    # The center dot stays red regardless of rectified state.
+    overlay_ovals = [item for item in canvas.find_withtag("overlay") if canvas.type(item) == "oval"]
+    dot = [item for item in overlay_ovals if "handle" not in canvas.gettags(item)][0]
+    assert canvas.itemcget(dot, "fill") == "#ff0000"
+
+
 def test_left_click_on_new_point_places_mate_at_same_image_pixel(sizeamatic_app):
     """Placing the first point on one pane should immediately place its
     mate on the opposite pane at the exact same image pixel coordinates

@@ -424,15 +424,21 @@ project owner rather than via a fresh quiz (see Phase 7 for that pattern).
       attributes themselves. Recorded measurements now also carry an
       `actual_time` column (empty until an anchor is set), added to
       `measurement_window.py`'s `RESULT_COLUMNS`.
-- [ ] Rectified/not-rectified indicator — measurements and clicked
-      points are only meaningful in rectified view, but nothing currently
-      makes raw (unrectified) view visually distinct. Add a status label
-      that reads "NOT RECTIFIED" in red when `view_rectified` is off and
-      "RECTIFIED" in green when it's on, and use a different color scheme
-      for the point/measurement overlays themselves while not rectified
-      (currently the same green ring/line/dot regardless), so it's
-      obvious at a glance that whatever's on screen isn't a real
-      measurement yet.
+- [x] Rectified/not-rectified indicator — measurements and clicked
+      points are only real-world-accurate in rectified view, so raw view
+      needed to look visibly different. A bold toolbar label
+      (`self.rectified_indicator`, next to Clear Points) reads
+      "NOT RECTIFIED" in red or "RECTIFIED" in green, kept in sync by
+      `_refresh_rectified_indicator` — called from `_refresh_status_left`,
+      so every existing call site (toggling the view, loading/failing
+      calibration, opening a project) updates it for free without a new
+      call site of its own. `video_overlay.py`'s `draw_pane` picks between
+      `RECTIFIED_OVERLAY_COLOR` (green, the original color) and
+      `NOT_RECTIFIED_OVERLAY_COLOR` (orange) for the ring, connecting
+      line, and index label based on `app.view_rectified.get()`; the
+      small red center dot from the point-visibility item above
+      deliberately stays red in both modes, since it marks the exact
+      clicked pixel — a concern unrelated to rectification state.
 
 ## Phase 9 — Packaging and distribution `[ ]`
 

@@ -61,6 +61,35 @@ def test_save_project_writes_current_app_state(sizeamatic_app, monkeypatch, tmp_
     assert project["last_recorded_snapshot"]["ptsR"] == [[3.0, 4.0]]
 
 
+def test_rectified_indicator_reflects_view_rectified_state(sizeamatic_app):
+    """The toolbar's RECTIFIED/NOT RECTIFIED label should read red/off by
+    default and flip to green once rectified view is actually toggled on
+    (ROADMAP.md Phase 8's rectified/not-rectified indicator item) -
+    measurements and clicked points are only real-world-accurate once
+    calibration is loaded and rectified view is on."""
+
+    app = sizeamatic_app
+
+    assert app.rectified_indicator.cget("text") == "NOT RECTIFIED"
+    assert str(app.rectified_indicator.cget("foreground")) == "#cc0000"
+
+    # Turning rectified view on without calibration loaded should be
+    # refused (existing on_toggle_view_rectified validation), so the
+    # indicator should stay showing NOT RECTIFIED.
+    app.view_rectified.set(True)
+    app.on_toggle_view_rectified()
+    assert app.view_rectified.get() is False
+    assert app.rectified_indicator.cget("text") == "NOT RECTIFIED"
+
+    # With calibration loaded, turning it on should actually take effect.
+    app.cal = {"w": 640, "h": 480}
+    app.view_rectified.set(True)
+    app.on_toggle_view_rectified()
+    assert app.view_rectified.get() is True
+    assert app.rectified_indicator.cget("text") == "RECTIFIED"
+    assert str(app.rectified_indicator.cget("foreground")) == "#008000"
+
+
 @pytest.mark.skipif(
     not (os.path.isfile(LEFT_VIDEO) and os.path.isfile(RIGHT_VIDEO)),
     reason="Real example videos are gitignored/local-only, not present here.",

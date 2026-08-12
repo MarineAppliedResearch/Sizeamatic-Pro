@@ -1390,6 +1390,16 @@ class SizeamaticProApp:
         )
         self.btn_clear_points.grid(row=0, column=10, padx=(0, 12))
 
+        # ---- Rectified/not-rectified indicator ----
+        # Measurements and clicked points are only real-world-accurate in
+        # rectified view, so make raw view visually unmistakable at a
+        # glance (ROADMAP.md Phase 8) - kept in sync by
+        # _refresh_rectified_indicator, called everywhere
+        # _refresh_status_left already is (view toggled, video loaded,
+        # project opened, etc.).
+        self.rectified_indicator = ttk.Label(self.toolbar, font=("Segoe UI", 10, "bold"))
+        self.rectified_indicator.grid(row=0, column=11, padx=(0, 12))
+
         # ---- Real-world time anchor ----
         # Type in a date+time matching whatever real-world clock is burned
         # into the video image at the current frame, so the app can
@@ -1400,7 +1410,7 @@ class SizeamaticProApp:
         # validated/applied until "Set Time Sync" is pressed; typing alone
         # only moves focus to the next box once a box looks full.
         real_time_frame = ttk.Frame(self.toolbar)
-        real_time_frame.grid(row=0, column=11, padx=(0, 12))
+        real_time_frame.grid(row=0, column=12, padx=(0, 12))
 
         real_time_box_specs = [
             (self.real_time_year_var, 4, "YYYY"),
@@ -2645,6 +2655,20 @@ class SizeamaticProApp:
         self.status_left.config(
             text=f"L: {self._short_path(l)} | R: {self._short_path(r)} | Cal: {self._short_path(c)} | View: {view} | {lock}{offset_txt}"
         )
+
+        self._refresh_rectified_indicator()
+
+    def _refresh_rectified_indicator(self):
+        """Update the toolbar's RECTIFIED/NOT RECTIFIED label to match
+        `self.view_rectified`.
+
+        Returns:
+            None
+        """
+        if self.view_rectified.get():
+            self.rectified_indicator.config(text="RECTIFIED", foreground="#008000")
+        else:
+            self.rectified_indicator.config(text="NOT RECTIFIED", foreground="#cc0000")
 
     def _short_path(self, path, max_len=45):
         """Truncate a file path for compact status bar display.
