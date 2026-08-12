@@ -10,8 +10,10 @@ explicitly out of scope until a later phase.
 
 ## Claude Code specific notes
 
-- Ask before every `git commit` and every `git push` — no exceptions, even
-  mid-task. This project owner wants to review each commit before it happens.
+- Ask before every `git commit` — no exceptions, even mid-task. This project
+  owner wants to review each commit before it happens.
+- Once a commit has been confirmed and made, push it without asking again
+  separately.
 - Don't add ruff/mypy/black or similar lint/format tooling unless explicitly
   asked — see the "Tooling" section in `AGENTS.md` for why.
 - Don't start Phase 4 (testing system) or Phase 5 (restructure) work from

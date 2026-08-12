@@ -124,6 +124,102 @@ close the main window.
 
 **Fix:** Changed the call to `anaglyph_preview.stop_anaglyph_preview(self)`.
 
+### 8. `main.py` — `current_frameL`/`current_frameR` never initialized in `__init__`
+
+Found while building the Phase 7 pan feature. `self.current_frameL`/
+`self.current_frameR` (the cached, already-decoded current frame per pane)
+only came into existence once `_render_current_frames` ran for a pane with
+a loaded capture — there was no `self.current_frameL = None` /
+`self.current_frameR = None` in `__init__`. Any code reading either
+attribute before the first successful render of that pane (or when that
+pane's video was never loaded at all) would hit `AttributeError` instead
+of a clean `None`. Not reachable before Phase 7 since nothing read these
+outside `_render_current_frames` itself; became reachable once
+`_redisplay_current_frames` (used by panning) needed to read both
+attributes regardless of which panes have ever rendered.
+
+**Fix:** Initialized both to `None` in `__init__`, alongside `metaL`/
+`metaR`.
+
+### 9. `main.py` — `_playback_tick`'s locked branch could run playback backward
+
+Reported by the project owner while testing Phase 7's resync control:
+pressing Play with Lock on and a nonzero resync offset set made both
+timelines count *down* instead of up.
+
+Root cause: the locked branch of `_playback_tick` computed the next
+index (`nxt`) itself and set both `left_frame_index`/`right_frame_index`
+*and* both slider widgets directly — critically, always setting the
+right side to the same value as the left (ignoring
+`self.lock_offset_frames` entirely), and without wrapping the slider
+`.set()` calls in `self._suppress_slider_callbacks` the way every other
+call site that programmatically moves both sliders does. Setting a
+`ttk.Scale` widget's value directly fires its bound `command` callback,
+so each tick fired `on_left_slider_changed` then `on_right_slider_changed`
+unsuppressed. Both are wired, when Lock is on, to call
+`_jump_frames_locked_with_offset` — first with `"L"` driving (correctly
+recomputing the right index using the offset), then immediately after
+with `"R"` driving the *same* `nxt` value (since `_playback_tick` had
+just set the right slider to `nxt`, not `nxt + offset`), which recomputed
+the *left* index as `nxt - offset`. With a positive offset, that's less
+than the just-advanced value — so every tick ended by silently pulling
+the left index backward by (offset × 2) net of the forward step,
+compounding on each subsequent tick.
+
+**Repro:** Load both videos, scrub them apart, enable Lock (capturing a
+nonzero offset), then press Play.
+
+**Fix:** Replaced the locked branch's manual index/slider-setting with a
+call to `_jump_frames_locked_with_offset("L", nxt)` — the same helper the
+slider-drag and step-forward/back controls already used correctly. This
+fixes both problems at once: the offset is now preserved during
+continuous playback (previously it was silently dropped even without the
+callback-cascade bug), and the helper's own slider updates are already
+wrapped in `_suppress_slider_callbacks`.
+
+### 11. `main.py` — `_display_bgr_on_canvas` stretched a clamped crop to fill the full display rect
+
+Reported by the project owner as "when i zoom the right video everything
+zooms correctly, but when i try to zoom the left video, the points don't
+zoom and move correctly with the video" — investigation (numeric checks
+against the real app, then a visual repro via `PIL.ImageGrab` screenshots)
+found this wasn't actually a left/right asymmetry: every zoom/pan code
+path (`on_mouse_wheel`, `_get_view`, `_image_to_screen`, `_get_display_rect`)
+is already correctly parametrized by `which` and symmetric between panes.
+
+The real bug reproduced on *either* pane, triggered by "zoom out all the
+way" specifically: whenever the view's intended region (computed from the
+current zoom/pan) extended past the source image's edges — reachable even
+right at `zoom_min` itself with any nonzero leftover pan offset from an
+earlier off-center zoom, not just some extreme out-of-bounds case — the
+ROI gets clamped to the image's actual bounds before cropping (correct),
+but the crop was then unconditionally resized to fill the *entire*
+`(dw, dh)` display rect and drawn at the display rect's origin `(dx, dy)`
+regardless of whether clamping had actually shrunk it. That silently
+stretched a smaller-than-intended crop to fill the same on-screen space,
+scaling the displayed video differently from the un-clamped scale
+`_image_to_screen` uses to place point overlays — so points appeared to
+"jump" relative to the video content whenever this triggered.
+
+**Repro:** Zoom in several notches near one corner of a pane, then zoom
+back out (many notches, past where it visibly stops) with the cursor at a
+different position — this leaves a large residual pan offset even once
+zoom clamps back to `zoom_min`, forcing the ROI clamp.
+
+**Fix:** Map the *actual* clamped crop bounds `(rx0, ry0, rx1, ry1)` back
+through the same screen transform `_image_to_screen` uses
+(`screen = display_origin + pixel * scale + pan_offset`) to compute where
+this exact crop belongs and how large it should be on screen, instead of
+always assuming the full, unclamped display rect. Verified both
+mathematically (the fix uses the identical formula `_image_to_screen`
+uses, so a video pixel and a point overlay at that same pixel can no
+longer diverge) and empirically (a point placed inside a heavily
+clamped/panned view now lands within ~2px of the actual displayed crop's
+edge, matching sub-pixel rounding, instead of the two being scaled
+differently). No behavior change in the common, unclamped case — the fix
+reduces to exactly the old `(dw, dh)` at `(dx, dy)` whenever nothing was
+actually clamped.
+
 ## Flaws / risky patterns flagged, not fixed
 
 ### 4. `main.py` — `_display_bgr_on_canvas` dead fallback branch
@@ -185,6 +281,32 @@ practice — `on_overlay_left_drag`/`on_overlay_right_drag` bounds-check the
 point index against the (now-empty) point list and just no-op — but it's
 dead state that could confuse a future reader into thinking `on_clear_points`
 does more than it does. Worth removing during the Phase 5 restructure.
+
+### 10. `main.py` — real-world playback fps still below the native-fps target
+
+Reported by the project owner as "playback is significantly better than
+before, but still playing very slow." The suspected cause (live
+per-frame rectification, `cv2.remap` on every tick) was profiled and
+ruled out: simulating a real 4-second Play click through the actual
+self-scheduling `after()` loop, with real screen painting, measured
+19.7fps raw vs. 19.0fps rectified against a 25fps target — essentially
+no difference, meaning rectification isn't the bottleneck.
+
+Isolating compute from paint made the real cost obvious: the same
+per-tick work measured ~85-98 ticks/sec (10-12ms/tick) when the window
+was hidden and no real `root.update()` was forced, but dropped to
+~20fps (~50ms/tick) once actual screen compositing was included. So the
+gap is generic Tkinter canvas-paint/event-loop overhead for two large
+panes, not the stereo math — `root.after()` only guarantees a *minimum*
+delay, so a callback that runs longer than its scheduled interval simply
+runs slower than requested, with no error or warning.
+
+**Not fixed.** A persistent `PhotoImage` updated in place via `.paste()`
+(instead of constructing a new one every frame, the current approach in
+`_display_bgr_on_canvas`) is a plausible next step, but investigating and
+verifying that is real additional work, deliberately deferred rather than
+squeezed into the same pass that ruled out rectification. See
+`ROADMAP.md` Phase 7's playback speed item.
 
 ## Files reviewed with no bugs found
 

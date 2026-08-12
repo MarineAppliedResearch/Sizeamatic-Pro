@@ -199,16 +199,208 @@ part of this phase.
       class-method-listing one-liner and a build command) from the bottom
       of `README.md`.
 
-## Phase 7 — Usability `[ ]`
+## Phase 7 — Usability `[x]`
 
-Focus on the actual user (analyst) experience of the tool, informed by real
-usage from Phases 1-6.
+Focus on the actual user (analyst) experience of the tool (issue #8). Started
+with a structured usability interview with the project owner (the primary
+analyst stakeholder) rather than guessing at friction points; other analysts'
+input may come in a later round. Executed incrementally, one item at a time,
+with tests added alongside each change — same rhythm as Phase 5, and manual
+proof-test walkthroughs with the project owner before each commit (a
+standing rule from partway through this phase — see `AGENTS.md`'s Testing
+section).
 
-- [ ] Usability review with actual analysts using the tool
-- [ ] Address friction points (the README already flags rectification as "very
-      unacceptably slow", for example)
+**Scope note:** closes with every quiz-derived item done except the
+playback-speed paint-path optimization, deliberately deferred (see that
+item below) rather than squeezed in — the same kind of explicit,
+not-silently-dropped deferral Phase 5 closed with for `main.py` splitting.
+A second usability round (Phase 8) and a packaging/distribution phase
+(Phase 9) are planned next.
 
-## Phase 8 — MARE API integration (future, not yet scoped) `[ ]`
+- [x] Usability interview — see below for the resulting requirements
+- [x] Calibration folder guidance — first pass just renamed the
+      `filedialog.askdirectory` dialog's title to list the four expected
+      NPZ files, but manual testing caught that this doesn't actually
+      help: Windows' native folder picker only shows folder names, never
+      the files inside them, so there's no way to see which candidate
+      folder actually has the right files before picking. Switched to
+      `filedialog.askopenfilename` (filtered to `calibration_*.npz`) and
+      take the containing folder from whichever file gets picked — the
+      file list itself now shows the expected files directly, *and* the
+      dialog's title still spells out all four expected filenames (manual
+      testing again: seeing the filter's matching files isn't the same as
+      being told what the full expected set is). Also `calibration_io.py`'s
+      missing-files error message restates the full requirement rather
+      than just naming what's absent.
+- [x] Pan when zoomed in — new middle-mouse-drag binding (`on_pan_down`/
+      `on_pan_drag`/`on_pan_up` in `main.py`, bound in `video_overlay.py`);
+      left-click stays point placement/drag, right-click stays the existing
+      explicit-refine gesture — panning deliberately uses a separate button
+      so it can't collide with either. Drives the pan offset that already
+      existed per-pane (`viewL`/`viewR`'s `off_x`/`off_y`), previously only
+      touched by mouse-wheel zoom. Redraws via the new
+      `_redisplay_current_frames` (reuses the already-decoded current
+      frame) rather than `_render_current_frames`, so continuous drag
+      motion doesn't force a `cap.set()` keyframe seek on every event.
+      Found and fixed an unrelated small bug along the way — see
+      `FINDINGS.md` #8.
+- [x] Resync control — `on_toggle_lock` already computed and stored
+      `lock_offset_frames` whenever Lock was enabled while both timelines
+      were manually scrubbed to the same moment; that was already the
+      resync mechanism in substance. Now exposed as a directly-editable
+      toolbar Spinbox (`self.offset_var`, `on_offset_changed`) that
+      immediately re-aligns the right timeline when Lock is on, instead of
+      only being settable implicitly via re-toggling Lock. Deliberately out
+      of scope: correcting drift that changes over a video's length (a
+      single offset can't fix that) — not an observed problem yet, revisit
+      only if it becomes one. Also found and fixed a real bug surfaced by
+      this feature: pressing Play with Lock on and a nonzero offset made
+      the timelines count backward — see `FINDINGS.md` #9.
+- [x] Project file — new `project_io.py` (dialog-free, testable, same
+      pattern as `calibration_io.py`): saves/loads a small JSON manifest of
+      left/right video paths, calibration folder path, the resync
+      offset above, the rectified-view toggle state, and the app version
+      that created the file (`main.py`'s `_get_app_version`, read straight
+      from `pyproject.toml` — informational only, no compatibility check).
+      New File menu items "Save Project…"/"Open Project…" so a session
+      doesn't require reloading everything from scratch.
+      `on_load_left_video`/`on_load_right_video`/`on_load_calibration_folder`
+      were each split into a dialog-only wrapper plus a dialog-free
+      `_load_*_from_path`/`_load_calibration_from_folder` helper, so
+      `on_open_project` reuses the exact same loading/error-handling logic
+      a manual reload would use, per stage. Restoring the rectified-view
+      toggle goes through the real `on_toggle_view_rectified` handler
+      (not just the `BooleanVar`), so its existing resolution-mismatch
+      validation still applies if the saved calibration no longer matches.
+      Manual testing surfaced a bigger gap than "reselect files": opening a
+      project should put you back where you actually left off, not just
+      which files were loaded. Added `measurement_log_text` (the
+      Measurement window's Log, saved verbatim as its exact text — there's
+      no separate structured store to save instead, see the measurement
+      output item below) and `last_recorded_snapshot` (which frame each
+      timeline was on, and the exact clicked points, at the moment the
+      *last* "Record" click happened — `main.py`'s `_on_measurement_recorded`,
+      called from `record_current_measurement`). `on_open_project` now
+      restores the Log, then jumps both timelines back to that last-recorded
+      frame and re-places those exact points, so the measurement is visibly
+      back on screen, not just a historical number in the Log.
+- [x] Measurement output overhaul — turned out to need more than a
+      formatting change once the actual goal ("place multiple segments in
+      one frame, each measured, then the connected segments summed up")
+      came up: `self.max_points_per_pane` was hardcoded to 2, making a
+      multi-segment chain impossible to place at all even though the
+      segment math already generalized to any chain length. Raised the
+      cap to 20 (a generous fixed ceiling, not a precisely-reasoned
+      limit), added a chain "Total" row (sum of connected segment
+      lengths, with a quadrature-summed sigma —
+      `sqrt(sum(sigma_i**2))` — across the chain's independently-estimated
+      segment sigmas), and merged points/segments/total into one flat
+      `Type`-tagged table (`measurement_window.py`'s `RESULT_COLUMNS`)
+      with leading Video/Frame/Timestamp columns on every row, so a
+      recorded session pastes into a spreadsheet as one continuous,
+      filterable block. Added an explicit "Record" button + accumulating
+      Log (not auto-logged on every recalculation, so it doesn't fill
+      with in-progress drag states) alongside the existing "current
+      measurement" copy box. Manual testing surfaced a real gap: there
+      was no way to fix or remove a bad recorded measurement. Added a
+      "Measurement ID" column, shared across every row from one Record
+      click (so a whole bad chain can be found together), and made the
+      Log a plain always-editable `tk.Text` rather than disabled/
+      read-only — editing the text directly *is* the fix/delete
+      mechanism, by request, not a placeholder for a future one.
+- [x] Stereo mate point placement — not originally in the quiz, but
+      caught during manual testing of the above: clicking a point on one
+      pane used to ask `stereo_matching.guess_mate_point_on_scanline` to
+      guess where the matching point should go on the opposite pane. In
+      practice this guess was more often unhelpful than not. Changed the
+      initial placement to just reuse the exact same image pixel
+      coordinates on the opposite pane instead — each pane's own draw
+      pipeline already applies that pane's current zoom/pan independently,
+      so this lands correctly on-screen regardless of the two panes'
+      current view state, no extra transform needed. The scanline matcher
+      is still there and still used by the existing right-click-drag
+      "refine" gesture, for whoever wants that assist explicitly.
+- [x] Zoom/pan crop-scale bug — reported as "left pane zoom doesn't line
+      up, right pane does"; turned out to not be a left/right asymmetry
+      at all (every zoom/pan code path is already correctly symmetric) but
+      a real bug reproducible on *either* pane when zoomed out far enough
+      to hit the image-bounds clamp (reachable at `zoom_min` itself with
+      any leftover pan offset). `_display_bgr_on_canvas` was stretching a
+      clamped (shrunk) crop to fill the full display rect regardless,
+      scaling the displayed video differently from the un-clamped scale
+      point overlays use — fixed by mapping the actual clamped crop bounds
+      back through the same screen transform `_image_to_screen` uses, so
+      video content and point overlays can no longer diverge. See
+      `FINDINGS.md` #11.
+- [~] Playback speed — investigated, not yet fixed. The speed dropdown
+      (0.25x-4x) already exists and "1x" is already intended to match
+      native fps, but it's a hardcoded 40ms tick, not read from the
+      loaded video's actual fps (only coincidentally correct for ~25fps
+      footage) — that specific fix is still open. The suspected cause of
+      the reported slowness (live per-frame rectification) was
+      profiled and ruled out: simulating a real 4-second Play click
+      (the actual self-scheduling `after()` loop, with real screen
+      painting) measured 19.7fps raw vs. 19.0fps rectified against a
+      25fps target — rectification itself only costs ~1-2ms/tick.
+      Forcing real `root.update()` calls (vs. a synthetic tight loop with
+      no actual screen paint, which measured ~85-98 ticks/sec) revealed
+      the real cost is generic Tkinter canvas-paint/event-loop overhead,
+      roughly 50ms/tick against the 40ms budget, regardless of
+      rectification. Deliberately not pursued further right now — a
+      persistent `PhotoImage` + `.paste()` instead of recreating one
+      every frame is a plausible next step, but is real additional
+      investigation/work of its own.
+- [x] Anaglyph 3D preview — confirmed novelty-only, not a usability issue.
+      No action; deprioritized for future investment.
+- [x] Sort the above into automated-test-covered vs. manual-judgment-only,
+      and extend `tests/` accordingly as each item lands — done
+      incrementally alongside each item rather than as a separate pass:
+      `tests/test_project_io.py` (round-trip save/load), a chain-placement
+      test in `tests/test_video_overlay.py`, `tests/test_main.py`'s
+      resync/pan/playback-direction/measurement-chain tests, and
+      `tests/test_measurement_window.py` (results table + Record log).
+      The playback-perf investigation itself isn't test-covered — it's a
+      one-off profiling finding, not a behavior to regress-test.
+- [x] Update `ARCHITECTURE.md`/`FINDINGS.md` to reflect any new modules
+      (`project_io.py`) or structural changes — done; also caught and
+      fixed a pre-existing gap while at it: `calibration_io.py` had never
+      been added to `mkdocs.yml`'s nav back in Phase 5, so it was never
+      actually documented on the site despite being pure, tested code.
+
+## Phase 8 — Usability, round 2 `[ ]`
+
+A second round of usability items — this time specified directly by the
+project owner rather than via a fresh quiz (see Phase 7 for that pattern).
+Detailed design/implementation planning (data model, exact UI, edge cases)
+still to come when this phase actually starts; scoped here just enough that
+it isn't forgotten.
+
+- [ ] Video-time sync — let the user type in the real-world timestamp
+      shown burned into the video image itself (e.g. a camera's on-screen
+      clock overlay) at whatever frame they're currently on. The app
+      computes an offset from that one anchor (frame index -> real-world
+      time) and, from then on, shows the calculated real-world time while
+      scrubbing, so the user can jump straight to a moment they already
+      know about (e.g. from a field log) instead of hunting for it
+      visually. This offset needs to be saved in the project file
+      (`project_io.py`) and restored when the video/project reloads —
+      same pattern as the Phase 7 resync offset.
+- [ ] Point visibility — give each measurement point handle a small,
+      precise dot exactly in its center, so the user can see exactly
+      where the point is actually landing, not just the surrounding
+      circle/handle shape.
+
+## Phase 9 — Packaging and distribution `[ ]`
+
+Package Sizeamatic Pro as a standalone, distributable (possibly
+installable) build that bundles all its requirements and runs fully
+offline — so an analyst can get and run it without setting up Python/`uv`
+themselves. Not yet scoped in detail (needs its own planning pass —
+likely built on `pyinstaller`, given the existing build note already
+sitting in git history from before this file existed, or an alternative
+bundler if that turns out not to fit); noted here so it isn't forgotten.
+
+## Phase 10 — MARE API integration (future, not yet scoped) `[ ]`
 
 Interface with the overall MARE API to record measurement data, etc. Noted
 here so it isn't forgotten, but not to be planned in detail until we reach it.

@@ -8,19 +8,19 @@
 > change, trust this file over your assumptions; if you find it's wrong,
 > fix it.
 
-## Current shape: mid-restructure (Phase 5 in progress)
+## Current shape: post-restructure, into Phase 7 (usability)
 
-Target decided (see `ROADMAP.md` Phase 5): replace the module-level-global
-state pattern with real classes owned by the app, one module at a time,
-running the test suite after each step. **Staying on Tkinter** — the
-"unacceptably slow" rendering that partly motivated considering a framework
-migration turned out to be two self-inflicted bottlenecks in `main.py`, both
-fixed directly: a PNG-encode/base64 round trip in `_display_bgr_on_canvas`,
-and an unconditional `cap.set(CAP_PROP_POS_FRAMES)` seek on every frame read
-in `_read_frame_at` (bigger of the two — 19x slower than sequential reads).
+Phase 5's target (real classes owned by the app, replacing the
+module-level-global state pattern) is done — see `ROADMAP.md` Phase 5 for
+how that decision was reached. **Staying on Tkinter** — the "unacceptably
+slow" rendering that partly motivated considering a framework migration
+turned out to be two self-inflicted bottlenecks in `main.py`, both fixed
+directly: a PNG-encode/base64 round trip in `_display_bgr_on_canvas`, and
+an unconditional `cap.set(CAP_PROP_POS_FRAMES)` seek on every frame read in
+`_read_frame_at` (bigger of the two — 19x slower than sequential reads).
 
 All four supporting modules that used to mix GUI state into plain functions
-(or worse, module-level globals) are now real classes, each owned by an
+(or worse, module-level globals) are real classes, each owned by an
 instance on the app:
 
 - **`calibration_summary.py`** — `CalibrationSummaryWindow`
@@ -28,7 +28,13 @@ instance on the app:
   fragility that caused finding 1 in `FINDINGS.md` (a nested closure
   needing, but missing, its own `global` declaration).
 - **`measurement_window.py`** — `MeasurementWindow`
-  (`app.measurement_window`). Same conversion.
+  (`app.measurement_window`). Same conversion. Its results table,
+  "current measurement" copy box, and the (Phase 7) explicit-"Record"
+  accumulating log all share one row format — a single flat table tagged
+  by a `Type` column ("Point"/"Segment"/"Total") with leading
+  Video/Frame/Timestamp columns on every row — defined once as
+  `RESULT_COLUMNS`/`RESULT_HEADERS` at module level so the table, the
+  copy block, and the log can't drift apart from each other.
 - **`anaglyph_preview.py`** — `AnaglyphPreview` (`app.anaglyph_preview`).
   Same conversion again — this one also structurally eliminates findings
   2 (an uninitialized module global) and 3 (a bound method can't be
@@ -46,20 +52,34 @@ tested by constructing an instance directly for anything that does need a
 real canvas/window (see `tests/test_regressions.py`,
 `tests/test_video_overlay.py`).
 
-`stereo_matching.py` (stereo point matching and triangulation math) and the
-new `calibration_io.py` (calibration NPZ loading/validation, pulled out of
-`main.py`'s `on_load_calibration_folder`) are pure functions with no GUI
-code — no restructuring needed for either.
+`stereo_matching.py` (stereo point matching and triangulation math),
+`calibration_io.py` (calibration NPZ loading/validation, pulled out of
+`main.py`'s `on_load_calibration_folder`), and the Phase 7 addition
+`project_io.py` (saves/loads a small JSON manifest of video paths,
+calibration folder, and resync offset) are all pure functions with no GUI
+code — no class needed for any of them.
 
-**Still open — not yet done:** `main.py` (~1,750 lines) itself hasn't been
-"thinned." It still holds the core `SizeamaticProApp` class with window/menu
-construction, video I/O (two OpenCV `VideoCapture` objects held open for the
-app's lifetime), playback/timeline/slider logic, rendering, and zoom/pan
-state all bundled together, wiring the four classes above together via
-composition (`self.cal_summary_window`, `self.measurement_window`,
-`self.anaglyph_preview`, `self.video_overlay`). Whether/how to split
-`main.py`'s own remaining concerns further is an open question for the rest
-of Phase 5.
+`main.py`'s own video/calibration loaders each follow the same
+dialog-vs-logic split as `calibration_io.py`'s extraction: `on_load_left_
+video`/`on_load_right_video`/`on_load_calibration_folder` only handle the
+file/folder picker, delegating the actual loading and UI-state update to
+a dialog-free `_load_left_video_from_path`/`_load_right_video_from_path`/
+`_load_calibration_from_folder`. `on_open_project` drives those same
+dialog-free helpers directly with paths read from a project file, so a
+project load surfaces the exact same per-stage error handling a manual
+reload would.
+
+**Still open — not yet done:** `main.py` (~2,000 lines and growing) itself
+hasn't been "thinned." It still holds the core `SizeamaticProApp` class
+with window/menu construction, video I/O (two OpenCV `VideoCapture`
+objects held open for the app's lifetime), playback/timeline/slider logic
+(including the resync offset and middle-mouse pan state added in Phase 7),
+rendering, and zoom/pan state all bundled together, wiring the classes
+above together via composition (`self.cal_summary_window`,
+`self.measurement_window`, `self.anaglyph_preview`, `self.video_overlay`).
+Whether/how to split `main.py`'s own remaining concerns further is still
+an open, deliberately deferred design question — see `ROADMAP.md` Phase
+5's scope note; nothing since has revisited it.
 
 ## Other first-party scripts
 

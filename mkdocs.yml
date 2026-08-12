@@ -11,6 +11,8 @@ watch:
   - stereo_matching.py
   - measurement_window.py
   - calibration_summary.py
+  - calibration_io.py
+  - project_io.py
   - anaglyph_preview.py
   - video_overlay.py
   - generate_calibration_report.py
@@ -26,6 +28,8 @@ nav:
       - stereo_matching.py: reference/stereo_matching.md
       - measurement_window.py: reference/measurement_window.md
       - calibration_summary.py: reference/calibration_summary.md
+      - calibration_io.py: reference/calibration_io.md
+      - project_io.py: reference/project_io.md
       - anaglyph_preview.py: reference/anaglyph_preview.md
       - video_overlay.py: reference/video_overlay.md
       - generate_calibration_report.py: reference/generate_calibration_report.md

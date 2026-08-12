@@ -25,10 +25,16 @@ def test_load_calibration_bundle_success():
 
 def test_load_calibration_bundle_reports_missing_files(tmp_path):
     """An empty folder should report which specific files are missing,
-    rather than failing generically."""
+    and remind the user of the full set a calibration folder needs — this
+    is the first thing a new user sees if they point the loader at the
+    wrong folder, so it should be self-explanatory on its own (see
+    ROADMAP.md Phase 7's calibration folder guidance item)."""
     cal, err = calibration_io.load_calibration_bundle(str(tmp_path))
     assert cal is None
     assert "calibration_intrinsics.npz" in err
+    assert "calibration_extrinsics.npz" in err
+    assert "calibration_rectification.npz" in err
+    assert "calibration_maps.npz" in err
 
 
 def test_load_calibration_bundle_rejects_left_resolution_mismatch():

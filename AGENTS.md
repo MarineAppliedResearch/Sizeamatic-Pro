@@ -18,6 +18,16 @@ keep those files honest:
   restructuring `main.py`, or building a test framework) without asking first,
   even if it seems like a natural next step. Check off items as you finish
   them.
+- **`agents_history.md`** — an append-only human- and assistant-readable
+  history of the work done on this project with a coding agent. Unlike
+  `ARCHITECTURE.md`/`ROADMAP.md`, this file is never edited to stay
+  current — each project/phase/issue gets its own roughly-four-paragraph
+  summary appended once that unit of work wraps up (or reflecting
+  progress so far, if it's still in progress). Read it for context on how
+  and why past work happened; add a new entry to it when you finish a
+  phase or a similarly-scoped piece of work, rather than only relying on
+  git history or chat logs, which don't carry the reasoning behind
+  decisions forward to a future session.
 
 ## What this project is
 
@@ -149,6 +159,29 @@ Run the suite: `uv run pytest`. Everything lives under `tests/`.
 - Every test function gets a docstring too, same as any other code — see
   the "Coding conventions" section above; it isn't scoped to exclude
   `tests/`.
+
+### Manual proof test — required before committing
+
+`pytest` passing is not the same as the project owner having verified
+anything. Automated tests catch regressions in logic an agent already
+wrote and already decided what "correct" means for; they don't catch a
+UX decision that's wrong, a UI element that's confusing or misplaced, or
+a bug that only shows up when a human actually drives the real app. This
+matters most for usability-facing work, but applies to bug fixes too —
+"I profiled it and the numbers look right" is not the same as the
+project owner seeing the fix work.
+
+**Before proposing a commit for any change a human could observe in the
+running app** (a bug fix, a new UI control, a behavior change — not a
+pure docs/internal-refactor change with no observable effect), give the
+project owner an explicit manual test: numbered steps describing exactly
+what to click/do in the real app, and exactly what they should see if it
+worked (and, where useful, what the old broken/missing behavior looked
+like for contrast). Wait for them to actually perform it and confirm
+before committing — don't treat "the tests pass" or "I verified it
+myself with a script" as a substitute for the project owner's own
+hands-on confirmation. If several changes have piled up before this step
+happened, walk through all of them, not just the most recent one.
 
 ## Git workflow
 
