@@ -185,6 +185,143 @@ def test_on_open_recent_project_delegates_to_open_project_from_path(sizeamatic_a
     assert calls == ["some/project.json"]
 
 
+def test_saving_a_project_never_touches_the_real_appdata_recent_projects_file(
+    sizeamatic_app, monkeypatch, tmp_path
+):
+    """Regression test for a real bug: `on_save_project`/`on_open_project`
+    used to silently read and write the actual per-user
+    `%APPDATA%\\SizeamaticPro\\recent_projects.json` whenever a test
+    exercised them without its own explicit monkeypatch for
+    `recent_projects.get_recent_projects_path` - clobbering the project
+    owner's real Recent Projects list every time the test suite ran
+    (discovered when the project owner reported their real recent
+    projects had been replaced by pytest tmp-path entries). conftest.py's
+    autouse `_isolate_recent_projects_file` fixture now redirects every
+    test automatically - this test deliberately adds no monkeypatch of
+    its own for that path, to prove the protection holds without it."""
+
+    app = sizeamatic_app
+    save_path = str(tmp_path / "project.json")
+    monkeypatch.setattr("main.filedialog.asksaveasfilename", lambda **_kwargs: save_path)
+
+    real_path = os.path.join(os.environ.get("APPDATA", ""), "SizeamaticPro", "recent_projects.json")
+    mtime_before = os.path.getmtime(real_path) if os.path.isfile(real_path) else None
+
+    app.on_save_project()
+
+    mtime_after = os.path.getmtime(real_path) if os.path.isfile(real_path) else None
+    assert mtime_after == mtime_before
+
+
+def test_app_window_title_reflects_no_project_then_a_saved_one(sizeamatic_app, monkeypatch, tmp_path):
+    """The main window's title should start as plain "Sizeamatic Pro" and
+    switch to "Sizeamatic Pro - <project name>" once a project has been
+    saved this session (ROADMAP.md Phase 8's window-title item) - the
+    project name is the file's base name, without its directory or
+    ".json" extension."""
+
+    app = sizeamatic_app
+    assert app.root.title() == "Sizeamatic Pro"
+
+    save_path = str(tmp_path / "MySurveyDive.json")
+    monkeypatch.setattr("main.filedialog.asksaveasfilename", lambda **_kwargs: save_path)
+    monkeypatch.setattr("recent_projects.get_recent_projects_path", lambda: str(tmp_path / "recent.json"))
+
+    app.on_save_project()
+
+    assert app.current_project_name == "MySurveyDive"
+    assert app.root.title() == "Sizeamatic Pro - MySurveyDive"
+
+
+def test_app_window_title_updates_on_open_project_too(sizeamatic_app, monkeypatch, tmp_path):
+    """Opening a project should update the window title the same way
+    saving one does, not just on Save Project."""
+
+    app = sizeamatic_app
+    open_path = str(tmp_path / "ReefTransect3.json")
+    err = project_io.save_project(
+        open_path,
+        left_video_path=None,
+        right_video_path=None,
+        calibration_folder=None,
+        lock_offset_frames=0,
+        view_rectified=False,
+        app_version="0.1.0",
+        measurement_log_text="",
+        last_recorded_snapshot=None,
+        real_time_anchor_frame=None,
+        real_time_anchor_iso=None,
+    )
+    assert err is None
+
+    monkeypatch.setattr("main.filedialog.askopenfilename", lambda **_kwargs: open_path)
+    monkeypatch.setattr("recent_projects.get_recent_projects_path", lambda: str(tmp_path / "recent.json"))
+
+    app.on_open_project()
+
+    assert app.current_project_name == "ReefTransect3"
+    assert app.root.title() == "Sizeamatic Pro - ReefTransect3"
+
+
+def test_already_open_measurement_window_retitles_when_project_saved(sizeamatic_app, monkeypatch, tmp_path):
+    """A Measurement window opened *before* a project is saved should
+    still pick up the project name in its title afterward - not just
+    windows opened for the first time after the project is loaded."""
+
+    app = sizeamatic_app
+    app.measurement_window.ensure_window()
+    assert app.measurement_window.win.title() == "Sizeamatic Pro"
+
+    save_path = str(tmp_path / "MySurveyDive.json")
+    monkeypatch.setattr("main.filedialog.asksaveasfilename", lambda **_kwargs: save_path)
+    monkeypatch.setattr("recent_projects.get_recent_projects_path", lambda: str(tmp_path / "recent.json"))
+
+    app.on_save_project()
+
+    assert app.measurement_window.win.title() == "Sizeamatic Pro - MySurveyDive"
+
+    app.measurement_window._on_close()
+
+
+def test_measurement_window_opened_after_project_loaded_shows_project_title(
+    sizeamatic_app, monkeypatch, tmp_path
+):
+    """A Measurement window opened for the first time *after* a project
+    is already loaded should get the project-aware title immediately,
+    not the plain default."""
+
+    app = sizeamatic_app
+
+    save_path = str(tmp_path / "MySurveyDive.json")
+    monkeypatch.setattr("main.filedialog.asksaveasfilename", lambda **_kwargs: save_path)
+    monkeypatch.setattr("recent_projects.get_recent_projects_path", lambda: str(tmp_path / "recent.json"))
+    app.on_save_project()
+
+    app.measurement_window.ensure_window()
+    assert app.measurement_window.win.title() == "Sizeamatic Pro - MySurveyDive"
+
+    app.measurement_window._on_close()
+
+
+def test_calibration_summary_window_also_shows_project_title(sizeamatic_app, monkeypatch, tmp_path):
+    """The Calibration Summary window should follow the same
+    project-aware title as the main window and the Measurement window -
+    "app name and then - project name" applies to every window, not
+    just the main one."""
+
+    app = sizeamatic_app
+
+    save_path = str(tmp_path / "MySurveyDive.json")
+    monkeypatch.setattr("main.filedialog.asksaveasfilename", lambda **_kwargs: save_path)
+    monkeypatch.setattr("recent_projects.get_recent_projects_path", lambda: str(tmp_path / "recent.json"))
+    app.on_save_project()
+
+    app.cal_summary_window.ensure_window()
+    assert app.cal_summary_window.win.title() == "Sizeamatic Pro - MySurveyDive"
+
+    app.cal_summary_window._on_close()
+
+
 @pytest.mark.skipif(
     not (os.path.isfile(LEFT_VIDEO) and os.path.isfile(RIGHT_VIDEO)),
     reason="Real example videos are gitignored/local-only, not present here.",

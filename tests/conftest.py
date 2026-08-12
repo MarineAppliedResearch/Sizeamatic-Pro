@@ -35,6 +35,29 @@ import tkinter as tk
 import numpy as np
 import pytest
 
+import recent_projects
+
+
+@pytest.fixture(autouse=True)
+def _isolate_recent_projects_file(tmp_path, monkeypatch):
+    """Redirect recent_projects.py's persistent file to a throwaway
+    tmp_path location for every test, automatically.
+
+    Without this, a test that exercises `on_save_project`/
+    `on_open_project` without its own explicit monkeypatch for
+    `recent_projects.get_recent_projects_path` silently reads and writes
+    the real per-user `%APPDATA%\\SizeamaticPro\\recent_projects.json`
+    on whatever machine runs the suite — which is exactly what happened
+    before this fixture existed: running the tests clobbered the
+    project owner's actual Recent Projects list with pytest tmp-path
+    entries. Autouse means every test gets this protection whether or
+    not it remembers to ask for it.
+    """
+    monkeypatch.setattr(
+        "recent_projects.get_recent_projects_path",
+        lambda: str(tmp_path / "recent_projects.json"),
+    )
+
 
 class FakeVar:
     """Minimal stand-in for `tkinter.BooleanVar`/`tkinter.IntVar`.
@@ -92,6 +115,16 @@ class FakeApp:
         Returns:
             None
         """
+
+    def _app_window_title(self):
+        """Fixed stand-in for the real project-name-aware window title,
+        so `ensure_window` methods that set it during tests don't raise
+        `AttributeError`.
+
+        Returns:
+            str: A fixed placeholder title.
+        """
+        return "Sizeamatic Pro"
 
 
 @pytest.fixture

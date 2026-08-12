@@ -310,3 +310,74 @@ Isaac (a video-time-sync feature anchoring a burned-in on-screen clock to
 the video's own frame timeline, plus a precise center-dot on each point
 handle), and Phase 9, packaging Sizeamatic Pro as a standalone,
 offline-capable distributable.
+
+Phase 8 (issue #9) opened with the three items scoped at the end of Phase
+7. Point visibility landed first and smallest: a fixed 2px solid red dot
+drawn exactly at each point's center, on top of the existing hollow
+handle ring, so the precise clicked/dragged pixel is visible rather than
+just the ring's general vicinity. Video-time sync — anchoring a
+real-world date/time to whatever frame currently shows a burned-in
+on-screen camera clock, so the app can calculate real time at any other
+frame — took three full design iterations, each rejected sharply and
+specifically by Isaac: a single free-text date string ("I don't want to
+type in a string"), then six `ttk.Spinbox`es pre-filled with "now" that
+auto-applied on every change ("I don't want them to be spinners! and i
+don't want them to be populated with todays time!" — the eager
+FocusOut-triggered validation against leftover pre-filled values was
+also throwing spurious "not a valid date/time" errors), before landing on
+six empty plain `ttk.Entry` boxes with auto-advance-on-typing and a
+single explicit "Set Time Sync" button as the only validation trigger.
+Once that stuck, Isaac asked for the readout relocated below the scrub
+bars, a green checkmark synced indicator instead of trying to recolor
+the button itself (unreliable under Windows ttk theming), the six boxes
+to keep live-tracking the calculated time during playback rather than
+staying frozen at the anchor, and — after seeing ".840" on a timestamp —
+the sub-second display changed from a fractional-seconds decimal to an
+`HH:MM:SS:FF` frame-in-second count, "the actual frame number in this
+particular second, not a percentage."
+
+The third originally-scoped item, a rectified/not-rectified indicator,
+followed the same request-then-refine pattern via two quick design
+questions rather than a rejected first attempt: a bold toolbar label
+reading "NOT RECTIFIED" in red or "RECTIFIED" in green (placed in the
+toolbar rather than per-pane), wired into the existing
+`_refresh_status_left` call sites so every place that already reacted to
+view/calibration changes updated it for free, plus an orange overlay
+color for the point ring/connecting line/index label while unrectified —
+deliberately leaving the small red center-dot from the point-visibility
+item unchanged either way, since it marks the exact clicked pixel rather
+than measurement validity. With all three quiz-derived items done and
+confirmed, Isaac added two more directly: a File > Recent Projects
+submenu backed by a new `recent_projects.py` module, storing the last
+five saved/opened project paths under `%APPDATA%\SizeamaticPro\` (chosen
+specifically so it survives the app folder being replaced/updated once
+Phase 9 packages this as a standalone .exe) and rebuilding itself fresh
+on every open so a moved/deleted project quietly drops off the list
+instead of showing a dead entry; and project-name-aware window titles
+("Sizeamatic Pro - <project name>") applied to all three of the app's
+windows (main, Measurement, Calibration Summary), deliberately replacing
+those two sub-windows' fixed "Measurement"/"Calibration Summary" labels
+rather than appending to them, per Isaac's explicit design choice between
+two offered options.
+
+Shortly after Recent Projects shipped, Isaac reported "my recent
+projects just disappeared when i did a new build" — which turned out to
+mean the list still existed but had been replaced by unfamiliar entries,
+"the demo projects that were there before." Investigation found a real,
+already-shipped bug: three pre-existing tests that called
+`on_save_project`/`on_open_project` for unrelated reasons (from before
+Recent Projects existed) had no reason to know a new call inside those
+methods would now read and write the actual per-user
+`%APPDATA%\SizeamaticPro\recent_projects.json`, so every test run
+silently overwrote Isaac's real list with pytest's own `tmp_path`
+entries — confirmed by reading the real file directly and finding it
+full of `AppData\Local\Temp\pytest-of-isaac\...` paths. Rather than
+patching just those three tests, the fix was an `autouse=True` pytest
+fixture (`_isolate_recent_projects_file` in `conftest.py`) that redirects
+every test's copy of that path automatically, closing the whole bug
+class rather than the one instance of it — verified by temporarily
+disabling the fixture and confirming a new regression test failed
+exactly as expected before re-enabling it, then deleting Isaac's
+by-then-pytest-polluted real file so it starts clean. Documented as
+`FINDINGS.md` #12. Phase 8 closed with every item — the original three
+plus the two added mid-phase — done and confirmed by Isaac.

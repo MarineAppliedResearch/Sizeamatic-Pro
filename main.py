@@ -352,6 +352,14 @@ class SizeamaticProApp:
         `measurement_window.py`'s `record_current_measurement` right
         after it successfully appends to the Log."""
 
+        self.current_project_name = None
+        """The loaded project's file name, without its directory or
+        ".json" extension, or None if no project has been saved/opened
+        this session yet. Set by `on_save_project`/
+        `_open_project_from_path`; read by `_app_window_title` to show
+        which project every window (main, Measurement, Calibration
+        Summary) belongs to."""
+
         self.max_points_per_pane = 20
         """Point cap per pane. A generous fixed ceiling rather than a
         precisely-reasoned limit — high enough that no realistic
@@ -1995,6 +2003,10 @@ class SizeamaticProApp:
             return
 
         recent_projects.add_recent_project(path)
+
+        self.current_project_name = os.path.splitext(os.path.basename(path))[0]
+        self._refresh_window_titles()
+
         self._set_status_mid("Project saved")
 
     def on_open_project(self):
@@ -2107,6 +2119,9 @@ class SizeamaticProApp:
         self._update_frame_labels()
 
         recent_projects.add_recent_project(path)
+
+        self.current_project_name = os.path.splitext(os.path.basename(path))[0]
+        self._refresh_window_titles()
 
     def on_open_recent_project(self, path):
         """Open a project path chosen from the File > Recent Projects submenu.
@@ -2731,6 +2746,37 @@ class SizeamaticProApp:
             self.rectified_indicator.config(text="RECTIFIED", foreground="#008000")
         else:
             self.rectified_indicator.config(text="NOT RECTIFIED", foreground="#cc0000")
+
+    def _app_window_title(self):
+        """Build the title text every app window should show.
+
+        Returns:
+            str: "Sizeamatic Pro", or "Sizeamatic Pro - <project name>"
+            once a project has been saved/opened this session
+            (`self.current_project_name`).
+        """
+        if self.current_project_name:
+            return f"Sizeamatic Pro - {self.current_project_name}"
+        return "Sizeamatic Pro"
+
+    def _refresh_window_titles(self):
+        """Apply the current project-aware title to every open window.
+
+        Updates the main window plus the Measurement and Calibration
+        Summary windows if they're currently open — a window not open
+        yet picks up the right title when it's built, via
+        `_app_window_title` being read directly in its own
+        `ensure_window`.
+
+        Returns:
+            None
+        """
+        title = self._app_window_title()
+        self.root.title(title)
+        if self.measurement_window.win is not None:
+            self.measurement_window.win.title(title)
+        if self.cal_summary_window.win is not None:
+            self.cal_summary_window.win.title(title)
 
     def _short_path(self, path, max_len=45):
         """Truncate a file path for compact status bar display.

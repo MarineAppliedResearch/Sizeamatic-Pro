@@ -371,9 +371,10 @@ A second usability round (Phase 8) and a packaging/distribution phase
 
 A second round of usability items — this time specified directly by the
 project owner rather than via a fresh quiz (see Phase 7 for that pattern).
-Recent Projects was added mid-phase, after the other three items were
-already done and confirmed — not part of the original plan, but small
-enough to fold in rather than spin off its own phase.
+Recent Projects and the window-title project name were both added
+mid-phase, after the first three items were already done and confirmed —
+not part of the original plan, but small enough to fold in rather than
+spin off their own phase.
 
 - [x] Point visibility — `video_overlay.py`'s `draw_pane` now draws a
       small solid red dot (`CENTER_DOT_RADIUS_PX`, 2px screen radius,
@@ -462,7 +463,27 @@ enough to fold in rather than spin off its own phase.
       `add_recent_project` on success; `on_open_project`'s actual load/
       restore logic was pulled out into `_open_project_from_path` so the
       submenu's click handler (`on_open_recent_project`) goes through
-      identical logic, just skipping the file dialog.
+      identical logic, just skipping the file dialog. Shortly after this
+      shipped, running the test suite was found to be silently
+      clobbering the real per-user recent-projects file — see
+      `FINDINGS.md` #12 for the bug and the autouse test-isolation fix.
+- [x] Window titles show the loaded project name — every window's title
+      bar (main window, Measurement, Calibration Summary) reads
+      "Sizeamatic Pro" normally, or "Sizeamatic Pro - <project name>"
+      once a project has been saved or opened this session
+      (`self.current_project_name`, the file's base name without its
+      directory or ".json" extension), so it's obvious at a glance
+      which project a given window belongs to. `main.py`'s
+      `_app_window_title` builds the string; `_refresh_window_titles`
+      (called from `on_save_project`/`_open_project_from_path`) applies
+      it to the main window plus the Measurement/Calibration Summary
+      windows if they're already open. A window opened for the first
+      time *after* a project is already loaded picks up the right title
+      immediately too, since each window's own `ensure_window` reads
+      `self.app._app_window_title()` directly at creation time rather
+      than hardcoding "Measurement"/"Calibration Summary" — the
+      project-name suffix intentionally replaces those fixed labels
+      rather than appending to them, per the project owner's request.
 
 ## Phase 9 — Packaging and distribution `[ ]`
 

@@ -241,8 +241,11 @@ class MeasurementWindow:
         # Create a separate top level window owned by the main application root.
         win = tk.Toplevel(self.app.root)
 
-        # Set the user visible title for the measurement results window.
-        win.title("Measurement")
+        # Match the main window's title (app name, plus " - <project
+        # name>" once a project has been saved/opened this session) so
+        # every window makes clear which project it belongs to, rather
+        # than a fixed "Measurement" that never reflects that.
+        win.title(self.app._app_window_title())
 
         # Give the window an initial size large enough for the results table,
         # the copy box, and the log.
