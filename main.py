@@ -15,6 +15,7 @@ files, and `README.md` for the user-facing description of the app.
 import datetime # Used for the real-world time anchor/sync feature.
 import os
 import sys # Used for icon resources
+import time # Used to enforce the startup splash's minimum display duration.
 import tomllib # Reads pyproject.toml's version for the project file's app_version field.
 
 import tkinter as tk
@@ -34,6 +35,7 @@ import calibration_summary # calibration_summary contains the Tkinter calibratio
 import calibration_io      # Loads and validates calibration NPZ files, without the directory-chooser dialog.
 import project_io          # Saves/loads a project manifest (video paths, calibration folder, resync offset).
 import recent_projects      # Persists the File > Recent Projects submenu's list of project paths.
+import prepare_splash_image # Flattens/labels the startup splash image (works from source or packaged).
 import video_overlay # Manages drawing the overlay on the video
 
 
@@ -59,6 +61,31 @@ def resource_path(relative_path):
 
     # Otherwise, build the path from the normal source directory.
     return os.path.join(os.path.abspath("."), relative_path)
+
+
+def get_app_version():
+    """Read this app's version string from `pyproject.toml`.
+
+    A standalone module-level function (rather than only a method on
+    `SizeamaticProApp`) so the startup splash — shown before that app
+    object is even constructed — can also read the version, for the
+    "vX.Y.Z" text drawn onto it (ROADMAP.md Phase 9). Reads via
+    `resource_path` rather than a path relative to `__file__`, since a
+    packaged build's `__file__` resolves inside PyInstaller's temporary
+    extraction folder, not next to a real `pyproject.toml` — the build
+    (`sizeamatic.spec`) bundles `pyproject.toml` as a data file
+    specifically so this still resolves correctly there too.
+
+    Returns:
+        str: The version string (e.g. "0.1.0"), or "unknown" if
+        `pyproject.toml` can't be found or parsed for any reason.
+    """
+    try:
+        with open(resource_path("pyproject.toml"), "rb") as f:
+            data = tomllib.load(f)
+        return str(data["project"]["version"])
+    except Exception:
+        return "unknown"
 
 
 class SizeamaticProApp:
@@ -95,7 +122,19 @@ class SizeamaticProApp:
         action first opens them."""
 
         # ---- Window setup ----
-        self.root.title("Sizeamatic Pro")
+        self.current_project_name = None
+        """The loaded project's file name, without its directory or
+        ".json" extension, or None if no project has been saved/opened
+        this session yet. Set by `on_save_project`/
+        `_open_project_from_path`; read by `_app_window_title` to show
+        which project every window (main, Measurement, Calibration
+        Summary) belongs to. Declared here, before the first
+        `self.root.title(...)` call just below, rather than in the
+        later scattered-init section — the same FINDINGS.md #6
+        attribute-ordering pitfall as `offset_var`/`real_time_anchor_*`
+        before it: `_app_window_title` reads it immediately below."""
+
+        self.root.title(self._app_window_title())
         self.root.minsize(1100, 700)
 
         # ---- State flags (UI only for now) ----
@@ -351,14 +390,6 @@ class SizeamaticProApp:
         `_on_measurement_recorded`, called from
         `measurement_window.py`'s `record_current_measurement` right
         after it successfully appends to the Log."""
-
-        self.current_project_name = None
-        """The loaded project's file name, without its directory or
-        ".json" extension, or None if no project has been saved/opened
-        this session yet. Set by `on_save_project`/
-        `_open_project_from_path`; read by `_app_window_title` to show
-        which project every window (main, Measurement, Calibration
-        Summary) belongs to."""
 
         self.max_points_per_pane = 20
         """Point cap per pane. A generous fixed ceiling rather than a
@@ -1940,23 +1971,15 @@ class SizeamaticProApp:
     def _get_app_version(self):
         """Read this app's version string from `pyproject.toml`.
 
-        Read directly from `pyproject.toml` rather than a separately
-        maintained constant, so there's exactly one place the version
-        number lives. Only used informationally (stamped into saved
-        project files so you can tell what version created one) — never
-        for a compatibility check.
+        Thin delegate to the module-level `get_app_version` (needed as a
+        standalone function so the startup splash — shown before this
+        app object is even constructed — can read the version too).
 
         Returns:
             str: The version string (e.g. "0.1.0"), or "unknown" if
             `pyproject.toml` can't be found or parsed for any reason.
         """
-        try:
-            pyproject_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pyproject.toml")
-            with open(pyproject_path, "rb") as f:
-                data = tomllib.load(f)
-            return str(data["project"]["version"])
-        except Exception:
-            return "unknown"
+        return get_app_version()
 
     def on_save_project(self):
         """Prompt for a save location and write the current project state.
@@ -2751,13 +2774,18 @@ class SizeamaticProApp:
         """Build the title text every app window should show.
 
         Returns:
-            str: "Sizeamatic Pro", or "Sizeamatic Pro - <project name>"
-            once a project has been saved/opened this session
-            (`self.current_project_name`).
+            str: "Sizeamatic Pro vX.Y.Z", or "Sizeamatic Pro vX.Y.Z -
+            <project name>" once a project has been saved/opened this
+            session (`self.current_project_name`). Omits the version
+            entirely if it couldn't be read (`_get_app_version()`
+            returned "unknown"), rather than showing a literal
+            "vunknown".
         """
+        version = self._get_app_version()
+        base = f"Sizeamatic Pro v{version}" if version != "unknown" else "Sizeamatic Pro"
         if self.current_project_name:
-            return f"Sizeamatic Pro - {self.current_project_name}"
-        return "Sizeamatic Pro"
+            return f"{base} - {self.current_project_name}"
+        return base
 
     def _refresh_window_titles(self):
         """Apply the current project-aware title to every open window.
@@ -3558,14 +3586,85 @@ class SizeamaticProApp:
         return True
 
 
+STARTUP_SPLASH_MIN_SECONDS = 4.0
+"""Minimum time the startup splash (`_show_startup_splash`) stays on
+screen, even if building the app finishes faster than that - so it's
+actually readable rather than a barely-visible flash on a fast machine
+or a source run. Within the project owner's requested 3-5 second
+range."""
+
+STARTUP_SPLASH_MAX_WIDTH_PX = 720
+"""Cap the splash's on-screen width, scaling the source art down
+proportionally if it's larger (assets/splash-pro.png is 1536px wide -
+full native resolution filled most of the screen, and was noticeably
+bigger than the size PyInstaller's own bootloader splash used to scale
+it to before this app got its own Tk-based splash). Matches roughly
+what that previous scaling already looked like."""
+
+
+def _show_startup_splash(root):
+    """Show a splash window while the rest of the app builds.
+
+    A real Tkinter window (undecorated, via `overrideredirect`) rather
+    than relying on PyInstaller's separate bootloader `--splash`
+    feature, so it shows identically whether launched from source
+    (`uv run python main.py`) or from a packaged `.exe` — the bootloader
+    splash only exists inside a packaged build, and only covers a
+    onefile build's self-extraction phase, before this function (or any
+    of this app's own code) even runs.
+
+    Args:
+        root (tkinter.Tk): The (still-withdrawn) root window to parent
+            the splash `Toplevel` to.
+
+    Returns:
+        tkinter.Toplevel: The splash window. Caller is responsible for
+        destroying it once the real app window is ready to show.
+    """
+    img = prepare_splash_image.flatten_splash_image(resource_path("assets/splash-pro.png"))
+    img = prepare_splash_image.add_version_text(img, f"v{get_app_version()}")
+
+    if img.width > STARTUP_SPLASH_MAX_WIDTH_PX:
+        scale = STARTUP_SPLASH_MAX_WIDTH_PX / img.width
+        img = img.resize((STARTUP_SPLASH_MAX_WIDTH_PX, round(img.height * scale)), Image.LANCZOS)
+
+    splash = tk.Toplevel(root)
+    splash.configure(bg="black")
+
+    photo = ImageTk.PhotoImage(img)
+    label = tk.Label(splash, image=photo, bd=0, bg="black")
+    label.image = photo  # Keep a reference - Tkinter doesn't hold its own.
+    label.pack()
+
+    # overrideredirect (no title bar/border) after the label exists, and
+    # a forced update_idletasks before reading winfo_screen*, avoids a
+    # Windows/Tcl-Tk quirk where an undecorated Toplevel can render
+    # solid black instead of its actual content if made borderless and
+    # topmost before it has anything to paint.
+    splash.update_idletasks()
+    splash.overrideredirect(True)
+
+    # Center on the primary screen.
+    sw = splash.winfo_screenwidth()
+    sh = splash.winfo_screenheight()
+    x = (sw - img.width) // 2
+    y = (sh - img.height) // 2
+    splash.geometry(f"{img.width}x{img.height}+{x}+{y}")
+
+    splash.lift()
+    splash.update()
+
+    return splash
+
+
 def main():
     """Entry point: build the Tk root window and run the application.
 
     Sets the Windows taskbar application identity (so the app groups under
-    its own taskbar icon rather than a generic Python one), creates the Tk
-    root window, applies the window icon if available, constructs
-    `SizeamaticProApp`, wires up the close protocol, and starts the Tk
-    event loop.
+    its own taskbar icon rather than a generic Python one), shows a
+    startup splash while the rest of the window builds, applies the
+    window icon if available, constructs `SizeamaticProApp`, wires up
+    the close protocol, and starts the Tk event loop.
 
     Returns:
         None
@@ -3581,9 +3680,17 @@ def main():
 
     root = tk.Tk()
 
-    # Set the application window icon, if one is present.
-    # assets/icon.ico is not currently committed to the repo, so this is
-    # best-effort: fall back to the default Tk icon rather than crashing.
+    # Keep the main window hidden until it's actually built and ready to
+    # show - the splash below covers that gap instead.
+    root.withdraw()
+
+    splash_shown_at = time.monotonic()
+    splash = _show_startup_splash(root)
+
+    # Set the application window icon. assets/icon.ico is regenerated
+    # from assets/default-icon.png on every build (create_app_icon.py),
+    # so this stays best-effort: fall back to the default Tk icon rather
+    # than crashing if it's ever missing/invalid.
     try:
         root.iconbitmap(resource_path("assets/icon.ico"))
     except tk.TclError:
@@ -3593,6 +3700,22 @@ def main():
     app = SizeamaticProApp(root)
 
     root.protocol("WM_DELETE_WINDOW", app.on_app_close)
+
+    # Keep the splash up for a minimum duration even if building the app
+    # above finished faster than that, so it's actually readable rather
+    # than a barely-visible flash on a fast machine/source run. Pumps
+    # the splash's own event loop while waiting (short update()+sleep()
+    # steps) rather than a single blocking sleep, so Windows doesn't
+    # mark the still-open splash window "Not Responding".
+    remaining = STARTUP_SPLASH_MIN_SECONDS - (time.monotonic() - splash_shown_at)
+    while remaining > 0:
+        step = min(remaining, 0.05)
+        splash.update()
+        time.sleep(step)
+        remaining -= step
+
+    splash.destroy()
+    root.deiconify()
 
     root.mainloop()
 

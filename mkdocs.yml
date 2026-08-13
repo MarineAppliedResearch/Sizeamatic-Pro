@@ -18,6 +18,9 @@ watch:
   - video_overlay.py
   - generate_calibration_report.py
   - create_charuco_calibration_target.py
+  - create_app_icon.py
+  - prepare_splash_image.py
+  - build_version_info.py
 
 theme:
   name: readthedocs
@@ -36,6 +39,9 @@ nav:
       - video_overlay.py: reference/video_overlay.md
       - generate_calibration_report.py: reference/generate_calibration_report.md
       - create_charuco_calibration_target.py: reference/create_charuco_calibration_target.md
+      - create_app_icon.py: reference/create_app_icon.md
+      - prepare_splash_image.py: reference/prepare_splash_image.md
+      - build_version_info.py: reference/build_version_info.md
 
 plugins:
   - search

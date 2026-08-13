@@ -20,3 +20,18 @@ misc/report_wordcloud_output/
 # Docs site build output (Phase 2)
 site/
 misc/report.txt
+
+# PyInstaller build output (Phase 9) — sizeamatic.spec and assets/'s
+# source art (default-icon.png, splash*.png) are tracked; the build/
+# scratch dir, dist/ .exe, assets/icon.ico, and version_info.txt are not
+# — all three are regenerated from tracked source (pyproject.toml/
+# default-icon.png) by sizeamatic.spec on every build (create_app_icon.py/
+# build_version_info.py). assets/_splash_flattened.png isn't produced by
+# the build anymore (see AGENTS.md's Packaging section), but stays
+# ignored in case prepare_splash_image.py's CLI is ever run by hand into
+# that path.
+build/
+dist/
+assets/icon.ico
+assets/_splash_flattened.png
+version_info.txt
