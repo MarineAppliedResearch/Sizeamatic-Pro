@@ -11,6 +11,7 @@ watch:
   - stereo_matching.py
   - measurement_window.py
   - calibration_summary.py
+  - perform_calibration.py
   - calibration_io.py
   - project_io.py
   - recent_projects.py
@@ -32,6 +33,7 @@ nav:
       - stereo_matching.py: reference/stereo_matching.md
       - measurement_window.py: reference/measurement_window.md
       - calibration_summary.py: reference/calibration_summary.md
+      - perform_calibration.py: reference/perform_calibration.md
       - calibration_io.py: reference/calibration_io.md
       - project_io.py: reference/project_io.md
       - recent_projects.py: reference/recent_projects.md

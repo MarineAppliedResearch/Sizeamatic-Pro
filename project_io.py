@@ -37,6 +37,7 @@ def save_project(
     last_recorded_snapshot,
     real_time_anchor_frame,
     real_time_anchor_iso,
+    perform_calibration_capture_folder,
 ):
     """Save a project manifest to a JSON file.
 
@@ -72,6 +73,15 @@ def save_project(
         real_time_anchor_iso (str | None): The anchor's real-world
             date+time, as `datetime.isoformat()`, or None if no anchor
             has been set.
+        perform_calibration_capture_folder (str | None): The folder the
+            Perform Calibration window is currently saving captured
+            calibration frame pairs into
+            (`perform_calibration.PerformCalibrationWindow.
+            capture_folder`), or None if no capture folder has been
+            chosen this session (ROADMAP.md Phase 10). Saved so
+            resuming an in-progress calibration capture session doesn't
+            need re-choosing the folder by hand every time the project
+            is reopened.
 
     Returns:
         str | None: An error message if the file couldn't be written, or
@@ -90,6 +100,7 @@ def save_project(
         "last_recorded_snapshot": last_recorded_snapshot,
         "real_time_anchor_frame": real_time_anchor_frame,
         "real_time_anchor_iso": real_time_anchor_iso,
+        "perform_calibration_capture_folder": perform_calibration_capture_folder,
     }
 
     try:
@@ -112,9 +123,13 @@ def load_project(path):
         success, where `project` has the keys "app_version",
         "left_video_path", "right_video_path", "calibration_folder",
         "lock_offset_frames", "view_rectified", "measurement_log_text",
-        "last_recorded_snapshot", "real_time_anchor_frame", and
-        "real_time_anchor_iso"; or `(None, error_message)` if the file
-        can't be read, isn't valid JSON, or is missing required fields.
+        "last_recorded_snapshot", "real_time_anchor_frame",
+        "real_time_anchor_iso", and
+        "perform_calibration_capture_folder"; or `(None, error_message)`
+        if the file can't be read, isn't valid JSON, or is missing one
+        of the required fields (every key above except
+        "perform_calibration_capture_folder" itself - see that key's
+        own note below).
     """
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -140,5 +155,12 @@ def load_project(path):
     missing = [k for k in required_keys if k not in project]
     if missing:
         return None, f"Project file is missing required fields: {', '.join(missing)}"
+
+    # perform_calibration_capture_folder was added after every field
+    # above, in ROADMAP.md Phase 10 - unlike the rest of this project
+    # file's fields, a project saved before that addition existed
+    # should still open rather than being rejected outright, so this
+    # one key defaults to None instead of being required.
+    project.setdefault("perform_calibration_capture_folder", None)
 
     return project, None
