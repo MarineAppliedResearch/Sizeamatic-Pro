@@ -584,7 +584,17 @@ are required/recommended, whether checkerboard or ChArUco detection or
 both, where captured frame pairs get stored) — needs its own planning
 pass before implementation starts, same as Phase 9.
 
-## Phase 11 — MARE API integration (future, not yet scoped) `[ ]`
+## Phase 11 — Look and feel polish `[ ]`
+
+A dedicated pass on making the app's look and feel as cohesive and
+professional as possible, rather than squeezing visual polish into
+whatever feature happened to touch a given screen. Not yet scoped in
+detail (which screens, what specific visual language/theme, whether
+this touches ttk theming, spacing/layout consistency, iconography
+beyond the app icon itself, etc.) — needs its own planning pass before
+implementation starts, same as Phases 9 and 10.
+
+## Phase 12 — MARE API integration (future, not yet scoped) `[ ]`
 
 Interface with the overall MARE API to record measurement data, etc. Noted
 here so it isn't forgotten, but not to be planned in detail until we reach it.

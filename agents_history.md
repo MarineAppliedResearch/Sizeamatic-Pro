@@ -381,3 +381,68 @@ exactly as expected before re-enabling it, then deleting Isaac's
 by-then-pytest-polluted real file so it starts clean. Documented as
 `FINDINGS.md` #12. Phase 8 closed with every item — the original three
 plus the two added mid-phase — done and confirmed by Isaac.
+
+With Phase 8 closed, Isaac scoped two roadmap additions in one message:
+a new Phase 10 for bringing stereo camera calibration itself into the
+app (loading a video pair, scrubbing to pick checkerboard/ChArUco
+frames, running the actual calibration computation in-app with
+immediate quality stats — something no code in this repo does today,
+since calibration NPZs are currently produced by some entirely external
+process), and Phase 11 renumbered from Phase 8's original placeholder
+to make room for it. Isaac then asked to actually start Phase 9
+(packaging) but wanted to plan it out first — after generating a
+GitHub issue title/description for Isaac to file (issue #10) and
+branching to `issue-10/packaging-distribution`, a short round of
+clarifying questions settled the shape: a single-file onefile `.exe`
+first with a proper installer as a later addition to the same phase
+(not a separate phase), a placeholder icon/splash for now since Isaac
+didn't have final art yet, and no CI — a local build command only.
+
+Implementation followed that plan closely at first: `pyinstaller` added
+as a dev dependency, `sizeamatic.spec` written by hand for full control
+over the onefile build, and small companion scripts
+(`create_app_icon.py`, `prepare_splash_image.py`) generating a
+multi-resolution `.ico` and a flattened splash PNG from source art at
+build time, so swapping in real art later needs no code changes. Isaac
+then supplied the real art directly — a fish logo (`default-icon.png`)
+and two splash variants (`splash.png`/`splash-pro.png`, a later
+"normal vs. Pro" build option not implemented yet) — followed
+immediately by a run of real bugs surfacing one after another as each
+got tested: the splash's glow effect (partial alpha) rendered as
+corrupted magenta/pink under naive Tcl/Tk image loading, fixed by
+flattening onto solid black first; Windows' icon cache showed a stale
+placeholder-icon thumbnail for the rebuilt-in-place `.exe`, which
+looked like a packaging bug but wasn't (confirmed by extracting the
+icon directly from the file rather than trusting Explorer's cached
+thumbnail); and, after Isaac asked for the splash to *also* show when
+running from source (`uv run python main.py`, not just the packaged
+`.exe`), a brand new `main.py`-owned Tkinter splash replaced reliance on
+PyInstaller's bootloader `--splash` feature entirely — which then
+revealed an `overrideredirect`+topmost Tkinter window rendering solid
+black on Windows until made borderless *after* it had content to paint
+rather than before, and, once both splashes existed briefly side by
+side, an unwanted double-splash that got resolved by removing the
+bootloader `--splash` outright rather than tuning the handoff. Isaac
+also asked for the version number to appear on the `.exe` itself, the
+splash, and every window's title bar — all three now read from the same
+`pyproject.toml` value via a new module-level `get_app_version()` (fixing
+a latent bug where the old version-reading code would have silently
+returned "unknown" inside a packaged build), with a
+`build_version_info.py` generating the Windows version resource
+`EXE(version=...)` consumes. A VS Code launch config was added
+alongside the existing "run main.py"/"docs server" ones so the build
+can be triggered with one click. Isaac then asked about a genuine Linux
+build; since PyInstaller can't cross-compile (a Linux binary has to be
+built on Linux, not configured from Windows), and this session's
+environment only had WSL/Docker available rather than a real Linux
+dev setup, Isaac chose to skip Linux for this pass rather than stand
+one up right now — left as explicitly open in Phase 9 alongside the
+installer, both still unstarted.
+
+Isaac closed the session by scoping one more roadmap addition: a new
+Phase 11 (renumbering the MARE API phase again, now to Phase 12)
+dedicated to a look-and-feel pass — making the app's visual design as
+cohesive and professional as possible in one focused effort, rather than
+picking up polish piecemeal inside whatever feature happens to touch a
+given screen. Not yet scoped in detail, same as Phase 9 and Phase 10
+before their own planning passes.
