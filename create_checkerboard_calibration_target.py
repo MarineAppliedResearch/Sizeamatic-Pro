@@ -1,14 +1,26 @@
-"""ChArUco calibration target generator.
+"""Checkerboard calibration target generator.
 
-Generates a ChArUco calibration target as a LETTER landscape PDF at true
-scale. Includes a 100 mm scale bar so you can verify the print came out
-correctly.
+Generates a plain checkerboard calibration target as a LETTER
+landscape PDF at true scale (ROADMAP.md Phase 10) - the checkerboard
+counterpart to `create_charuco_calibration_target.py`, restoring the
+board-generation capability the unmerged `feature-onlineCalibrations`
+branch had for both board types, not just ChArUco. Includes a 100 mm
+scale bar so you can verify the print came out correctly.
+
+Default board settings here (`squares_x`/`squares_y`/`square_size_mm`
+in `main()`) match `perform_calibration.py`'s
+`DEFAULT_CHECKERBOARD_SQUARES_X`/`DEFAULT_CHECKERBOARD_SQUARES_Y`/
+`DEFAULT_CHECKERBOARD_SQUARE_SIZE_MM` - printing with this script's
+defaults and calibrating with the Perform Calibration window's own
+defaults line up without needing to change either side, the same
+relationship `create_charuco_calibration_target.py`'s defaults already
+have with `perform_calibration.py`'s `DEFAULT_CHARUCO_SQUARES_X`/etc.
 
 Author:
     Isaac Travers
 
 Date:
-    2026-03-01
+    2026-08-13
 """
 
 import io
@@ -36,87 +48,68 @@ def mm_to_points(mm: float) -> float:
     return (mm / 25.4) * 72.0
 
 
-def build_charuco_image(squares_x: int,
-                        squares_y: int,
-                        square_size_mm: float,
-                        marker_size_mm: float,
-                        dictionary_id: int,
-                        dpi: int,
-                        margin_mm: float) -> np.ndarray:
-    """Build a high resolution ChArUco board image suitable for printing.
+def build_checkerboard_image(squares_x: int,
+                             squares_y: int,
+                             square_size_mm: float,
+                             dpi: int) -> np.ndarray:
+    """Build a high resolution checkerboard image suitable for printing.
 
     Args:
-        squares_x (int): Number of chessboard squares along the X axis.
-        squares_y (int): Number of chessboard squares along the Y axis.
-        square_size_mm (float): Physical size of each chessboard square,
-            in millimeters.
-        marker_size_mm (float): Physical size of each ArUco marker, in
+        squares_x (int): Number of checkerboard squares along the X axis.
+        squares_y (int): Number of checkerboard squares along the Y axis.
+        square_size_mm (float): Physical size of each square, in
             millimeters.
-        dictionary_id (int): OpenCV ArUco predefined dictionary ID (e.g.
-            `cv2.aruco.DICT_4X4_1000`).
         dpi (int): Render resolution, in dots per inch.
-        margin_mm (float): White margin inside the rendered image, in
-            millimeters.
 
     Returns:
         numpy.ndarray: A grayscale uint8 image (0..255) of the rendered
-        board.
+        board - alternating black/white squares, no margin (the caller
+        places it within the PDF page margin instead).
     """
 
-    # Create the ArUco dictionary that defines the marker family.
-    dictionary = cv2.aruco.getPredefinedDictionary(dictionary_id)
+    # Convert one square's physical size to pixels at the requested DPI.
+    square_size_px = int((square_size_mm / 25.4) * dpi)
 
-    # Define the ChArUco board geometry in real units (mm).
-    board = cv2.aruco.CharucoBoard(
-        (squares_x, squares_y),
-        square_size_mm,
-        marker_size_mm,
-        dictionary
-    )
+    # Compute the full board size in pixels.
+    board_w_px = squares_x * square_size_px
+    board_h_px = squares_y * square_size_px
 
-    # Compute physical board size in mm (board area only, excluding margins).
-    board_w_mm = squares_x * square_size_mm
-    board_h_mm = squares_y * square_size_mm
-
-    # Convert physical size to pixels at the requested DPI.
-    board_w_px = int((board_w_mm / 25.4) * dpi)
-    board_h_px = int((board_h_mm / 25.4) * dpi)
-
-    # Convert margin from mm to pixels.
-    margin_px = int((margin_mm / 25.4) * dpi)
-
-    # Render the board to an image.
-    img = board.generateImage(
-        (board_w_px, board_h_px),
-        marginSize=margin_px,
-        borderBits=1
-    )
+    # Start with an all-black image, then paint every other square white -
+    # the same alternating pattern cv2.findChessboardCorners expects.
+    img = np.zeros((board_h_px, board_w_px), dtype=np.uint8)
+    for row in range(squares_y):
+        for col in range(squares_x):
+            if (row + col) % 2 == 0:
+                y0 = row * square_size_px
+                x0 = col * square_size_px
+                img[y0:y0 + square_size_px, x0:x0 + square_size_px] = 255
 
     return img
 
 
-def build_charuco_info_lines(squares_x: int, squares_y: int, square_size_mm: float, marker_size_mm: float) -> list:
-    """Build the small-text lines describing an actual printed ChArUco board.
+def build_checkerboard_info_lines(squares_x: int, squares_y: int, square_size_mm: float) -> list:
+    """Build the small-text lines describing an actual printed checkerboard.
 
     Written directly onto the printed page (`write_pdf_letter_landscape`'s
     `info_lines`) so a physical printout - found later, or handed to
     someone else - states its own exact settings rather than relying on
-    whoever printed it to remember or re-derive them.
+    whoever printed it to remember or re-derive them (the same problem
+    this phase's checkerboard-size-configurability work was created to
+    fix in the first place - see `perform_calibration.py`'s docstring).
 
     Args:
-        squares_x (int): Number of chessboard squares along the X axis.
-        squares_y (int): Number of chessboard squares along the Y axis.
-        square_size_mm (float): Physical size of each chessboard square,
-            in millimeters.
-        marker_size_mm (float): Physical size of each ArUco marker, in
+        squares_x (int): Number of checkerboard squares along the X axis.
+        squares_y (int): Number of checkerboard squares along the Y axis.
+        square_size_mm (float): Physical size of each square, in
             millimeters.
 
     Returns:
         list[str]: One or more lines of small print-on-page text.
     """
     return [
-        f"ChArUco: {squares_x} x {squares_y} squares, "
-        f"{square_size_mm:.1f} mm squares / {marker_size_mm:.1f} mm markers"
+        f"Checkerboard: {squares_x} x {squares_y} squares "
+        f"({squares_x - 1} x {squares_y - 1} inside corners), "
+        f"{square_size_mm:.1f} mm per square"
     ]
 
 
@@ -130,17 +123,21 @@ def write_pdf_letter_landscape(out_pdf_path: str,
 
     Centers the board within the printable area and adds a 100 mm scale
     bar plus a printing-instructions note for print verification.
+    Board-agnostic - identical to
+    `create_charuco_calibration_target.py`'s function of the same name,
+    since placing an already-rendered board image on the page doesn't
+    depend on what kind of board it is.
 
     Args:
         out_pdf_path (str): Destination PDF file path.
-        board_img_gray (numpy.ndarray): Grayscale board image, as returned
-            by `build_charuco_image`.
+        board_img_gray (numpy.ndarray): Grayscale board image, as
+            returned by `build_checkerboard_image`.
         board_w_mm (float): Physical board width, in millimeters.
         board_h_mm (float): Physical board height, in millimeters.
         margin_in (float): PDF page margin around the board, in inches.
         info_lines (list[str]): Small-text lines describing the actual
-            board settings used (see `build_charuco_info_lines`), printed
-            on the page itself rather than left implicit.
+            board settings used (see `build_checkerboard_info_lines`),
+            printed on the page itself rather than left implicit.
 
     Raises:
         RuntimeError: If the board does not fit within the usable page
@@ -224,33 +221,30 @@ def write_pdf_letter_landscape(out_pdf_path: str,
 
 
 def main() -> None:
-    """Build the ChArUco board and write charuco_letter_landscape.pdf.
+    """Build the checkerboard and write checkerboard_letter_landscape.pdf.
 
-    Uses a fixed 11x8 square board layout sized to fit LETTER landscape
+    Uses a fixed 10x7 square board layout sized to fit LETTER landscape
     with margins, writes the output PDF into the gitignored `output/`
-    folder (creating it if needed), and prints the output path.
+    folder (creating it if needed), and prints the output path. These
+    defaults (10x7 squares, 25mm each) match
+    `perform_calibration.py`'s `DEFAULT_CHECKERBOARD_SQUARES_X`/
+    `DEFAULT_CHECKERBOARD_SQUARES_Y`/`DEFAULT_CHECKERBOARD_SQUARE_SIZE_MM`
+    - see this module's docstring for why that matters.
 
     Returns:
         None
     """
 
-    # Board layout in squares (not corners).
-    squares_x = 11
-    squares_y = 8
+    # Board layout in squares (not inner corners).
+    squares_x = 10
+    squares_y = 7
 
-    # Physical sizes in mm.
-    # NOTE: These values are chosen to fit LETTER landscape with margins.
-    square_size_mm = 20.0
-    marker_size_mm = 15.0
-
-    # Marker dictionary.
-    dictionary_id = cv2.aruco.DICT_4X4_1000
+    # Physical square size in mm.
+    # NOTE: chosen to fit LETTER landscape with margins.
+    square_size_mm = 25.0
 
     # Render resolution.
     dpi = 300
-
-    # White margin inside the rendered image, in mm.
-    margin_mm = 0
 
     # PDF page margin around the board, in inches.
     margin_in = 0.5
@@ -258,17 +252,14 @@ def main() -> None:
     # Output file. Generated artifacts live in output/, which is gitignored.
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
-    out_pdf_path = os.path.join(output_dir, "charuco_letter_landscape.pdf")
+    out_pdf_path = os.path.join(output_dir, "checkerboard_letter_landscape.pdf")
 
     # Build the board image.
-    board_img = build_charuco_image(
+    board_img = build_checkerboard_image(
         squares_x=squares_x,
         squares_y=squares_y,
         square_size_mm=square_size_mm,
-        marker_size_mm=marker_size_mm,
-        dictionary_id=dictionary_id,
-        dpi=dpi,
-        margin_mm=margin_mm
+        dpi=dpi
     )
 
     # Compute board physical size for placement.
@@ -283,12 +274,18 @@ def main() -> None:
         board_w_mm=board_w_mm,
         board_h_mm=board_h_mm,
         margin_in=margin_in,
-        info_lines=build_charuco_info_lines(squares_x, squares_y, square_size_mm, marker_size_mm)
+        info_lines=build_checkerboard_info_lines(squares_x, squares_y, square_size_mm)
     )
 
     print("Wrote:", out_pdf_path)
 
     print("After printing, measure the 100 mm line.")
+
+    print(
+        f"Board is {squares_x}x{squares_y} squares "
+        f"({squares_x - 1}x{squares_y - 1} inner corners) - "
+        "enter these same numbers in Perform Calibration's checkerboard settings."
+    )
 
 
 if __name__ == "__main__":

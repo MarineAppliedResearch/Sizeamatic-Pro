@@ -11,6 +11,8 @@ watch:
   - stereo_matching.py
   - measurement_window.py
   - calibration_summary.py
+  - perform_calibration.py
+  - generate_calibration_target.py
   - calibration_io.py
   - project_io.py
   - recent_projects.py
@@ -18,6 +20,7 @@ watch:
   - video_overlay.py
   - generate_calibration_report.py
   - create_charuco_calibration_target.py
+  - create_checkerboard_calibration_target.py
   - create_app_icon.py
   - prepare_splash_image.py
   - build_version_info.py
@@ -32,6 +35,8 @@ nav:
       - stereo_matching.py: reference/stereo_matching.md
       - measurement_window.py: reference/measurement_window.md
       - calibration_summary.py: reference/calibration_summary.md
+      - perform_calibration.py: reference/perform_calibration.md
+      - generate_calibration_target.py: reference/generate_calibration_target.md
       - calibration_io.py: reference/calibration_io.md
       - project_io.py: reference/project_io.md
       - recent_projects.py: reference/recent_projects.md
@@ -39,6 +44,7 @@ nav:
       - video_overlay.py: reference/video_overlay.md
       - generate_calibration_report.py: reference/generate_calibration_report.md
       - create_charuco_calibration_target.py: reference/create_charuco_calibration_target.md
+      - create_checkerboard_calibration_target.py: reference/create_checkerboard_calibration_target.md
       - create_app_icon.py: reference/create_app_icon.md
       - prepare_splash_image.py: reference/prepare_splash_image.md
       - build_version_info.py: reference/build_version_info.md

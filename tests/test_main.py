@@ -131,6 +131,7 @@ def test_on_open_project_records_it_in_recent_projects(sizeamatic_app, monkeypat
         last_recorded_snapshot=None,
         real_time_anchor_frame=None,
         real_time_anchor_iso=None,
+        perform_calibration_capture_folder=None,
     )
     assert err is None
 
@@ -253,6 +254,7 @@ def test_app_window_title_updates_on_open_project_too(sizeamatic_app, monkeypatc
         last_recorded_snapshot=None,
         real_time_anchor_frame=None,
         real_time_anchor_iso=None,
+        perform_calibration_capture_folder=None,
     )
     assert err is None
 
@@ -352,6 +354,7 @@ def test_open_project_restores_video_calibration_and_offset(
         last_recorded_snapshot=None,
         real_time_anchor_frame=None,
         real_time_anchor_iso=None,
+        perform_calibration_capture_folder=None,
     )
     assert err is None
 
@@ -411,6 +414,7 @@ def test_open_project_restores_last_recorded_frame_points_and_log(
         last_recorded_snapshot=snapshot,
         real_time_anchor_frame=40,
         real_time_anchor_iso="2026-08-12T14:32:05",
+        perform_calibration_capture_folder=None,
     )
     assert err is None
 

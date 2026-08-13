@@ -32,6 +32,8 @@ import stereo_matching
 import measurement_window  # measurement_window contains the Tkinter measurement results window and update helpers.
 import anaglyph_preview    # Manages the anaglyph_preview functionality
 import calibration_summary # calibration_summary contains the Tkinter calibration summary window and update helpers.
+import perform_calibration  # Owns the Perform Calibration window, capturing calibration frame pairs (ROADMAP.md Phase 10).
+import generate_calibration_target  # Owns the Generate Calibration Target window, printing checkerboard/ChArUco boards (ROADMAP.md Phase 10).
 import calibration_io      # Loads and validates calibration NPZ files, without the directory-chooser dialog.
 import project_io          # Saves/loads a project manifest (video paths, calibration folder, resync offset).
 import recent_projects      # Persists the File > Recent Projects submenu's list of project paths.
@@ -506,6 +508,18 @@ class SizeamaticProApp:
         """Owns the calibration summary Toplevel window and its widgets.
         See `calibration_summary.CalibrationSummaryWindow`."""
 
+        self.perform_calibration_window = perform_calibration.PerformCalibrationWindow(self)
+        """Owns the Perform Calibration Toplevel window and its widgets -
+        capturing calibration frame pairs from the currently loaded
+        left/right video (ROADMAP.md Phase 10). See
+        `perform_calibration.PerformCalibrationWindow`."""
+
+        self.generate_calibration_target_window = generate_calibration_target.GenerateCalibrationTargetWindow(self)
+        """Owns the Generate Calibration Target Toplevel window and its
+        widgets - printing a checkerboard/ChArUco calibration board
+        (ROADMAP.md Phase 10). See
+        `generate_calibration_target.GenerateCalibrationTargetWindow`."""
+
         self.anaglyph_preview = anaglyph_preview.AnaglyphPreview(self)
         """Owns the anaglyph preview's OpenCV window and playback state.
         See `anaglyph_preview.AnaglyphPreview`."""
@@ -549,6 +563,31 @@ class SizeamaticProApp:
 
         self.cal_summary_window.ensure_window()
         self.cal_summary_window.update_window()
+
+    def on_perform_calibration(self):
+        """Open (or focus) the Perform Calibration window.
+
+        Unlike `on_show_calibration_summary`, this doesn't require an
+        existing calibration to already be loaded — capturing frame
+        pairs is how a *new* calibration gets built in the first place
+        (ROADMAP.md Phase 10).
+
+        Returns:
+            None
+        """
+        self.perform_calibration_window.ensure_window()
+
+    def on_generate_calibration_target(self):
+        """Open (or focus) the Generate Calibration Target window.
+
+        Doesn't require any video or calibration to be loaded - printing
+        a target is a prep step done before capturing anything
+        (ROADMAP.md Phase 10).
+
+        Returns:
+            None
+        """
+        self.generate_calibration_target_window.ensure_window()
 
     def on_mouse_wheel(self, which, event):
         """Handle mouse wheel zoom for a pane, anchored under the cursor.
@@ -1297,7 +1336,8 @@ class SizeamaticProApp:
     # -------------------------------------------------------------------------
 
     def _build_menu(self):
-        """Build the File and View menus and attach them to the root window.
+        """Build the File, View, and Calibration menus and attach them to
+        the root window.
 
         Returns:
             None
@@ -1308,8 +1348,6 @@ class SizeamaticProApp:
         file_menu = tk.Menu(menubar, tearoff=False)
         file_menu.add_command(label="Load Left Video…", command=self.on_load_left_video)
         file_menu.add_command(label="Load Right Video…", command=self.on_load_right_video)
-        file_menu.add_separator()
-        file_menu.add_command(label="Load Calibration Folder…", command=self.on_load_calibration_folder)
         file_menu.add_separator()
         file_menu.add_command(label="Save Project…", command=self.on_save_project)
         file_menu.add_command(label="Open Project…", command=self.on_open_project)
@@ -1360,6 +1398,23 @@ class SizeamaticProApp:
         view_menu.add_command(label="Calibration Summary…", command=self.on_show_calibration_summary)
 
         menubar.add_cascade(label="View", menu=view_menu)
+
+        # ---- Calibration menu ----
+        # A dedicated top-level menu (ROADMAP.md Phase 10) rather than
+        # burying calibration actions under File/View - "Load
+        # Calibration…" moved here from the File menu, "Perform
+        # Calibration…" opens the frame-pair capture window, and
+        # "Generate Calibration Target…" opens the printable
+        # checkerboard/ChArUco board window. "Calibration Report…" isn't
+        # added yet - it has no real behavior to wire up until a later
+        # Phase 10 step actually builds it.
+        calibration_menu = tk.Menu(menubar, tearoff=False)
+        calibration_menu.add_command(label="Load Calibration…", command=self.on_load_calibration_folder)
+        calibration_menu.add_command(label="Perform Calibration…", command=self.on_perform_calibration)
+        calibration_menu.add_command(
+            label="Generate Calibration Target…", command=self.on_generate_calibration_target
+        )
+        menubar.add_cascade(label="Calibration", menu=calibration_menu)
 
         self.root.config(menu=menubar)
 
@@ -2019,6 +2074,7 @@ class SizeamaticProApp:
             self.last_recorded_snapshot,
             self.real_time_anchor_frame,
             anchor_iso,
+            self.perform_calibration_window.capture_folder,
         )
 
         if err is not None:
@@ -2109,6 +2165,18 @@ class SizeamaticProApp:
         self.real_time_anchor_dt = datetime.datetime.fromisoformat(anchor_iso) if anchor_iso else None
         if self.real_time_anchor_dt is not None:
             self._show_time_sync_indicator()
+
+        # Restore the Perform Calibration window's active capture folder,
+        # if one was chosen this session before saving (ROADMAP.md
+        # Phase 10) - if the window's already open, refresh its display
+        # immediately too; otherwise the next ensure_window() call picks
+        # this up on its own (see PerformCalibrationWindow.ensure_window).
+        self.perform_calibration_window.capture_folder = project["perform_calibration_capture_folder"]
+        if self.perform_calibration_window.win is not None:
+            self.perform_calibration_window.folder_var.set(
+                self.perform_calibration_window.capture_folder or "(no capture folder chosen yet)"
+            )
+            self.perform_calibration_window._refresh_pairs_listbox()
 
         # Jump back to "the very last place that was recorded" and show that
         # same measurement on screen again - last, since it depends on the

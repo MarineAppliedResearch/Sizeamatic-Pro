@@ -485,12 +485,24 @@ spin off their own phase.
       project-name suffix intentionally replaces those fixed labels
       rather than appending to them, per the project owner's request.
 
-## Phase 9 — Packaging and distribution (issue #10) `[ ]`
+## Phase 9 — Packaging and distribution (issue #10) `[x]`
 
 Package Sizeamatic Pro as a standalone, distributable build that bundles
 all its requirements and runs fully offline — so an analyst can get and
 run it without setting up Python/`uv` themselves. Planned out with the
-project owner before implementation, rather than scoped from a guess:
+project owner before implementation, rather than scoped from a guess.
+
+**Scope note:** closes with the onefile Windows `.exe` build done, run,
+and confirmed working, plus everything else that ended up bundled in
+along the way (real icon/splash art, embedded version metadata, a VS
+Code build task). The installer and Linux packaging are deliberately
+deferred rather than silently dropped — the project owner chose to skip
+Linux for this pass rather than stand up a Linux build environment
+(PyInstaller can't cross-compile; a Linux binary has to actually be
+built on Linux), and the installer was always planned as a later
+addition once the simpler onefile build was proven. Both can resume
+inside this same phase whenever picked back up, without reopening it as
+a new one.
 
 - [x] Single-file `.exe` (PyInstaller `--onefile`, `sizeamatic.spec`) —
       built, run, and confirmed working by the project owner. A proper
@@ -560,7 +572,7 @@ unmerged remote branch, looks like it may be prior exploration relevant
 to Phase 10 (below) rather than this phase — worth checking before
 Phase 10 starts, not necessarily before this one.
 
-## Phase 10 — In-app stereo calibration workflow `[ ]`
+## Phase 10 — In-app stereo calibration workflow `[x]`
 
 Bring the stereo camera calibration step itself into Sizeamatic Pro,
 rather than treating a calibration NPZ as something produced entirely
@@ -569,20 +581,94 @@ the fact (`generate_calibration_report.py`). Today, nothing in this repo
 actually runs `cv2.calibrateCamera`/`cv2.stereoCalibrate` — the four
 calibration NPZ files are produced by some external process from
 checkerboard/ChArUco stills, then handed to the app as a finished folder.
-This phase reuses the app's existing left/right video loading exactly as
-it works today, then adds: scrubbing through the loaded pair to pick
-specific frames (with a checkerboard/ChArUco target visible) as
-calibration frames one at a time; saving each chosen calibration frame
-pair; and, once enough frames are captured, running the actual
-calibration computation in-app and immediately showing calibration
-quality stats (reusing/adapting whatever `generate_calibration_report.py`
-and `calibration_summary.py` already know how to compute and display),
-so an analyst gets fast feedback on whether a calibration run is good
-enough without leaving the app or invoking a separate offline pipeline.
-Not yet scoped in detail (frame-picking UI, how many calibration frames
-are required/recommended, whether checkerboard or ChArUco detection or
-both, where captured frame pairs get stored) — needs its own planning
-pass before implementation starts, same as Phase 9.
+Planned out with the project owner before implementation, in explicit
+numbered steps to be done one after another rather than all at once:
+
+**Scope note:** closes with Steps 0-2 done and confirmed working by the
+project owner — frame-pair capture, running calibration, and fully
+configurable checkerboard/ChArUco board generation (both detection
+*and* printable targets, generated in-app rather than via a standalone
+script). Step 3 (OAK-D 3D camera compatibility) is deliberately
+cancelled rather than completed - the project owner decided not to
+pursue OAK-D-specific integration for now. None of Step 3's
+investigation was started, so picking OAK-D support back up later would
+need its own fresh planning pass rather than resuming this checklist
+item as-is.
+
+- [x] **Step 0 — Reference the original zcam calibration code.** Before
+      this project existed, camera calibration was done in a separate
+      zcam project: a Node.js process loading Python and sending it
+      calibration requests, before the decision was made to do
+      calibration here instead. Resolved: the unmerged
+      `origin/feature-onlineCalibrations` branch turned out to be that
+      same ported-from-zcam calibration code, and was used as reference
+      material throughout Steps 1-2 (see below) rather than a separate
+      zcam source ever being located.
+- [x] **Step 1 — Capture calibration frame pairs from live video.** A new
+      top-level "Calibration" menu (`Load Calibration…` / `Perform
+      Calibration…` / `Calibration Report…`, matching a UI precedent
+      already found on the unmerged `origin/feature-onlineCalibrations`
+      branch — see below) starts calibration using whatever left/right
+      video pair is *already loaded* in the main window, rather than a
+      separate calibration-only video load. Scrubbing uses the existing
+      Lock/sync controls; a capture action saves both panes' current
+      frame at once as a `left_<id>`/`right_<id>` pair (the same
+      pairing/naming convention already implemented and working on that
+      branch's `_find_stereo_calibration_pairs`, chosen specifically so
+      the existing detection/calibration code can be adapted with
+      minimal changes rather than redesigned).
+- [x] **Step 2 — Create a new calibration.** A calibration is just a
+      folder containing the four calibration NPZ files
+      `calibration_io.py` already knows how to load — this step is
+      about producing one of those folders from captured frame pairs
+      (running detection + `cv2.calibrateCamera`/`stereoCalibrate`/
+      `stereoRectify`, matching the math already implemented on the
+      `feature-onlineCalibrations` branch, whose NPZ output already uses
+      this app's exact current key names), likely alongside the
+      captured calibration images themselves so a run can be reviewed or
+      redone later. Detection supports both checkerboard and ChArUco
+      boards (also matching that branch), with fully user-configurable
+      board dimensions for both (columns/rows, square size, marker
+      size) rather than a single fixed size for either. A new Generate
+      Calibration Target window (`generate_calibration_target.py`) prints
+      either board type from inside the app, with a live preview and the
+      actual board settings printed on the page as small text.
+- [ ] **Step 3 — Investigate OAK-D 3D camera compatibility.** Cancelled -
+      the project owner decided not to pursue OAK-D-specific integration
+      for now (see this phase's scope note). The project owner supplied
+      `assets/oakd_camera_info.json`, the camera's own factory
+      calibration data. Three angles were identified but never
+      investigated:
+      1. Whether the OAK-D is already effectively pre-calibrated for
+         this app's purposes — the JSON has per-camera intrinsics,
+         extrinsics/baseline between sockets, and even precomputed
+         stereo rectification rotations, but its distortion coefficients
+         are a 14-value array in DepthAI's own extended model, not
+         OpenCV's standard Brown-Conrady one, so it likely can't be used
+         as-is without conversion.
+      2. Whether the `depthai` Python SDK can do that conversion (or more)
+         directly — it ships a `CalibrationHandler` API built for
+         exactly this kind of calibration-data access, worth using
+         directly rather than hand-parsing the JSON.
+      3. How to support the OAK-D's three camera views (a center color
+         autofocus camera plus a left/right mono stereo pair — matching
+         `oakd_camera_info.json`'s `camera_features`) and its `.mcap`
+         recording format, which is a general-purpose multiplexed
+         sensor-log container (Foxglove/ROS-style), not a plain video
+         file — loading one will likely need a demuxing step before this
+         app's existing `cv2.VideoCapture`-based pipeline can use it at
+         all.
+
+`origin/feature-onlineCalibrations`, an existing unmerged remote branch
+flagged during Phase 9 planning, turned out to have substantial prior
+work directly relevant to Steps 1-2: a 3290-line `perform_calibration.py`
+with working checkerboard/ChArUco detection and the full stereo
+calibration/rectification math, producing NPZ files in the exact format
+`calibration_io.py` already expects. The branch itself is too stale to
+merge (it predates almost this project's entire current structure —
+`AGENTS.md`, `ROADMAP.md`, the docs site, the current test suite, all of
+it) — treated as reference material to adapt algorithms and conventions
+from, not something to merge wholesale.
 
 ## Phase 11 — Look and feel polish `[ ]`
 

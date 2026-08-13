@@ -5,6 +5,7 @@ against tmp_path files rather than through Tkinter file dialogs — same
 rationale as test_calibration_io.py.
 """
 
+import json
 import os
 
 import project_io
@@ -29,6 +30,7 @@ def test_save_then_load_project_round_trips(tmp_path):
         last_recorded_snapshot=snapshot,
         real_time_anchor_frame=42,
         real_time_anchor_iso="2026-08-12T14:32:05",
+        perform_calibration_capture_folder="misc/calibration_captures",
     )
     assert err is None
 
@@ -44,6 +46,7 @@ def test_save_then_load_project_round_trips(tmp_path):
     assert project["last_recorded_snapshot"] == snapshot
     assert project["real_time_anchor_frame"] == 42
     assert project["real_time_anchor_iso"] == "2026-08-12T14:32:05"
+    assert project["perform_calibration_capture_folder"] == "misc/calibration_captures"
 
 
 def test_save_project_allows_none_fields(tmp_path):
@@ -64,6 +67,7 @@ def test_save_project_allows_none_fields(tmp_path):
         last_recorded_snapshot=None,
         real_time_anchor_frame=None,
         real_time_anchor_iso=None,
+        perform_calibration_capture_folder=None,
     )
     assert err is None
 
@@ -73,6 +77,40 @@ def test_save_project_allows_none_fields(tmp_path):
     assert project["calibration_folder"] is None
     assert project["real_time_anchor_frame"] is None
     assert project["real_time_anchor_iso"] is None
+    assert project["perform_calibration_capture_folder"] is None
+
+
+def test_load_project_defaults_capture_folder_to_none_for_a_project_saved_before_phase_10(tmp_path):
+    """A project file saved before perform_calibration_capture_folder
+    existed (missing that one key entirely, but with every other
+    required field present) should still load successfully, with that
+    field defaulting to None - unlike every other field, a project
+    predating this one shouldn't be rejected just because a brand new,
+    genuinely optional piece of state didn't exist yet when it was
+    saved."""
+    path = tmp_path / "project.json"
+    path.write_text(
+        json.dumps(
+            {
+                "app_version": "0.1.0",
+                "left_video_path": "left.mp4",
+                "right_video_path": "right.mp4",
+                "calibration_folder": None,
+                "lock_offset_frames": 0,
+                "view_rectified": False,
+                "measurement_log_text": "",
+                "last_recorded_snapshot": None,
+                "real_time_anchor_frame": None,
+                "real_time_anchor_iso": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    project, err = project_io.load_project(str(path))
+
+    assert err is None
+    assert project["perform_calibration_capture_folder"] is None
 
 
 def test_load_project_rejects_invalid_json(tmp_path):
