@@ -485,15 +485,80 @@ spin off their own phase.
       project-name suffix intentionally replaces those fixed labels
       rather than appending to them, per the project owner's request.
 
-## Phase 9 — Packaging and distribution `[ ]`
+## Phase 9 — Packaging and distribution (issue #10) `[ ]`
 
-Package Sizeamatic Pro as a standalone, distributable (possibly
-installable) build that bundles all its requirements and runs fully
-offline — so an analyst can get and run it without setting up Python/`uv`
-themselves. Not yet scoped in detail (needs its own planning pass —
-likely built on `pyinstaller`, given the existing build note already
-sitting in git history from before this file existed, or an alternative
-bundler if that turns out not to fit); noted here so it isn't forgotten.
+Package Sizeamatic Pro as a standalone, distributable build that bundles
+all its requirements and runs fully offline — so an analyst can get and
+run it without setting up Python/`uv` themselves. Planned out with the
+project owner before implementation, rather than scoped from a guess:
+
+- [x] Single-file `.exe` (PyInstaller `--onefile`, `sizeamatic.spec`) —
+      built, run, and confirmed working by the project owner. A proper
+      installer (likely Inno Setup) is still planned as a later addition
+      within this same phase, not started yet. Tradeoffs the project
+      owner was walked through and accepted for the onefile build: no
+      install step and easy to hand someone directly, at the cost of
+      slower startup (self-extracts to a temp folder every launch) and a
+      higher chance of antivirus/SmartScreen false-positive flags, both
+      common for unsigned onefile PyInstaller builds.
+- [x] App icon — real branded art (`assets/default-icon.png`, a fish
+      logo), not a placeholder. `sizeamatic.spec` regenerates
+      `assets/icon.ico` from it on every build via `create_app_icon.py`
+      (Windows needs one `.ico` containing several baked-in sizes —
+      16/32/48/256 — not separate files per size), so dropping in future
+      revised art is just replacing that one PNG and rebuilding, no code
+      changes. Also embedded as the `.exe` file's own Explorer icon
+      (`EXE(icon=...)`) — confirmed correct by extracting the icon
+      directly from the built `.exe` (bypassing Windows' icon cache,
+      which otherwise shows a stale thumbnail for a path rebuilt
+      in-place — a real red herring hit during this work, not a packaging
+      bug).
+- [x] Splash screen shown during startup — real branded art
+      (`assets/splash-pro.png`), with the version number drawn onto it
+      at runtime. Ended up as `main.py`'s own Tkinter `Toplevel`
+      (`_show_startup_splash`), not PyInstaller's bootloader `--splash`
+      feature: an earlier version used both (bootloader splash during
+      onefile self-extraction, handed off to this app's own splash once
+      Tk started), which in practice showed as two near-identical
+      splashes back to back — removed the bootloader `--splash` entirely
+      rather than tuning the handoff, since the app's own splash already
+      covers the whole startup window on its own, identically whether
+      run from source or from the `.exe` (the project owner specifically
+      wanted it to still show from `uv run python main.py`, which a
+      PyInstaller-only splash never could). Stays up at least 4 seconds
+      even on a fast machine, and scales down large source art rather
+      than showing it at full native resolution. Two more real bugs
+      found and fixed along the way: the splash's alpha-transparent glow
+      effect rendered as corrupted magenta/pink under naive Tcl/Tk image
+      loading (fixed by flattening onto solid black first,
+      `prepare_splash_image.py`), and an `overrideredirect`+topmost
+      Tkinter window rendered solid black on Windows until made
+      borderless *after* it already had content to paint, not before.
+- [x] The `.exe`'s own Windows version resource (Explorer's file
+      Properties dialog) — added mid-phase, after the project owner
+      asked for the version to show "on" the exe itself, not scoped
+      originally. `build_version_info.py` generates the version-resource
+      file `EXE(version=...)` consumes, from `pyproject.toml`'s version.
+      The same version now also shows in the startup splash and every
+      window's title bar (`_app_window_title`, e.g. "Sizeamatic Pro
+      v0.1.0") — one source of truth in all three places.
+- [ ] Linux packaging — not attempted or tested this phase; Windows was
+      the actual priority. `sizeamatic.spec` isn't deliberately
+      Windows-only, but nothing about it has been verified cross-platform
+      either.
+- [x] Local build script/command only (`uv run pyinstaller
+      sizeamatic.spec`, or VS Code's "Build Sizeamatic Pro .exe
+      (PyInstaller)" launch config) — no CI/GitHub Actions automation
+      this phase; the project owner runs the build locally and
+      distributes the result themselves.
+
+Not yet decided: installer tooling (beyond "likely Inno Setup"), and a
+later build option choosing between `assets/splash.png` and
+`assets/splash-pro.png` (gating some functionality by which) — not
+implemented yet. Note: `origin/feature-onlineCalibrations`, an existing
+unmerged remote branch, looks like it may be prior exploration relevant
+to Phase 10 (below) rather than this phase — worth checking before
+Phase 10 starts, not necessarily before this one.
 
 ## Phase 10 — In-app stereo calibration workflow `[ ]`
 

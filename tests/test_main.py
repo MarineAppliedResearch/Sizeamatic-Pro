@@ -214,14 +214,16 @@ def test_saving_a_project_never_touches_the_real_appdata_recent_projects_file(
 
 
 def test_app_window_title_reflects_no_project_then_a_saved_one(sizeamatic_app, monkeypatch, tmp_path):
-    """The main window's title should start as plain "Sizeamatic Pro" and
-    switch to "Sizeamatic Pro - <project name>" once a project has been
-    saved this session (ROADMAP.md Phase 8's window-title item) - the
-    project name is the file's base name, without its directory or
+    """The main window's title should start as plain "Sizeamatic Pro
+    vX.Y.Z" and switch to "Sizeamatic Pro vX.Y.Z - <project name>" once
+    a project has been saved this session (ROADMAP.md Phase 8's
+    window-title item, extended in Phase 9 to include the version) -
+    the project name is the file's base name, without its directory or
     ".json" extension."""
 
     app = sizeamatic_app
-    assert app.root.title() == "Sizeamatic Pro"
+    base_title = f"Sizeamatic Pro v{app._get_app_version()}"
+    assert app.root.title() == base_title
 
     save_path = str(tmp_path / "MySurveyDive.json")
     monkeypatch.setattr("main.filedialog.asksaveasfilename", lambda **_kwargs: save_path)
@@ -230,7 +232,7 @@ def test_app_window_title_reflects_no_project_then_a_saved_one(sizeamatic_app, m
     app.on_save_project()
 
     assert app.current_project_name == "MySurveyDive"
-    assert app.root.title() == "Sizeamatic Pro - MySurveyDive"
+    assert app.root.title() == f"{base_title} - MySurveyDive"
 
 
 def test_app_window_title_updates_on_open_project_too(sizeamatic_app, monkeypatch, tmp_path):
@@ -260,7 +262,7 @@ def test_app_window_title_updates_on_open_project_too(sizeamatic_app, monkeypatc
     app.on_open_project()
 
     assert app.current_project_name == "ReefTransect3"
-    assert app.root.title() == "Sizeamatic Pro - ReefTransect3"
+    assert app.root.title() == f"Sizeamatic Pro v{app._get_app_version()} - ReefTransect3"
 
 
 def test_already_open_measurement_window_retitles_when_project_saved(sizeamatic_app, monkeypatch, tmp_path):
@@ -270,7 +272,8 @@ def test_already_open_measurement_window_retitles_when_project_saved(sizeamatic_
 
     app = sizeamatic_app
     app.measurement_window.ensure_window()
-    assert app.measurement_window.win.title() == "Sizeamatic Pro"
+    base_title = f"Sizeamatic Pro v{app._get_app_version()}"
+    assert app.measurement_window.win.title() == base_title
 
     save_path = str(tmp_path / "MySurveyDive.json")
     monkeypatch.setattr("main.filedialog.asksaveasfilename", lambda **_kwargs: save_path)
@@ -278,7 +281,7 @@ def test_already_open_measurement_window_retitles_when_project_saved(sizeamatic_
 
     app.on_save_project()
 
-    assert app.measurement_window.win.title() == "Sizeamatic Pro - MySurveyDive"
+    assert app.measurement_window.win.title() == f"{base_title} - MySurveyDive"
 
     app.measurement_window._on_close()
 
@@ -298,7 +301,7 @@ def test_measurement_window_opened_after_project_loaded_shows_project_title(
     app.on_save_project()
 
     app.measurement_window.ensure_window()
-    assert app.measurement_window.win.title() == "Sizeamatic Pro - MySurveyDive"
+    assert app.measurement_window.win.title() == f"Sizeamatic Pro v{app._get_app_version()} - MySurveyDive"
 
     app.measurement_window._on_close()
 
@@ -317,7 +320,7 @@ def test_calibration_summary_window_also_shows_project_title(sizeamatic_app, mon
     app.on_save_project()
 
     app.cal_summary_window.ensure_window()
-    assert app.cal_summary_window.win.title() == "Sizeamatic Pro - MySurveyDive"
+    assert app.cal_summary_window.win.title() == f"Sizeamatic Pro v{app._get_app_version()} - MySurveyDive"
 
     app.cal_summary_window._on_close()
 
