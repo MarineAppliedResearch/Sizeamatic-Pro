@@ -3,17 +3,17 @@
 This module creates and manages the Tkinter window used to build a new
 stereo calibration from scratch (ROADMAP.md Phase 10), rather than only
 ever loading an already-finished one (`calibration_io.py`). Step 1 of
-that phase - the only part implemented so far - is frame-pair capture:
-letting the project owner either manually scrub the already-loaded
-left/right video pair to a frame showing a checkerboard/ChArUco
-calibration target and capture it, or run an automatic scan that
-samples through the video looking for frames where a board is actually
-detected and captures those on its own. Either way, the result is the
-same matched, numbered image pair on disk. Later Phase 10 steps will
-extend this same window to actually run the calibration computation
-(`cv2.calibrateCamera`/`stereoCalibrate`/`stereoRectify`) on the
-captured pairs and show quality stats, rather than adding a separate
-window for that.
+that phase is frame-pair capture: letting the project owner either
+manually scrub the already-loaded left/right video pair to a frame
+showing a checkerboard/ChArUco calibration target and capture it, or
+run an automatic scan that samples through the video looking for
+frames where a board is actually detected and captures those on its
+own. Step 2 is running the actual calibration computation
+(`cv2.calibrateCamera`/`stereoCalibrate`/`stereoRectify`) on those
+captured pairs, saving the four calibration NPZ files
+`calibration_io.py` already knows how to load, directly into the same
+capture folder the source images live in - one button in this same
+window, rather than a separate one.
 
 Contents:
     - `PerformCalibrationWindow` — owns the window and its widgets.
@@ -67,6 +67,36 @@ Design notes:
     worker that needs to update Tkinter widgets, since Tkinter itself
     isn't thread-safe to touch directly from a worker thread.
 
+    `on_run_calibration` (Step 2) needs the project owner to pick one
+    board type up front (`self.board_type_var`, "Checkerboard" - the
+    priority - or "ChArUco") rather than auto-detecting it per pair the
+    way the auto-scan does - `cv2.calibrateCamera`/`stereoCalibrate`
+    need every view's object points to describe the *same physical
+    board*, so mixing checkerboard- and ChArUco-derived points into one
+    run isn't valid the way "detect whichever's present" is for the
+    auto-scan's much simpler yes/no question. Both board types have
+    fully user-set dimensions - checkerboard's squares/square size
+    (`self.checkerboard_squares_x_var`/`_y_var`/
+    `checkerboard_square_size_var`) and ChArUco's squares/square size/
+    marker size (`self.charuco_squares_x_var`/`_y_var`/
+    `charuco_square_size_var`/`charuco_marker_size_var`) - defaulting to
+    `create_checkerboard_calibration_target.py`'s/
+    `create_charuco_calibration_target.py`'s own default printable
+    boards respectively, so a board printed with either generator
+    script's defaults is exactly what a freshly opened Perform
+    Calibration window expects. A board printed at a different size, or
+    with a different square/row count, wouldn't be detected (or would
+    calibrate in the wrong real-world units) against the wrong settings
+    - the same reasoning applies to ChArUco here as it already did to
+    checkerboard, since ChArUco's ArUco markers encode each corner's
+    *ID*, not the board's overall physical dimensions - the detector
+    still has to be built with the right square/marker sizes for
+    `cv2.calibrateCamera` to produce real-world units. Only the ArUco
+    *dictionary* (`CHARUCO_DICTIONARY_ID`) stays a fixed module
+    constant, not user-set - unlike squares/sizes, picking the wrong
+    dictionary makes detection fail outright rather than merely
+    calibrating in the wrong units, and this app only ever needs one.
+
 Assumptions:
     - The main application exposes: `app.root` (the Tk root window);
       `app.capL`/`app.capR` (the loaded `cv2.VideoCapture` objects);
@@ -107,36 +137,56 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 import cv2
+import numpy as np
 
 PAIR_ID_DIGITS = 4
 """Zero-padding width for captured pair filenames (e.g. `left_0007.png`)
 - wide enough that captured pairs still sort correctly by filename well
 past what any single calibration run would realistically capture."""
 
-CHECKERBOARD_INNER_CORNERS = (9, 6)
-"""(columns, rows) of *inner* corners the auto-scan's checkerboard
-detector looks for - a common default board size, not yet configurable
-through any settings UI. A board printed with a different square count
-won't be detected until this becomes adjustable."""
+DEFAULT_CHECKERBOARD_SQUARES_X = 10
+"""Default checkerboard width in *squares* (not inner corners), matching
+`create_checkerboard_calibration_target.py`'s own default printable
+board - so a board printed with that script's defaults is exactly what
+the calibration UI's own default settings expect. The project owner can
+override this per capture folder (`self.checkerboard_squares_x_var`) for
+a different physical board - a plain checkerboard has no way to encode
+its own dimensions the way a ChArUco board's markers encode corner IDs,
+so there's no single "right" fixed size to hardcode instead."""
 
-CHARUCO_SQUARES_X = 11
-"""ChArUco board width in squares, matching
-`create_charuco_calibration_target.py`'s own default board - so a board
-already printed from that script is exactly what the auto-scan's
-ChArUco detector expects, not a mismatched size."""
+DEFAULT_CHECKERBOARD_SQUARES_Y = 7
+"""Default checkerboard height in squares. See
+`DEFAULT_CHECKERBOARD_SQUARES_X`."""
 
-CHARUCO_SQUARES_Y = 8
-"""ChArUco board height in squares. See `CHARUCO_SQUARES_X`."""
+DEFAULT_CHECKERBOARD_SQUARE_SIZE_MM = 25.0
+"""Default checkerboard square size in millimeters. See
+`DEFAULT_CHECKERBOARD_SQUARES_X`."""
 
-CHARUCO_SQUARE_SIZE_MM = 20.0
-"""ChArUco square size in millimeters. See `CHARUCO_SQUARES_X`."""
+DEFAULT_CHARUCO_SQUARES_X = 11
+"""Default ChArUco board width in squares, matching
+`create_charuco_calibration_target.py`'s own default printable board -
+so a board printed with that script's defaults is exactly what this
+window's own default settings expect. The project owner can override
+this (`self.charuco_squares_x_var`) for a different physical ChArUco
+board, same as checkerboard's own squares settings."""
 
-CHARUCO_MARKER_SIZE_MM = 15.0
-"""ChArUco marker size in millimeters. See `CHARUCO_SQUARES_X`."""
+DEFAULT_CHARUCO_SQUARES_Y = 8
+"""Default ChArUco board height in squares. See
+`DEFAULT_CHARUCO_SQUARES_X`."""
+
+DEFAULT_CHARUCO_SQUARE_SIZE_MM = 20.0
+"""Default ChArUco square size in millimeters. See
+`DEFAULT_CHARUCO_SQUARES_X`."""
+
+DEFAULT_CHARUCO_MARKER_SIZE_MM = 15.0
+"""Default ChArUco marker size in millimeters. See
+`DEFAULT_CHARUCO_SQUARES_X`."""
 
 CHARUCO_DICTIONARY_ID = cv2.aruco.DICT_4X4_1000
-"""ArUco marker dictionary the auto-scan's ChArUco detector expects.
-See `CHARUCO_SQUARES_X`."""
+"""ArUco marker dictionary every ChArUco detector/generator in this app
+uses - unlike squares/square size/marker size, this stays a fixed
+module constant rather than a user-set field. See this module's
+docstring for why."""
 
 AUTO_SCAN_FRAME_STRIDE = 15
 """How many left-video frames the auto-scan advances between each
@@ -145,41 +195,55 @@ rather than checking every single frame keeps a full-video scan fast;
 15 is roughly a half-second step at a typical 30fps recording."""
 
 
-def frame_has_checkerboard(gray_image):
+def frame_has_checkerboard(gray_image, inner_corners):
     """Check whether a grayscale image contains a detectable checkerboard.
 
     Args:
         gray_image (numpy.ndarray): A single-channel (grayscale) image.
+        inner_corners (tuple[int, int]): The `(columns, rows)` of
+            *inner* corners to look for - one less than the board's
+            actual square count in each direction (e.g. a 10x7-square
+            board has 9x6 inner corners).
 
     Returns:
         bool: True if `cv2.findChessboardCorners` found a full
-        `CHECKERBOARD_INNER_CORNERS`-sized grid of inner corners.
+        `inner_corners`-sized grid.
     """
     found, _corners = cv2.findChessboardCorners(
         gray_image,
-        CHECKERBOARD_INNER_CORNERS,
+        inner_corners,
         flags=cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE,
     )
     return bool(found)
 
 
-def build_charuco_detector():
-    """Build the ChArUco board/detector objects the auto-scan reuses.
+def build_charuco_detector(squares_x, squares_y, square_size_mm, marker_size_mm):
+    """Build the ChArUco board/detector objects the auto-scan/calibration reuse.
 
-    Built once per scan (not once per sampled frame) since constructing
-    the dictionary/board/detector triplet repeatedly for every frame
-    would be wasted work - the board geometry never changes mid-scan.
+    Built once per scan or calibration run (not once per sampled
+    frame/pair) since constructing the dictionary/board/detector triplet
+    repeatedly would be wasted work - the board geometry never changes
+    mid-run. Unlike the ArUco dictionary (`CHARUCO_DICTIONARY_ID`,
+    always fixed), the board's physical geometry is user-set - see this
+    module's docstring for why.
+
+    Args:
+        squares_x (int): Number of chessboard squares along the X axis.
+        squares_y (int): Number of chessboard squares along the Y axis.
+        square_size_mm (float): Physical size of each chessboard square,
+            in millimeters.
+        marker_size_mm (float): Physical size of each ArUco marker, in
+            millimeters.
 
     Returns:
-        cv2.aruco.CharucoDetector: A detector configured for the fixed
-        `CHARUCO_SQUARES_X`/`CHARUCO_SQUARES_Y`/`CHARUCO_SQUARE_SIZE_MM`/
-        `CHARUCO_MARKER_SIZE_MM`/`CHARUCO_DICTIONARY_ID` board geometry.
+        cv2.aruco.CharucoDetector: A detector configured for the given
+        board geometry, using the fixed `CHARUCO_DICTIONARY_ID`.
     """
     dictionary = cv2.aruco.getPredefinedDictionary(CHARUCO_DICTIONARY_ID)
     board = cv2.aruco.CharucoBoard(
-        (CHARUCO_SQUARES_X, CHARUCO_SQUARES_Y),
-        CHARUCO_SQUARE_SIZE_MM,
-        CHARUCO_MARKER_SIZE_MM,
+        (squares_x, squares_y),
+        square_size_mm,
+        marker_size_mm,
         dictionary,
     )
     return cv2.aruco.CharucoDetector(board)
@@ -202,23 +266,286 @@ def frame_has_charuco_board(gray_image, detector):
     return charuco_corners is not None and len(charuco_corners) >= 4
 
 
-def frame_has_calibration_board(bgr_image, charuco_detector):
+def frame_has_calibration_board(bgr_image, charuco_detector, checkerboard_inner_corners):
     """Check whether a frame has a detectable checkerboard or ChArUco board.
 
     Tries checkerboard detection first, then ChArUco, so either board
     type present in the video gets picked up without the project owner
-    needing to specify which one is actually in use.
+    needing to specify which one is actually in use during the
+    auto-scan (unlike an actual calibration run - see this module's
+    docstring for why that needs one committed-to type).
 
     Args:
         bgr_image (numpy.ndarray): A decoded BGR video frame.
         charuco_detector (cv2.aruco.CharucoDetector): A detector built
             by `build_charuco_detector`.
+        checkerboard_inner_corners (tuple[int, int]): The `(columns,
+            rows)` of checkerboard inner corners to look for - see
+            `frame_has_checkerboard`.
 
     Returns:
         bool: True if either detector found a board.
     """
     gray_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2GRAY)
-    return frame_has_checkerboard(gray_image) or frame_has_charuco_board(gray_image, charuco_detector)
+    return frame_has_checkerboard(gray_image, checkerboard_inner_corners) or frame_has_charuco_board(
+        gray_image, charuco_detector
+    )
+
+
+def detect_checkerboard_points(gray_image, inner_corners):
+    """Detect and subpixel-refine checkerboard corners in an image.
+
+    Unlike `frame_has_checkerboard` (a plain yes/no check for the
+    auto-scan), this returns the actual corner locations needed to
+    build a real calibration - refined via `cv2.cornerSubPix` for
+    accuracy, since the raw corners `findChessboardCorners` returns are
+    only approximate.
+
+    Args:
+        gray_image (numpy.ndarray): A single-channel (grayscale) image.
+        inner_corners (tuple[int, int]): The `(columns, rows)` of inner
+            corners to look for - see `frame_has_checkerboard`.
+
+    Returns:
+        numpy.ndarray | None: The refined `(N, 2)` float32 corner array
+        (this OpenCV build's `findChessboardCorners`/`cornerSubPix`
+        return that shape rather than the `(N, 1, 2)` some older
+        examples show - `cv2.calibrateCamera` accepts either) if a full
+        `inner_corners`-sized grid was found, else None.
+    """
+    found, corners = cv2.findChessboardCorners(
+        gray_image,
+        inner_corners,
+        flags=cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE,
+    )
+    if not found:
+        return None
+
+    refine_criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+    return cv2.cornerSubPix(gray_image, corners, (11, 11), (-1, -1), refine_criteria)
+
+
+def build_checkerboard_object_points(square_size_mm, inner_corners):
+    """Build the real-world object-point grid for one checkerboard view.
+
+    Every checkerboard view of the *same* physical board shares this
+    exact same object-point array - only the detected image points
+    (where those corners actually landed in a given photo) differ
+    between views.
+
+    Args:
+        square_size_mm (float): The checkerboard's real-world square
+            size, in millimeters.
+        inner_corners (tuple[int, int]): The `(columns, rows)` of inner
+            corners - see `frame_has_checkerboard`.
+
+    Returns:
+        numpy.ndarray: A `(rows * columns, 3)` float32 array of
+        `(x, y, 0)` points in checkerboard order, scaled to real-world
+        millimeters.
+    """
+    inner_columns, inner_rows = inner_corners
+    object_points = np.zeros((inner_rows * inner_columns, 3), dtype=np.float32)
+    object_points[:, :2] = np.mgrid[0:inner_columns, 0:inner_rows].T.reshape(-1, 2)
+    object_points *= square_size_mm
+    return object_points
+
+
+def detect_charuco_points(gray_image, detector):
+    """Detect ChArUco corners and their board IDs in an image.
+
+    Args:
+        gray_image (numpy.ndarray): A single-channel (grayscale) image.
+        detector (cv2.aruco.CharucoDetector): A detector built by
+            `build_charuco_detector`.
+
+    Returns:
+        tuple[numpy.ndarray, numpy.ndarray] | tuple[None, None]: The
+        `(charuco_corners, charuco_ids)` pair if at least 4 corners
+        were found, else `(None, None)`.
+    """
+    charuco_corners, charuco_ids, _marker_corners, _marker_ids = detector.detectBoard(gray_image)
+    if charuco_corners is None or charuco_ids is None or len(charuco_corners) < 4:
+        return None, None
+    return charuco_corners, charuco_ids
+
+
+def match_charuco_points_for_pair(left_corners, left_ids, right_corners, right_ids, charuco_board):
+    """Match a stereo pair's ChArUco detections down to their shared corner IDs.
+
+    A ChArUco corner ID detected in only one of the two images can't
+    contribute a stereo point - occlusion or a bad viewing angle on one
+    side is common even when the other side sees the board cleanly.
+    This keeps only the IDs seen on *both* sides, in a consistent
+    matching order, and looks up each one's real-world object point
+    directly from the board geometry (`board.getChessboardCorners()`
+    is indexed by corner ID, matching how the reference
+    `feature-onlineCalibrations` branch this was adapted from does it).
+
+    Args:
+        left_corners (numpy.ndarray): Left-image ChArUco corners, from
+            `detect_charuco_points`.
+        left_ids (numpy.ndarray): Left-image ChArUco corner IDs,
+            matching `left_corners`.
+        right_corners (numpy.ndarray): Right-image ChArUco corners.
+        right_ids (numpy.ndarray): Right-image ChArUco corner IDs.
+        charuco_board (cv2.aruco.CharucoBoard): The board geometry
+            (`detector.getBoard()`) both sides were detected against.
+
+    Returns:
+        tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray] | None:
+        `(object_points, left_image_points, right_image_points)` for
+        the shared IDs, or None if fewer than 4 IDs are shared.
+    """
+    left_corner_by_id = {int(cid): left_corners[i].reshape(2) for i, cid in enumerate(left_ids.reshape(-1))}
+    right_corner_by_id = {int(cid): right_corners[i].reshape(2) for i, cid in enumerate(right_ids.reshape(-1))}
+
+    shared_ids = sorted(set(left_corner_by_id) & set(right_corner_by_id))
+    if len(shared_ids) < 4:
+        return None
+
+    chessboard_corners = charuco_board.getChessboardCorners()
+    object_points = np.array([chessboard_corners[cid] for cid in shared_ids], dtype=np.float32)
+    left_image_points = np.array([left_corner_by_id[cid] for cid in shared_ids], dtype=np.float32).reshape(-1, 1, 2)
+    right_image_points = np.array([right_corner_by_id[cid] for cid in shared_ids], dtype=np.float32).reshape(-1, 1, 2)
+
+    return object_points, left_image_points, right_image_points
+
+
+def run_stereo_calibration(object_points_list, left_image_points_list, right_image_points_list, image_size, output_folder):
+    """Run OpenCV stereo calibration and save the four calibration NPZ files.
+
+    Calibrates each camera's intrinsics independently, then the
+    stereo extrinsics between them (holding intrinsics fixed, via
+    `cv2.CALIB_FIX_INTRINSIC`), then the rectification transforms/remap
+    tables - the same sequence, and the same output file names/keys,
+    `calibration_io.py` already expects (matching the reference
+    `feature-onlineCalibrations` branch's own `_run_stereo_calibration`,
+    which was written against this exact loader format).
+
+    Args:
+        object_points_list (list[numpy.ndarray]): One real-world
+            object-point array per valid stereo pair.
+        left_image_points_list (list[numpy.ndarray]): One left-image
+            point array per valid stereo pair, same order/length as
+            `object_points_list`.
+        right_image_points_list (list[numpy.ndarray]): One right-image
+            point array per valid stereo pair, same order/length as
+            `object_points_list`.
+        image_size (tuple[int, int]): The `(width, height)` of the
+            images calibration was run against, in pixels.
+        output_folder (str): Folder to write the four calibration NPZ
+            files into.
+
+    Returns:
+        dict: Keys `"left_rms"`, `"right_rms"`, `"stereo_rms"` (OpenCV's
+        own reprojection-error quality numbers, lower is better), and
+        `"valid_pair_count"`.
+
+    Raises:
+        ValueError: If fewer than 3 valid stereo pairs are given -
+            OpenCV's stereo calibration isn't numerically meaningful
+            with less data than that.
+    """
+    if len(object_points_list) < 3:
+        raise ValueError("At least 3 valid stereo pairs are required for calibration.")
+
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-5)
+
+    # Calibrate each camera's own intrinsics/distortion independently first.
+    left_rms, mtx_l, dist_l, rvecs_l, tvecs_l = cv2.calibrateCamera(
+        object_points_list, left_image_points_list, image_size, None, None
+    )
+    right_rms, mtx_r, dist_r, rvecs_r, tvecs_r = cv2.calibrateCamera(
+        object_points_list, right_image_points_list, image_size, None, None
+    )
+
+    # Calibrate the stereo extrinsics between the two cameras, keeping the
+    # intrinsics just computed above fixed rather than re-solving them.
+    stereo_rms, mtx_l, dist_l, mtx_r, dist_r, rotation, translation, essential, fundamental = cv2.stereoCalibrate(
+        object_points_list,
+        left_image_points_list,
+        right_image_points_list,
+        mtx_l,
+        dist_l,
+        mtx_r,
+        dist_r,
+        image_size,
+        criteria=criteria,
+        flags=cv2.CALIB_FIX_INTRINSIC,
+    )
+
+    # Calculate stereo rectification transforms and projection matrices.
+    rect_l, rect_r, proj_l, proj_r, disparity_to_depth, roi_l, roi_r = cv2.stereoRectify(
+        mtx_l,
+        dist_l,
+        mtx_r,
+        dist_r,
+        image_size,
+        rotation,
+        translation,
+        flags=cv2.CALIB_ZERO_DISPARITY,
+        alpha=0,
+    )
+
+    # Build the undistortion/rectification remap tables for each camera.
+    map_lx, map_ly = cv2.initUndistortRectifyMap(mtx_l, dist_l, rect_l, proj_l, image_size, cv2.CV_32FC1)
+    map_rx, map_ry = cv2.initUndistortRectifyMap(mtx_r, dist_r, rect_r, proj_r, image_size, cv2.CV_32FC1)
+
+    # Save intrinsics, in the format calibration_io.py's loader expects.
+    np.savez(
+        os.path.join(output_folder, "calibration_intrinsics.npz"),
+        image_width=int(image_size[0]),
+        image_height=int(image_size[1]),
+        mtxL=mtx_l,
+        distL=dist_l,
+        mtxR=mtx_r,
+        distR=dist_r,
+        left_rms=left_rms,
+        right_rms=right_rms,
+        rvecsL=np.array(rvecs_l, dtype=object),
+        tvecsL=np.array(tvecs_l, dtype=object),
+        rvecsR=np.array(rvecs_r, dtype=object),
+        tvecsR=np.array(tvecs_r, dtype=object),
+    )
+
+    # Save stereo extrinsics.
+    np.savez(
+        os.path.join(output_folder, "calibration_extrinsics.npz"),
+        stereo_rms=stereo_rms,
+        R=rotation,
+        T=translation,
+        E=essential,
+        F=fundamental,
+    )
+
+    # Save stereo rectification data.
+    np.savez(
+        os.path.join(output_folder, "calibration_rectification.npz"),
+        RL=rect_l,
+        RR=rect_r,
+        PL=proj_l,
+        PR=proj_r,
+        Q=disparity_to_depth,
+        roiL=np.array(roi_l),
+        roiR=np.array(roi_r),
+    )
+
+    # Save the rectification remap tables.
+    np.savez(
+        os.path.join(output_folder, "calibration_maps.npz"),
+        mapLx=map_lx,
+        mapLy=map_ly,
+        mapRx=map_rx,
+        mapRy=map_ry,
+    )
+
+    return {
+        "left_rms": float(left_rms),
+        "right_rms": float(right_rms),
+        "stereo_rms": float(stereo_rms),
+        "valid_pair_count": len(object_points_list),
+    }
 
 
 class PerformCalibrationWindow:
@@ -300,6 +627,69 @@ class PerformCalibrationWindow:
         `_run_auto_scan` between sampled frames so it can exit early
         rather than always running to the end of the video."""
 
+        self.board_type_var = None
+        """`tk.StringVar` holding which board type `on_run_calibration`
+        (Step 2) should treat every captured pair as - `"Checkerboard"`
+        or `"ChArUco"`. Created in `ensure_window`. See this module's
+        docstring for why a calibration run needs one consistent board
+        type rather than auto-detecting it per pair the way the
+        auto-scan does."""
+
+        self.checkerboard_square_size_var = None
+        """`tk.StringVar` holding the checkerboard's real-world square
+        size in millimeters, read by `on_run_calibration` only when
+        `self.board_type_var` is `"Checkerboard"`. Created in
+        `ensure_window`."""
+
+        self.checkerboard_squares_x_var = None
+        """`tk.StringVar` holding the checkerboard's width in *squares*
+        (not inner corners - see `frame_has_checkerboard`), read by both
+        `on_run_calibration` and the auto-scan
+        (`on_auto_scan_for_candidates`) whenever checkerboard detection
+        is relevant. A plain checkerboard has no marker IDs to encode
+        its own size, so there's no single fixed default that works for
+        every physical board - this is user-set instead, defaulting to
+        `DEFAULT_CHECKERBOARD_SQUARES_X` (matching
+        `create_checkerboard_calibration_target.py`'s own default
+        printable board, so the two line up out of the box). Created in
+        `ensure_window`."""
+
+        self.checkerboard_squares_y_var = None
+        """`tk.StringVar` holding the checkerboard's height in squares.
+        See `self.checkerboard_squares_x_var`."""
+
+        self.charuco_squares_x_var = None
+        """`tk.StringVar` holding the ChArUco board's width in squares,
+        read by both `on_run_calibration` and the auto-scan whenever
+        ChArUco detection is relevant, defaulting to
+        `DEFAULT_CHARUCO_SQUARES_X` (matching
+        `create_charuco_calibration_target.py`'s own default printable
+        board). Created in `ensure_window`."""
+
+        self.charuco_squares_y_var = None
+        """`tk.StringVar` holding the ChArUco board's height in squares.
+        See `self.charuco_squares_x_var`."""
+
+        self.charuco_square_size_var = None
+        """`tk.StringVar` holding the ChArUco board's real-world square
+        size in millimeters. See `self.charuco_squares_x_var`."""
+
+        self.charuco_marker_size_var = None
+        """`tk.StringVar` holding the ChArUco board's real-world ArUco
+        marker size in millimeters - must be smaller than the square
+        size (`_parse_charuco_settings` enforces this). See
+        `self.charuco_squares_x_var`."""
+
+        self.checkerboard_row = None
+        """The `ttk.Frame` holding the checkerboard-specific settings -
+        shown only while `self.board_type_var` is `"Checkerboard"`.
+        Created in `ensure_window`."""
+
+        self.charuco_row = None
+        """The `ttk.Frame` holding the ChArUco-specific settings - shown
+        only while `self.board_type_var` is `"ChArUco"`. Created in
+        `ensure_window`."""
+
     def _on_close(self):
         """Handle the user manually closing the window.
 
@@ -328,6 +718,16 @@ class PerformCalibrationWindow:
         self.status_var = None
         self.pairs_listbox = None
         self.auto_scan_button = None
+        self.board_type_var = None
+        self.checkerboard_square_size_var = None
+        self.checkerboard_squares_x_var = None
+        self.checkerboard_squares_y_var = None
+        self.charuco_squares_x_var = None
+        self.charuco_squares_y_var = None
+        self.charuco_square_size_var = None
+        self.charuco_marker_size_var = None
+        self.checkerboard_row = None
+        self.charuco_row = None
 
     def _metadata_path(self):
         """Build the path to this capture folder's metadata JSON file.
@@ -410,8 +810,9 @@ class PerformCalibrationWindow:
         win.title(self.app._app_window_title())
 
         # Give the window an initial size large enough for the folder row,
-        # capture button, and pairs list without feeling cramped.
-        win.geometry("560x480")
+        # capture/calibration buttons, and pairs list without feeling
+        # cramped.
+        win.geometry("600x560")
 
         # Use the cleanup callback when the user closes this window.
         win.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -488,9 +889,89 @@ class PerformCalibrationWindow:
             wraplength=520,
         ).grid(row=3, column=0, sticky="w", pady=(6, 0))
 
+        # ---- Calibration row ----
+        # Board type (a run needs one consistent type - see this module's
+        # docstring) plus the button that actually runs the calibration
+        # math (Step 2). Choosing a board type here shows that type's own
+        # size/dimension fields below (checkerboard_row/charuco_row) and
+        # hides the other - see _on_board_type_changed.
+        calibration_row = ttk.Frame(outer)
+        calibration_row.grid(row=4, column=0, sticky="w", pady=(10, 0))
+
+        ttk.Label(calibration_row, text="Board type:").grid(row=0, column=0)
+        self.board_type_var = tk.StringVar(value="Checkerboard")
+        board_type_combo = ttk.Combobox(
+            calibration_row,
+            textvariable=self.board_type_var,
+            values=["Checkerboard", "ChArUco"],
+            width=12,
+            state="readonly",
+        )
+        board_type_combo.grid(row=0, column=1, padx=(4, 12))
+        board_type_combo.bind("<<ComboboxSelected>>", lambda event: self._on_board_type_changed())
+
+        ttk.Button(
+            calibration_row,
+            text="Run Calibration",
+            command=self.on_run_calibration,
+        ).grid(row=0, column=2)
+
+        # A plain checkerboard has no marker IDs to encode its own
+        # dimensions, so its size has to be set here, matching whatever
+        # physical board is actually in use. Gridded onto the same row as
+        # charuco_row below - only one of the two is ever visible at a
+        # time, toggled by _on_board_type_changed.
+        self.checkerboard_row = ttk.Frame(outer)
+        self.checkerboard_row.grid(row=5, column=0, sticky="w", pady=(6, 0))
+
+        ttk.Label(self.checkerboard_row, text="Checkerboard squares (columns x rows):").grid(row=0, column=0)
+        self.checkerboard_squares_x_var = tk.StringVar(value=str(DEFAULT_CHECKERBOARD_SQUARES_X))
+        ttk.Entry(self.checkerboard_row, textvariable=self.checkerboard_squares_x_var, width=4).grid(
+            row=0, column=1, padx=(4, 2)
+        )
+        ttk.Label(self.checkerboard_row, text="x").grid(row=0, column=2)
+        self.checkerboard_squares_y_var = tk.StringVar(value=str(DEFAULT_CHECKERBOARD_SQUARES_Y))
+        ttk.Entry(self.checkerboard_row, textvariable=self.checkerboard_squares_y_var, width=4).grid(
+            row=0, column=3, padx=(2, 12)
+        )
+
+        ttk.Label(self.checkerboard_row, text="Square size (mm):").grid(row=0, column=4)
+        self.checkerboard_square_size_var = tk.StringVar(value=str(DEFAULT_CHECKERBOARD_SQUARE_SIZE_MM))
+        ttk.Entry(self.checkerboard_row, textvariable=self.checkerboard_square_size_var, width=8).grid(
+            row=0, column=5, padx=(4, 0)
+        )
+
+        # ChArUco's own size/dimension/marker fields - see this module's
+        # docstring for why ChArUco's geometry is user-set too, not fixed.
+        self.charuco_row = ttk.Frame(outer)
+        self.charuco_row.grid(row=5, column=0, sticky="w", pady=(6, 0))
+
+        ttk.Label(self.charuco_row, text="ChArUco squares (columns x rows):").grid(row=0, column=0)
+        self.charuco_squares_x_var = tk.StringVar(value=str(DEFAULT_CHARUCO_SQUARES_X))
+        ttk.Entry(self.charuco_row, textvariable=self.charuco_squares_x_var, width=4).grid(
+            row=0, column=1, padx=(4, 2)
+        )
+        ttk.Label(self.charuco_row, text="x").grid(row=0, column=2)
+        self.charuco_squares_y_var = tk.StringVar(value=str(DEFAULT_CHARUCO_SQUARES_Y))
+        ttk.Entry(self.charuco_row, textvariable=self.charuco_squares_y_var, width=4).grid(
+            row=0, column=3, padx=(2, 12)
+        )
+
+        ttk.Label(self.charuco_row, text="Square (mm):").grid(row=0, column=4)
+        self.charuco_square_size_var = tk.StringVar(value=str(DEFAULT_CHARUCO_SQUARE_SIZE_MM))
+        ttk.Entry(self.charuco_row, textvariable=self.charuco_square_size_var, width=6).grid(
+            row=0, column=5, padx=(4, 12)
+        )
+
+        ttk.Label(self.charuco_row, text="Marker (mm):").grid(row=0, column=6)
+        self.charuco_marker_size_var = tk.StringVar(value=str(DEFAULT_CHARUCO_MARKER_SIZE_MM))
+        ttk.Entry(self.charuco_row, textvariable=self.charuco_marker_size_var, width=6).grid(
+            row=0, column=7, padx=(4, 0)
+        )
+
         # ---- Captured pairs list ----
         list_frame = ttk.Frame(outer)
-        list_frame.grid(row=4, column=0, sticky="nsew", pady=(10, 0))
+        list_frame.grid(row=6, column=0, sticky="nsew", pady=(10, 0))
         list_frame.grid_rowconfigure(0, weight=1)
         list_frame.grid_columnconfigure(0, weight=1)
 
@@ -506,7 +987,7 @@ class PerformCalibrationWindow:
         # ---- Status line ----
         self.status_var = tk.StringVar(value="")
         ttk.Label(outer, textvariable=self.status_var, foreground="#555555").grid(
-            row=5, column=0, sticky="w", pady=(6, 0)
+            row=7, column=0, sticky="w", pady=(6, 0)
         )
 
         self.win = win
@@ -523,11 +1004,33 @@ class PerformCalibrationWindow:
 
         # Let the captured-pairs list get the extra vertical space when the
         # window resizes; everything above it stays a fixed height.
-        outer.grid_rowconfigure(4, weight=1)
+        outer.grid_rowconfigure(6, weight=1)
+
+        # Show only the settings row matching the current (default)
+        # board type.
+        self._on_board_type_changed()
 
         # Populate the pairs list immediately in case a folder was already
         # chosen in an earlier call this session and already has captures.
         self._refresh_pairs_listbox()
+
+    def _on_board_type_changed(self):
+        """Show the settings row matching the selected board type.
+
+        `self.checkerboard_row` and `self.charuco_row` are gridded onto
+        the same row - only one is ever visible at a time. Called when
+        the board type combobox changes, and once from `ensure_window`
+        to set the correct initial visibility.
+
+        Returns:
+            None
+        """
+        if self.board_type_var.get() == "Checkerboard":
+            self.charuco_row.grid_remove()
+            self.checkerboard_row.grid()
+        else:
+            self.checkerboard_row.grid_remove()
+            self.charuco_row.grid()
 
     def on_choose_capture_folder(self):
         """Choose (or create) the folder captured frame pairs get saved into.
@@ -795,6 +1298,20 @@ class PerformCalibrationWindow:
             messagebox.showerror("Perform Calibration", "Choose a capture folder first.")
             return
 
+        # The scan always tries both checkerboard and ChArUco detection
+        # regardless of self.board_type_var (see
+        # frame_has_calibration_board), so it needs valid settings for
+        # *both* board types even though only one is actually selected
+        # for the eventual calibration run.
+        parsed_checkerboard_settings = self._parse_checkerboard_settings()
+        if parsed_checkerboard_settings is None:
+            return
+        checkerboard_inner_corners, _checkerboard_square_size_mm = parsed_checkerboard_settings
+
+        parsed_charuco_settings = self._parse_charuco_settings()
+        if parsed_charuco_settings is None:
+            return
+
         self._scan_stop_requested = False
         self._scan_queue = queue.Queue()
         self._scan_thread = threading.Thread(
@@ -804,6 +1321,8 @@ class PerformCalibrationWindow:
                 app.right_video_path,
                 int(app.lock_offset_frames),
                 int(app.left_frame_max),
+                checkerboard_inner_corners,
+                parsed_charuco_settings,
             ),
             daemon=True,
         )
@@ -827,7 +1346,15 @@ class PerformCalibrationWindow:
         self._scan_stop_requested = True
         self.status_var.set("Stopping scan…")
 
-    def _run_auto_scan(self, left_video_path, right_video_path, lock_offset_frames, left_frame_max):
+    def _run_auto_scan(
+        self,
+        left_video_path,
+        right_video_path,
+        lock_offset_frames,
+        left_frame_max,
+        checkerboard_inner_corners,
+        charuco_settings,
+    ):
         """Background worker: scan both videos for calibration candidate frames.
 
         Runs on a separate thread from the Tk main loop - see this
@@ -848,13 +1375,25 @@ class PerformCalibrationWindow:
                 sync offset to apply to every sampled left frame index.
             left_frame_max (int): The highest valid left-video frame
                 index to scan up to.
+            checkerboard_inner_corners (tuple[int, int]): The `(columns,
+                rows)` of checkerboard inner corners to look for - see
+                `frame_has_checkerboard`. Passed in from
+                `on_auto_scan_for_candidates` (already parsed/validated
+                there) rather than read from `self` directly, since Tk
+                variables aren't safe to read from a background thread.
+            charuco_settings (tuple[int, int, float, float]): The
+                `(squares_x, squares_y, square_size_mm, marker_size_mm)`
+                ChArUco board geometry to look for - see
+                `_parse_charuco_settings`. Also passed in from
+                `on_auto_scan_for_candidates` for the same reason as
+                `checkerboard_inner_corners`.
 
         Returns:
             None
         """
         left_cap = cv2.VideoCapture(left_video_path)
         right_cap = cv2.VideoCapture(right_video_path)
-        charuco_detector = build_charuco_detector()
+        charuco_detector = build_charuco_detector(*charuco_settings)
 
         found_count = 0
 
@@ -878,8 +1417,8 @@ class PerformCalibrationWindow:
                 if (
                     left_ok
                     and right_ok
-                    and frame_has_calibration_board(frame_l, charuco_detector)
-                    and frame_has_calibration_board(frame_r, charuco_detector)
+                    and frame_has_calibration_board(frame_l, charuco_detector, checkerboard_inner_corners)
+                    and frame_has_calibration_board(frame_r, charuco_detector, checkerboard_inner_corners)
                 ):
                     pair_id = self._next_pair_id()
                     left_filename = f"left_{pair_id:0{PAIR_ID_DIGITS}d}.png"
@@ -940,6 +1479,226 @@ class PerformCalibrationWindow:
             return
 
         self.win.after(100, self._poll_scan_queue)
+
+    def _parse_checkerboard_settings(self):
+        """Parse and validate the checkerboard squares/size fields.
+
+        Shared by `on_run_calibration` (needs the real-world size too)
+        and `on_auto_scan_for_candidates` (only needs the inner-corner
+        count, to know what to look for - checkerboard is one of two
+        detectors the scan always tries, regardless of
+        `self.board_type_var`, so it needs valid squares even when a
+        ChArUco run is what's actually selected).
+
+        Returns:
+            tuple[tuple[int, int], float] | None: `((inner_columns,
+            inner_rows), square_size_mm)` if every field is valid. If
+            any field isn't, an error messagebox is shown and this
+            returns None - callers just need to return early in that
+            case, not show their own error too.
+        """
+        try:
+            squares_x = int(self.checkerboard_squares_x_var.get())
+            squares_y = int(self.checkerboard_squares_y_var.get())
+        except ValueError:
+            messagebox.showerror("Perform Calibration", "Enter valid whole numbers for the checkerboard's squares.")
+            return None
+
+        if squares_x < 2 or squares_y < 2:
+            messagebox.showerror("Perform Calibration", "Checkerboard squares must be at least 2 in each direction.")
+            return None
+
+        try:
+            square_size_mm = float(self.checkerboard_square_size_var.get())
+        except ValueError:
+            messagebox.showerror("Perform Calibration", "Enter a valid checkerboard square size in millimeters.")
+            return None
+
+        if square_size_mm <= 0:
+            messagebox.showerror("Perform Calibration", "Checkerboard square size must be greater than zero.")
+            return None
+
+        # findChessboardCorners/calibrateCamera work in inner corners, one
+        # fewer than the square count in each direction - see
+        # frame_has_checkerboard's docstring.
+        inner_corners = (squares_x - 1, squares_y - 1)
+        return inner_corners, square_size_mm
+
+    def _parse_charuco_settings(self):
+        """Parse and validate the ChArUco squares/square size/marker size fields.
+
+        Shared by `on_run_calibration` and `on_auto_scan_for_candidates`
+        (ChArUco is one of two detectors the scan always tries,
+        regardless of `self.board_type_var`, so it needs valid settings
+        even when a checkerboard run is what's actually selected) -
+        mirrors `_parse_checkerboard_settings`.
+
+        Returns:
+            tuple[int, int, float, float] | None: `(squares_x, squares_y,
+            square_size_mm, marker_size_mm)` if every field is valid. If
+            any field isn't, an error messagebox is shown and this
+            returns None - callers just need to return early in that
+            case, not show their own error too.
+        """
+        try:
+            squares_x = int(self.charuco_squares_x_var.get())
+            squares_y = int(self.charuco_squares_y_var.get())
+        except ValueError:
+            messagebox.showerror("Perform Calibration", "Enter valid whole numbers for the ChArUco board's squares.")
+            return None
+
+        if squares_x < 2 or squares_y < 2:
+            messagebox.showerror("Perform Calibration", "ChArUco squares must be at least 2 in each direction.")
+            return None
+
+        try:
+            square_size_mm = float(self.charuco_square_size_var.get())
+            marker_size_mm = float(self.charuco_marker_size_var.get())
+        except ValueError:
+            messagebox.showerror(
+                "Perform Calibration", "Enter valid ChArUco square/marker sizes in millimeters."
+            )
+            return None
+
+        if square_size_mm <= 0 or marker_size_mm <= 0:
+            messagebox.showerror("Perform Calibration", "ChArUco square/marker sizes must be greater than zero.")
+            return None
+
+        if marker_size_mm >= square_size_mm:
+            messagebox.showerror("Perform Calibration", "ChArUco marker size must be smaller than the square size.")
+            return None
+
+        return squares_x, squares_y, square_size_mm, marker_size_mm
+
+    def on_run_calibration(self):
+        """Run stereo calibration on every captured pair and save the result.
+
+        Detects board points in every pair currently in the capture
+        folder, using whichever single board type is selected
+        (`self.board_type_var`) - not auto-detected per pair, see this
+        module's docstring for why a run needs one consistent type.
+        Pairs where detection fails on either side (or, for ChArUco,
+        where fewer than 4 corner IDs are shared between the two sides)
+        are skipped and counted rather than aborting the whole run.
+        Runs synchronously on the main thread rather than a background
+        one like the auto-scan - detecting points in an already-small
+        set of still images is fast enough not to freeze the UI
+        noticeably, unlike scanning a whole video.
+
+        Returns:
+            None
+        """
+        if self._scan_thread is not None:
+            messagebox.showerror("Perform Calibration", "Stop the current scan before running calibration.")
+            return
+
+        if not self.capture_folder:
+            messagebox.showerror("Perform Calibration", "Choose a capture folder first.")
+            return
+
+        pairs = self._scan_capture_folder()
+        if not pairs:
+            messagebox.showerror("Perform Calibration", "No captured pairs to calibrate from.")
+            return
+
+        board_type = self.board_type_var.get()
+
+        if board_type == "Checkerboard":
+            parsed_settings = self._parse_checkerboard_settings()
+            if parsed_settings is None:
+                return
+            inner_corners, square_size_mm = parsed_settings
+            checkerboard_object_points = build_checkerboard_object_points(square_size_mm, inner_corners)
+            charuco_detector = None
+            charuco_board = None
+        else:
+            parsed_charuco_settings = self._parse_charuco_settings()
+            if parsed_charuco_settings is None:
+                return
+            inner_corners = None
+            checkerboard_object_points = None
+            charuco_detector = build_charuco_detector(*parsed_charuco_settings)
+            charuco_board = charuco_detector.getBoard()
+
+        object_points_list = []
+        left_image_points_list = []
+        right_image_points_list = []
+        image_size = None
+        skipped_pair_count = 0
+
+        for pair_id, left_filename, right_filename in pairs:
+            left_image = cv2.imread(os.path.join(self.capture_folder, left_filename))
+            right_image = cv2.imread(os.path.join(self.capture_folder, right_filename))
+            if left_image is None or right_image is None:
+                skipped_pair_count += 1
+                continue
+
+            # All pairs are assumed to share one image size - the first
+            # successfully-read pair sets it for cv2.calibrateCamera below.
+            if image_size is None:
+                image_size = (left_image.shape[1], left_image.shape[0])
+
+            left_gray = cv2.cvtColor(left_image, cv2.COLOR_BGR2GRAY)
+            right_gray = cv2.cvtColor(right_image, cv2.COLOR_BGR2GRAY)
+
+            if board_type == "Checkerboard":
+                left_points = detect_checkerboard_points(left_gray, inner_corners)
+                right_points = detect_checkerboard_points(right_gray, inner_corners)
+                if left_points is None or right_points is None:
+                    skipped_pair_count += 1
+                    continue
+
+                object_points_list.append(checkerboard_object_points)
+                left_image_points_list.append(left_points)
+                right_image_points_list.append(right_points)
+            else:
+                left_corners, left_ids = detect_charuco_points(left_gray, charuco_detector)
+                right_corners, right_ids = detect_charuco_points(right_gray, charuco_detector)
+                if left_corners is None or right_corners is None:
+                    skipped_pair_count += 1
+                    continue
+
+                matched = match_charuco_points_for_pair(left_corners, left_ids, right_corners, right_ids, charuco_board)
+                if matched is None:
+                    skipped_pair_count += 1
+                    continue
+
+                object_points, left_points, right_points = matched
+                object_points_list.append(object_points)
+                left_image_points_list.append(left_points)
+                right_image_points_list.append(right_points)
+
+        if len(object_points_list) < 3:
+            messagebox.showerror(
+                "Perform Calibration",
+                f"Only {len(object_points_list)} usable pair(s) out of {len(pairs)} - at least 3 are "
+                "needed. Capture more pairs with the board clearly visible in both frames.",
+            )
+            return
+
+        try:
+            result = run_stereo_calibration(
+                object_points_list, left_image_points_list, right_image_points_list, image_size, self.capture_folder
+            )
+        except ValueError as e:
+            messagebox.showerror("Perform Calibration", str(e))
+            return
+
+        skipped_note = f", {skipped_pair_count} skipped" if skipped_pair_count else ""
+        self.status_var.set(
+            f"Calibration saved — stereo RMS {result['stereo_rms']:.3f} "
+            f"(left {result['left_rms']:.3f}, right {result['right_rms']:.3f}), "
+            f"{result['valid_pair_count']} pair(s) used{skipped_note}"
+        )
+        messagebox.showinfo(
+            "Perform Calibration",
+            f"Calibration saved to:\n{self.capture_folder}\n\n"
+            f"Stereo RMS: {result['stereo_rms']:.4f}\n"
+            f"Left RMS: {result['left_rms']:.4f}\n"
+            f"Right RMS: {result['right_rms']:.4f}\n"
+            f"Pairs used: {result['valid_pair_count']} / {len(pairs)}"
+            + (f"\nSkipped: {skipped_pair_count}" if skipped_pair_count else ""),
+        )
 
     def _scan_capture_folder(self):
         """Scan the capture folder for existing matched left/right pairs.

@@ -33,6 +33,7 @@ import measurement_window  # measurement_window contains the Tkinter measurement
 import anaglyph_preview    # Manages the anaglyph_preview functionality
 import calibration_summary # calibration_summary contains the Tkinter calibration summary window and update helpers.
 import perform_calibration  # Owns the Perform Calibration window, capturing calibration frame pairs (ROADMAP.md Phase 10).
+import generate_calibration_target  # Owns the Generate Calibration Target window, printing checkerboard/ChArUco boards (ROADMAP.md Phase 10).
 import calibration_io      # Loads and validates calibration NPZ files, without the directory-chooser dialog.
 import project_io          # Saves/loads a project manifest (video paths, calibration folder, resync offset).
 import recent_projects      # Persists the File > Recent Projects submenu's list of project paths.
@@ -513,6 +514,12 @@ class SizeamaticProApp:
         left/right video (ROADMAP.md Phase 10). See
         `perform_calibration.PerformCalibrationWindow`."""
 
+        self.generate_calibration_target_window = generate_calibration_target.GenerateCalibrationTargetWindow(self)
+        """Owns the Generate Calibration Target Toplevel window and its
+        widgets - printing a checkerboard/ChArUco calibration board
+        (ROADMAP.md Phase 10). See
+        `generate_calibration_target.GenerateCalibrationTargetWindow`."""
+
         self.anaglyph_preview = anaglyph_preview.AnaglyphPreview(self)
         """Owns the anaglyph preview's OpenCV window and playback state.
         See `anaglyph_preview.AnaglyphPreview`."""
@@ -569,6 +576,18 @@ class SizeamaticProApp:
             None
         """
         self.perform_calibration_window.ensure_window()
+
+    def on_generate_calibration_target(self):
+        """Open (or focus) the Generate Calibration Target window.
+
+        Doesn't require any video or calibration to be loaded - printing
+        a target is a prep step done before capturing anything
+        (ROADMAP.md Phase 10).
+
+        Returns:
+            None
+        """
+        self.generate_calibration_target_window.ensure_window()
 
     def on_mouse_wheel(self, which, event):
         """Handle mouse wheel zoom for a pane, anchored under the cursor.
@@ -1383,14 +1402,18 @@ class SizeamaticProApp:
         # ---- Calibration menu ----
         # A dedicated top-level menu (ROADMAP.md Phase 10) rather than
         # burying calibration actions under File/View - "Load
-        # Calibration…" moved here from the File menu, and "Perform
-        # Calibration…" (new) opens the frame-pair capture window.
-        # "Calibration Report…" isn't added yet - it has no real
-        # behavior to wire up until a later Phase 10 step actually
-        # builds it.
+        # Calibration…" moved here from the File menu, "Perform
+        # Calibration…" opens the frame-pair capture window, and
+        # "Generate Calibration Target…" opens the printable
+        # checkerboard/ChArUco board window. "Calibration Report…" isn't
+        # added yet - it has no real behavior to wire up until a later
+        # Phase 10 step actually builds it.
         calibration_menu = tk.Menu(menubar, tearoff=False)
         calibration_menu.add_command(label="Load Calibration…", command=self.on_load_calibration_folder)
         calibration_menu.add_command(label="Perform Calibration…", command=self.on_perform_calibration)
+        calibration_menu.add_command(
+            label="Generate Calibration Target…", command=self.on_generate_calibration_target
+        )
         menubar.add_cascade(label="Calibration", menu=calibration_menu)
 
         self.root.config(menu=menubar)

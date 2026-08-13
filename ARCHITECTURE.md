@@ -88,8 +88,13 @@ These are standalone tools, not part of the `main.py` app:
 - `generate_calibration_report.py` — generates a calibration QA report
   (reads calibration NPZ files + checkerboard/charuco captures, produces a
   report)
-- `create_charuco_calibration_target.py` — generates a printable ChArUco
-  calibration target PDF/PNG, writes to gitignored `output/`
+- `generate_calibration_target.py` — the in-app window for printing a
+  checkerboard/ChArUco calibration target, with a live preview
+- `create_charuco_calibration_target.py` — the ChArUco board-image/PDF
+  rendering functions `generate_calibration_target.py` calls into (also
+  runnable standalone as a dev-convenience script)
+- `create_checkerboard_calibration_target.py` — the checkerboard
+  counterpart to `create_charuco_calibration_target.py`
 
 ## Non-app directories
 

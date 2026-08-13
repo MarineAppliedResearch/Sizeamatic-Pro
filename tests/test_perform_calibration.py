@@ -12,6 +12,7 @@ import queue
 
 import cv2
 import numpy as np
+import pytest
 import tkinter as tk
 
 import perform_calibration
@@ -71,14 +72,32 @@ class _FakeCapture:
         """
 
 
+# The checkerboard test frame below is drawn with 10x7 squares, which is
+# 9x6 *inner* corners - the shape every checkerboard-detection test in
+# this file passes as inner_corners, now that perform_calibration.py no
+# longer hardcodes a single board size.
+TEST_CHECKERBOARD_INNER_CORNERS = (9, 6)
+
+# (squares_x, squares_y, square_size_mm, marker_size_mm) - matches
+# perform_calibration.py's own DEFAULT_CHARUCO_* constants, used
+# wherever a test needs a ChArUco board's geometry, now that ChArUco is
+# also user-configurable rather than a single fixed module constant.
+TEST_CHARUCO_SETTINGS = (
+    perform_calibration.DEFAULT_CHARUCO_SQUARES_X,
+    perform_calibration.DEFAULT_CHARUCO_SQUARES_Y,
+    perform_calibration.DEFAULT_CHARUCO_SQUARE_SIZE_MM,
+    perform_calibration.DEFAULT_CHARUCO_MARKER_SIZE_MM,
+)
+
+
 def _make_checkerboard_bgr_frame():
     """Build a real, detectable synthetic checkerboard BGR frame.
 
     Returns:
         numpy.ndarray: A BGR image containing a
-        `perform_calibration.CHECKERBOARD_INNER_CORNERS`-sized
-        checkerboard pattern that `cv2.findChessboardCorners` can
-        actually detect - not just a placeholder image.
+        `TEST_CHECKERBOARD_INNER_CORNERS`-sized checkerboard pattern
+        that `cv2.findChessboardCorners` can actually detect - not just
+        a placeholder image.
     """
     square_px = 60
     cols, rows = 10, 7
@@ -97,6 +116,56 @@ def _make_blank_bgr_frame():
         numpy.ndarray: An all-black BGR image.
     """
     return np.zeros((420, 600, 3), dtype=np.uint8)
+
+
+def _make_charuco_board_bgr_image():
+    """Render a real, detectable synthetic ChArUco board BGR image.
+
+    Uses `TEST_CHARUCO_SETTINGS` (matching
+    `perform_calibration.py`'s own `DEFAULT_CHARUCO_*` constants), so
+    it's detectable by a detector built from those same settings via
+    `perform_calibration.build_charuco_detector`.
+
+    Returns:
+        numpy.ndarray: A BGR image of the rendered board.
+    """
+    squares_x, squares_y, square_size_mm, marker_size_mm = TEST_CHARUCO_SETTINGS
+    dictionary = cv2.aruco.getPredefinedDictionary(perform_calibration.CHARUCO_DICTIONARY_ID)
+    board = cv2.aruco.CharucoBoard(
+        (squares_x, squares_y),
+        square_size_mm,
+        marker_size_mm,
+        dictionary,
+    )
+    gray = board.generateImage((1100, 800), marginSize=20)
+    return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+
+def _make_warped_view(bgr_image, corner_shift):
+    """Perspective-warp an image to simulate a different board pose.
+
+    A planar calibration target viewed from a different angle/position
+    is, geometrically, just a different homography of the same flat
+    image - warping the rendered board this way stands in for "a
+    different capture pose" well enough to give
+    `cv2.calibrateCamera`/`stereoCalibrate` genuine multi-view variety
+    to solve against, without needing real photographs from an actual
+    physical rig.
+
+    Args:
+        bgr_image (numpy.ndarray): The source image to warp.
+        corner_shift (numpy.ndarray): A `(4, 2)` array of pixel offsets
+            to apply to the image's four corners (top-left, top-right,
+            bottom-left, bottom-right, in that order) before warping.
+
+    Returns:
+        numpy.ndarray: The warped BGR image, same size as the input.
+    """
+    height, width = bgr_image.shape[:2]
+    src = np.float32([[0, 0], [width, 0], [0, height], [width, height]])
+    dst = src + corner_shift
+    transform = cv2.getPerspectiveTransform(src, dst)
+    return cv2.warpPerspective(bgr_image, transform, (width, height))
 
 
 class _FakeVar:
@@ -604,7 +673,7 @@ def test_frame_has_checkerboard_detects_a_real_checkerboard():
     """A real synthetic checkerboard image should be detected."""
 
     assert perform_calibration.frame_has_checkerboard(
-        cv2.cvtColor(_make_checkerboard_bgr_frame(), cv2.COLOR_BGR2GRAY)
+        cv2.cvtColor(_make_checkerboard_bgr_frame(), cv2.COLOR_BGR2GRAY), TEST_CHECKERBOARD_INNER_CORNERS
     )
 
 
@@ -612,35 +681,32 @@ def test_frame_has_checkerboard_does_not_detect_a_blank_frame():
     """A plain blank frame should not be detected as a checkerboard."""
 
     assert not perform_calibration.frame_has_checkerboard(
-        cv2.cvtColor(_make_blank_bgr_frame(), cv2.COLOR_BGR2GRAY)
+        cv2.cvtColor(_make_blank_bgr_frame(), cv2.COLOR_BGR2GRAY), TEST_CHECKERBOARD_INNER_CORNERS
     )
 
 
 def test_frame_has_charuco_board_detects_a_real_charuco_board():
-    """A real generated ChArUco board image (matching this module's own
-    board settings) should be detected."""
+    """A real generated ChArUco board image (matching TEST_CHARUCO_SETTINGS)
+    should be detected."""
 
-    detector = perform_calibration.build_charuco_detector()
-    dictionary = cv2.aruco.getPredefinedDictionary(perform_calibration.CHARUCO_DICTIONARY_ID)
-    board = cv2.aruco.CharucoBoard(
-        (perform_calibration.CHARUCO_SQUARES_X, perform_calibration.CHARUCO_SQUARES_Y),
-        perform_calibration.CHARUCO_SQUARE_SIZE_MM,
-        perform_calibration.CHARUCO_MARKER_SIZE_MM,
-        dictionary,
-    )
-    board_image = board.generateImage((1100, 800), marginSize=20)
+    detector = perform_calibration.build_charuco_detector(*TEST_CHARUCO_SETTINGS)
+    board_image_gray = cv2.cvtColor(_make_charuco_board_bgr_image(), cv2.COLOR_BGR2GRAY)
 
-    assert perform_calibration.frame_has_charuco_board(board_image, detector)
+    assert perform_calibration.frame_has_charuco_board(board_image_gray, detector)
 
 
 def test_frame_has_calibration_board_accepts_either_board_type():
     """frame_has_calibration_board should recognize a checkerboard even
     though it only tries ChArUco detection second."""
 
-    detector = perform_calibration.build_charuco_detector()
+    detector = perform_calibration.build_charuco_detector(*TEST_CHARUCO_SETTINGS)
 
-    assert perform_calibration.frame_has_calibration_board(_make_checkerboard_bgr_frame(), detector)
-    assert not perform_calibration.frame_has_calibration_board(_make_blank_bgr_frame(), detector)
+    assert perform_calibration.frame_has_calibration_board(
+        _make_checkerboard_bgr_frame(), detector, TEST_CHECKERBOARD_INNER_CORNERS
+    )
+    assert not perform_calibration.frame_has_calibration_board(
+        _make_blank_bgr_frame(), detector, TEST_CHECKERBOARD_INNER_CORNERS
+    )
 
 
 def test_run_auto_scan_saves_only_sampled_frames_with_a_detected_board(monkeypatch, tmp_path, make_fake_app):
@@ -676,7 +742,7 @@ def test_run_auto_scan_saves_only_sampled_frames_with_a_detected_board(monkeypat
     win._scan_queue = queue.Queue()
     win._scan_stop_requested = False
 
-    win._run_auto_scan("left.mp4", "right.mp4", 0, 3 * stride)
+    win._run_auto_scan("left.mp4", "right.mp4", 0, 3 * stride, TEST_CHECKERBOARD_INNER_CORNERS, TEST_CHARUCO_SETTINGS)
 
     pairs = win._scan_capture_folder()
     assert len(pairs) == 2
@@ -736,7 +802,7 @@ def test_run_auto_scan_stops_early_when_requested(monkeypatch, tmp_path, make_fa
 
     monkeypatch.setattr(perform_calibration, "frame_has_calibration_board", _detect_then_stop)
 
-    win._run_auto_scan("left.mp4", "right.mp4", 0, 9 * stride)
+    win._run_auto_scan("left.mp4", "right.mp4", 0, 9 * stride, TEST_CHECKERBOARD_INNER_CORNERS, TEST_CHARUCO_SETTINGS)
 
     # Only the first couple of sampled frames should have been processed
     # before the stop flag took effect - nowhere near all 10.
@@ -842,3 +908,511 @@ def test_poll_scan_queue_resets_state_and_relabels_button_when_done(hidden_tk_ro
     assert "Scan finished" in win.status_var.get()
 
     win._on_close()
+
+
+def test_detect_checkerboard_points_returns_refined_corners_for_a_real_board():
+    """A real synthetic checkerboard should return one refined corner
+    per inner-corner position, not just a yes/no answer."""
+
+    columns, rows = TEST_CHECKERBOARD_INNER_CORNERS
+    gray = cv2.cvtColor(_make_checkerboard_bgr_frame(), cv2.COLOR_BGR2GRAY)
+
+    corners = perform_calibration.detect_checkerboard_points(gray, TEST_CHECKERBOARD_INNER_CORNERS)
+
+    assert corners is not None
+    assert corners.shape == (columns * rows, 2)
+
+
+def test_detect_checkerboard_points_returns_none_for_a_blank_frame():
+    """A blank frame has no checkerboard to detect."""
+
+    gray = cv2.cvtColor(_make_blank_bgr_frame(), cv2.COLOR_BGR2GRAY)
+
+    assert perform_calibration.detect_checkerboard_points(gray, TEST_CHECKERBOARD_INNER_CORNERS) is None
+
+
+def test_build_checkerboard_object_points_scales_to_real_world_millimeters():
+    """The object-point grid should have one (x, y, 0) point per inner
+    corner, spaced exactly square_size_mm apart."""
+
+    columns, rows = TEST_CHECKERBOARD_INNER_CORNERS
+    object_points = perform_calibration.build_checkerboard_object_points(25.0, TEST_CHECKERBOARD_INNER_CORNERS)
+
+    assert object_points.shape == (columns * rows, 3)
+    # The second point along a row should be exactly one square size to
+    # the right of the first, with no vertical or depth offset.
+    assert tuple(object_points[1]) == (25.0, 0.0, 0.0)
+    # Every Z coordinate is 0 - the board is planar.
+    assert (object_points[:, 2] == 0.0).all()
+
+
+def test_detect_charuco_points_returns_corners_and_ids_for_a_real_board():
+    """A real generated ChArUco board should return matching corners
+    and IDs, not just a yes/no answer."""
+
+    detector = perform_calibration.build_charuco_detector(*TEST_CHARUCO_SETTINGS)
+    board_image = _make_charuco_board_bgr_image()
+    gray = cv2.cvtColor(board_image, cv2.COLOR_BGR2GRAY)
+
+    corners, ids = perform_calibration.detect_charuco_points(gray, detector)
+
+    assert corners is not None
+    assert ids is not None
+    assert len(corners) == len(ids)
+    assert len(corners) >= 4
+
+
+def test_detect_charuco_points_returns_none_for_a_blank_frame():
+    """A blank frame has no ChArUco board to detect."""
+
+    detector = perform_calibration.build_charuco_detector(*TEST_CHARUCO_SETTINGS)
+    gray = cv2.cvtColor(_make_blank_bgr_frame(), cv2.COLOR_BGR2GRAY)
+
+    corners, ids = perform_calibration.detect_charuco_points(gray, detector)
+
+    assert corners is None
+    assert ids is None
+
+
+def test_match_charuco_points_for_pair_uses_only_shared_ids():
+    """Only corner IDs detected on *both* sides should end up in the
+    matched output, in a consistent order - an ID seen on only one side
+    (e.g. occluded in the other view) can't contribute a stereo point."""
+
+    left_corners = np.array(
+        [[[0.0, 0.0]], [[1.0, 1.0]], [[2.0, 2.0]], [[3.0, 3.0]], [[4.0, 4.0]]], dtype=np.float32
+    )
+    left_ids = np.array([[5], [6], [7], [8], [9]], dtype=np.int32)
+
+    right_corners = np.array(
+        [[[10.0, 10.0]], [[20.0, 20.0]], [[30.0, 30.0]], [[40.0, 40.0]], [[50.0, 50.0]]], dtype=np.float32
+    )
+    right_ids = np.array([[6], [7], [8], [9], [10]], dtype=np.int32)
+
+    charuco_squares_x, charuco_squares_y, charuco_square_size_mm, charuco_marker_size_mm = TEST_CHARUCO_SETTINGS
+    dictionary = cv2.aruco.getPredefinedDictionary(perform_calibration.CHARUCO_DICTIONARY_ID)
+    board = cv2.aruco.CharucoBoard(
+        (charuco_squares_x, charuco_squares_y),
+        charuco_square_size_mm,
+        charuco_marker_size_mm,
+        dictionary,
+    )
+
+    result = perform_calibration.match_charuco_points_for_pair(left_corners, left_ids, right_corners, right_ids, board)
+
+    assert result is not None
+    object_points, left_image_points, right_image_points = result
+    # Only IDs 6, 7, 8, and 9 are shared between the two sides - 5 and
+    # 10 each appear on only one side and should be excluded.
+    assert len(object_points) == 4
+    assert len(left_image_points) == 4
+    assert len(right_image_points) == 4
+    # left_ids/right_ids each list their shared IDs in the same relative
+    # order (6, 7, 8, 9), so the two sides' points should still line up.
+    assert list(left_image_points.reshape(-1, 2)[0]) == [1.0, 1.0]
+    assert list(right_image_points.reshape(-1, 2)[0]) == [10.0, 10.0]
+
+
+def test_match_charuco_points_for_pair_returns_none_for_too_few_shared_ids():
+    """Fewer than 4 shared IDs isn't enough to contribute a usable
+    stereo point set."""
+
+    left_corners = np.array([[[0.0, 0.0]], [[1.0, 1.0]]], dtype=np.float32)
+    left_ids = np.array([[1], [2]], dtype=np.int32)
+    right_corners = np.array([[[5.0, 5.0]], [[6.0, 6.0]]], dtype=np.float32)
+    right_ids = np.array([[1], [2]], dtype=np.int32)
+
+    charuco_squares_x, charuco_squares_y, charuco_square_size_mm, charuco_marker_size_mm = TEST_CHARUCO_SETTINGS
+    dictionary = cv2.aruco.getPredefinedDictionary(perform_calibration.CHARUCO_DICTIONARY_ID)
+    board = cv2.aruco.CharucoBoard(
+        (charuco_squares_x, charuco_squares_y),
+        charuco_square_size_mm,
+        charuco_marker_size_mm,
+        dictionary,
+    )
+
+    result = perform_calibration.match_charuco_points_for_pair(left_corners, left_ids, right_corners, right_ids, board)
+
+    assert result is None
+
+
+def test_run_stereo_calibration_raises_for_too_few_pairs():
+    """Fewer than 3 valid stereo pairs should raise rather than
+    silently attempting a numerically meaningless calibration."""
+
+    points = [np.zeros((4, 1, 2), dtype=np.float32)] * 2
+    object_points = [np.zeros((4, 3), dtype=np.float32)] * 2
+
+    with pytest.raises(ValueError):
+        perform_calibration.run_stereo_calibration(object_points, points, points, (640, 480), "unused")
+
+
+def test_run_stereo_calibration_saves_all_four_npz_files_with_expected_keys(tmp_path):
+    """A wiring-level check using synthetic (not photographed) but
+    geometrically real multi-view point correspondences - generated via
+    cv2.projectPoints from known camera/board poses, since this function
+    operates purely on point arrays, not images (detection is tested
+    separately above) - should produce all four calibration files
+    calibration_io.py's loader expects, with the documented keys, and a
+    near-zero reprojection error against this noiseless synthetic data."""
+
+    object_points = perform_calibration.build_checkerboard_object_points(25.0, TEST_CHECKERBOARD_INNER_CORNERS)
+    camera_matrix = np.array([[800.0, 0.0, 320.0], [0.0, 800.0, 240.0], [0.0, 0.0, 1.0]])
+    image_size = (640, 480)
+    baseline_mm = 50.0
+
+    # Five distinct board poses (rotation + distance from the camera),
+    # so the calibration solve has genuine multi-view variety - a real
+    # calibration run needs the board seen at different angles/distances
+    # to separate intrinsics from extrinsics; identical repeated views
+    # wouldn't let cv2.calibrateCamera converge meaningfully.
+    rvecs = [
+        np.array([0.0, 0.0, 0.0]),
+        np.array([0.1, 0.0, 0.0]),
+        np.array([0.0, 0.15, 0.0]),
+        np.array([0.05, -0.1, 0.05]),
+        np.array([-0.1, 0.05, -0.05]),
+    ]
+    tvecs = [
+        np.array([0.0, 0.0, 600.0]),
+        np.array([20.0, 0.0, 650.0]),
+        np.array([-20.0, 10.0, 700.0]),
+        np.array([10.0, -15.0, 620.0]),
+        np.array([-10.0, 5.0, 680.0]),
+    ]
+
+    object_points_list = []
+    left_image_points_list = []
+    right_image_points_list = []
+    for rvec, tvec in zip(rvecs, tvecs):
+        left_points, _jacobian = cv2.projectPoints(object_points, rvec, tvec, camera_matrix, None)
+        right_tvec = tvec + np.array([baseline_mm, 0.0, 0.0])
+        right_points, _jacobian = cv2.projectPoints(object_points, rvec, right_tvec, camera_matrix, None)
+
+        object_points_list.append(object_points)
+        left_image_points_list.append(left_points.astype(np.float32))
+        right_image_points_list.append(right_points.astype(np.float32))
+
+    result = perform_calibration.run_stereo_calibration(
+        object_points_list, left_image_points_list, right_image_points_list, image_size, str(tmp_path)
+    )
+
+    assert result["valid_pair_count"] == 5
+    assert result["stereo_rms"] < 0.5
+    assert result["left_rms"] < 0.5
+    assert result["right_rms"] < 0.5
+
+    intrinsics = np.load(tmp_path / "calibration_intrinsics.npz")
+    assert {"mtxL", "distL", "mtxR", "distR", "image_width", "image_height"}.issubset(set(intrinsics.files))
+    assert int(intrinsics["image_width"]) == 640
+    assert int(intrinsics["image_height"]) == 480
+
+    extrinsics = np.load(tmp_path / "calibration_extrinsics.npz")
+    assert {"R", "T", "E", "F", "stereo_rms"}.issubset(set(extrinsics.files))
+
+    rectification = np.load(tmp_path / "calibration_rectification.npz")
+    assert {"RL", "RR", "PL", "PR", "Q", "roiL", "roiR"}.issubset(set(rectification.files))
+
+    maps = np.load(tmp_path / "calibration_maps.npz")
+    assert {"mapLx", "mapLy", "mapRx", "mapRy"}.issubset(set(maps.files))
+
+
+def test_on_run_calibration_requires_a_capture_folder(monkeypatch, make_fake_app):
+    """Running calibration without a capture folder chosen should show
+    a clear error rather than crashing trying to list `None`."""
+
+    app = make_fake_app()
+    win = perform_calibration.PerformCalibrationWindow(app)
+
+    errors = []
+    monkeypatch.setattr(
+        "perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg)
+    )
+
+    win.on_run_calibration()
+
+    assert len(errors) == 1
+
+
+def test_on_run_calibration_requires_captured_pairs(monkeypatch, tmp_path, make_fake_app):
+    """Running calibration against an empty capture folder should show
+    a clear error rather than attempting a calibration with no data."""
+
+    app = make_fake_app()
+    win = perform_calibration.PerformCalibrationWindow(app)
+    win.capture_folder = str(tmp_path)
+
+    errors = []
+    monkeypatch.setattr(
+        "perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg)
+    )
+
+    win.on_run_calibration()
+
+    assert len(errors) == 1
+
+
+def test_on_run_calibration_refuses_while_a_scan_is_running(monkeypatch, tmp_path, make_fake_app):
+    """Running calibration while an auto-scan owns the capture folder
+    should be refused, same as manual capture/delete."""
+
+    app = make_fake_app()
+    win = perform_calibration.PerformCalibrationWindow(app)
+    win.capture_folder = str(tmp_path)
+    win._scan_thread = object()
+
+    errors = []
+    monkeypatch.setattr(
+        "perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg)
+    )
+
+    win.on_run_calibration()
+
+    assert len(errors) == 1
+
+
+def test_on_run_calibration_rejects_an_invalid_checkerboard_square_size(monkeypatch, tmp_path, make_fake_app):
+    """A non-numeric checkerboard square size should show a clear error
+    rather than crashing trying to convert it to a float."""
+
+    (tmp_path / "left_0001.png").write_bytes(b"")
+    (tmp_path / "right_0001.png").write_bytes(b"")
+
+    app = make_fake_app()
+    win = perform_calibration.PerformCalibrationWindow(app)
+    win.capture_folder = str(tmp_path)
+    win.board_type_var = _FakeVar("Checkerboard")
+    win.checkerboard_squares_x_var = _FakeVar(str(perform_calibration.DEFAULT_CHECKERBOARD_SQUARES_X))
+    win.checkerboard_squares_y_var = _FakeVar(str(perform_calibration.DEFAULT_CHECKERBOARD_SQUARES_Y))
+    win.checkerboard_square_size_var = _FakeVar("not a number")
+
+    errors = []
+    monkeypatch.setattr(
+        "perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg)
+    )
+
+    win.on_run_calibration()
+
+    assert len(errors) == 1
+
+
+def test_on_run_calibration_reports_when_too_few_pairs_are_usable(monkeypatch, tmp_path, make_fake_app):
+    """If fewer than 3 pairs actually have a detectable board, this
+    should report that clearly rather than letting run_stereo_calibration
+    raise a less specific error."""
+
+    # Two pairs of blank images - neither side of either pair has a
+    # detectable board, so 0 usable pairs come out of detection.
+    for pair_id in (1, 2):
+        cv2.imwrite(str(tmp_path / f"left_{pair_id:04d}.png"), _make_blank_bgr_frame())
+        cv2.imwrite(str(tmp_path / f"right_{pair_id:04d}.png"), _make_blank_bgr_frame())
+
+    app = make_fake_app()
+    win = perform_calibration.PerformCalibrationWindow(app)
+    win.capture_folder = str(tmp_path)
+    win.board_type_var = _FakeVar("ChArUco")
+    charuco_squares_x, charuco_squares_y, charuco_square_size_mm, charuco_marker_size_mm = TEST_CHARUCO_SETTINGS
+    win.charuco_squares_x_var = _FakeVar(str(charuco_squares_x))
+    win.charuco_squares_y_var = _FakeVar(str(charuco_squares_y))
+    win.charuco_square_size_var = _FakeVar(str(charuco_square_size_mm))
+    win.charuco_marker_size_var = _FakeVar(str(charuco_marker_size_mm))
+
+    errors = []
+    monkeypatch.setattr(
+        "perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg)
+    )
+
+    win.on_run_calibration()
+
+    assert len(errors) == 1
+    assert "0 usable pair" in errors[0]
+
+
+def test_on_run_calibration_end_to_end_with_real_charuco_images(monkeypatch, tmp_path, make_fake_app):
+    """A full happy-path run: real (perspective-warped, to simulate
+    different capture poses) ChArUco board images written to disk as
+    captured pairs, detected, calibrated, and saved - proving the
+    button's whole pipeline connects end to end, not just each piece in
+    isolation."""
+
+    base_image = _make_charuco_board_bgr_image()
+    height, width = base_image.shape[:2]
+
+    # A handful of distinct perspective warps per pair, with the right
+    # side shifted slightly from the left, so both single-camera
+    # calibration and the stereo step have real multi-view variety.
+    corner_shifts = [
+        np.float32([[0, 0], [0, 0], [0, 0], [0, 0]]),
+        np.float32([[30, 10], [-10, 20], [10, -10], [-30, -20]]),
+        np.float32([[10, 30], [-20, 10], [30, -20], [-10, -30]]),
+        np.float32([[0, 20], [-15, 0], [20, 0], [0, -25]]),
+    ]
+
+    for pair_id, shift in enumerate(corner_shifts, start=1):
+        left_image = _make_warped_view(base_image, shift)
+        right_image = _make_warped_view(base_image, shift + np.float32([15, 0]))
+        cv2.imwrite(str(tmp_path / f"left_{pair_id:04d}.png"), left_image)
+        cv2.imwrite(str(tmp_path / f"right_{pair_id:04d}.png"), right_image)
+
+    app = make_fake_app()
+    win = perform_calibration.PerformCalibrationWindow(app)
+    win.capture_folder = str(tmp_path)
+    win.board_type_var = _FakeVar("ChArUco")
+    charuco_squares_x, charuco_squares_y, charuco_square_size_mm, charuco_marker_size_mm = TEST_CHARUCO_SETTINGS
+    win.charuco_squares_x_var = _FakeVar(str(charuco_squares_x))
+    win.charuco_squares_y_var = _FakeVar(str(charuco_squares_y))
+    win.charuco_square_size_var = _FakeVar(str(charuco_square_size_mm))
+    win.charuco_marker_size_var = _FakeVar(str(charuco_marker_size_mm))
+    win.status_var = _FakeVar("")
+
+    infos = []
+    errors = []
+    monkeypatch.setattr("perform_calibration.messagebox.showinfo", lambda title, msg: infos.append(msg))
+    monkeypatch.setattr("perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg))
+
+    win.on_run_calibration()
+
+    assert errors == []
+    assert len(infos) == 1
+    assert "Calibration saved" in infos[0]
+    assert "Pairs used: 4 / 4" in infos[0]
+
+    assert os.path.isfile(tmp_path / "calibration_intrinsics.npz")
+    assert os.path.isfile(tmp_path / "calibration_extrinsics.npz")
+    assert os.path.isfile(tmp_path / "calibration_rectification.npz")
+    assert os.path.isfile(tmp_path / "calibration_maps.npz")
+
+
+def test_parse_checkerboard_settings_converts_squares_to_inner_corners(make_fake_app):
+    """A 10x7-square board should parse to 9x6 inner corners - one
+    fewer than the square count in each direction."""
+
+    app = make_fake_app()
+    win = perform_calibration.PerformCalibrationWindow(app)
+    win.checkerboard_squares_x_var = _FakeVar("10")
+    win.checkerboard_squares_y_var = _FakeVar("7")
+    win.checkerboard_square_size_var = _FakeVar("25.0")
+
+    result = win._parse_checkerboard_settings()
+
+    assert result == ((9, 6), 25.0)
+
+
+def test_parse_checkerboard_settings_rejects_non_numeric_squares(monkeypatch, make_fake_app):
+    """A non-numeric squares field should show a clear error and
+    return None rather than crashing on int()."""
+
+    app = make_fake_app()
+    win = perform_calibration.PerformCalibrationWindow(app)
+    win.checkerboard_squares_x_var = _FakeVar("not a number")
+    win.checkerboard_squares_y_var = _FakeVar("7")
+    win.checkerboard_square_size_var = _FakeVar("25.0")
+
+    errors = []
+    monkeypatch.setattr(
+        "perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg)
+    )
+
+    assert win._parse_checkerboard_settings() is None
+    assert len(errors) == 1
+
+
+def test_parse_checkerboard_settings_rejects_too_few_squares(monkeypatch, make_fake_app):
+    """Fewer than 2 squares in either direction has no inner corners at
+    all, so this should be rejected rather than producing an empty or
+    negative-sized detection target."""
+
+    app = make_fake_app()
+    win = perform_calibration.PerformCalibrationWindow(app)
+    win.checkerboard_squares_x_var = _FakeVar("1")
+    win.checkerboard_squares_y_var = _FakeVar("7")
+    win.checkerboard_square_size_var = _FakeVar("25.0")
+
+    errors = []
+    monkeypatch.setattr(
+        "perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg)
+    )
+
+    assert win._parse_checkerboard_settings() is None
+    assert len(errors) == 1
+
+
+def test_parse_checkerboard_settings_rejects_non_positive_square_size(monkeypatch, make_fake_app):
+    """A zero or negative square size isn't physically meaningful and
+    should be rejected rather than producing a degenerate object-point
+    grid."""
+
+    app = make_fake_app()
+    win = perform_calibration.PerformCalibrationWindow(app)
+    win.checkerboard_squares_x_var = _FakeVar("10")
+    win.checkerboard_squares_y_var = _FakeVar("7")
+    win.checkerboard_square_size_var = _FakeVar("0")
+
+    errors = []
+    monkeypatch.setattr(
+        "perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg)
+    )
+
+    assert win._parse_checkerboard_settings() is None
+    assert len(errors) == 1
+
+
+def test_on_run_calibration_end_to_end_with_real_checkerboard_images(monkeypatch, tmp_path, make_fake_app):
+    """A full happy-path run for the checkerboard path specifically
+    (the end-to-end test above covers ChArUco) - real (perspective-
+    warped, to simulate different capture poses) checkerboard images
+    written to disk as captured pairs, detected using the
+    project-owner-set board dimensions rather than any hardcoded
+    constant, calibrated, and saved.
+
+    Uses smaller perspective shifts than the ChArUco end-to-end test -
+    findChessboardCorners is noticeably less tolerant of perspective
+    distortion than ChArUco's per-marker detection, and larger shifts
+    (matching the ChArUco test's own) made detection fail on this
+    board entirely."""
+
+    base_image = _make_checkerboard_bgr_frame()
+
+    corner_shifts = [
+        np.float32([[0, 0], [0, 0], [0, 0], [0, 0]]),
+        np.float32([[8, 3], [-3, 5], [3, -3], [-8, -5]]),
+        np.float32([[3, 8], [-5, 3], [8, -5], [-3, -8]]),
+        np.float32([[0, 5], [-4, 0], [5, 0], [0, -6]]),
+    ]
+
+    for pair_id, shift in enumerate(corner_shifts, start=1):
+        left_image = _make_warped_view(base_image, shift)
+        # A smaller nudge than the ChArUco test's own +15px - see this
+        # test's docstring for why checkerboard detection needs gentler
+        # perspective distortion to still succeed.
+        right_image = _make_warped_view(base_image, shift + np.float32([5, 0]))
+        cv2.imwrite(str(tmp_path / f"left_{pair_id:04d}.png"), left_image)
+        cv2.imwrite(str(tmp_path / f"right_{pair_id:04d}.png"), right_image)
+
+    app = make_fake_app()
+    win = perform_calibration.PerformCalibrationWindow(app)
+    win.capture_folder = str(tmp_path)
+    win.board_type_var = _FakeVar("Checkerboard")
+    # _make_checkerboard_bgr_frame draws 10x7 squares - matching settings
+    # here, not perform_calibration.py's own (now-removed) hardcoded size.
+    win.checkerboard_squares_x_var = _FakeVar("10")
+    win.checkerboard_squares_y_var = _FakeVar("7")
+    win.checkerboard_square_size_var = _FakeVar("25.0")
+    win.status_var = _FakeVar("")
+
+    infos = []
+    errors = []
+    monkeypatch.setattr("perform_calibration.messagebox.showinfo", lambda title, msg: infos.append(msg))
+    monkeypatch.setattr("perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg))
+
+    win.on_run_calibration()
+
+    assert errors == []
+    assert len(infos) == 1
+    assert "Calibration saved" in infos[0]
+    assert "Pairs used: 4 / 4" in infos[0]
+
+    assert os.path.isfile(tmp_path / "calibration_intrinsics.npz")
+    assert os.path.isfile(tmp_path / "calibration_extrinsics.npz")
+    assert os.path.isfile(tmp_path / "calibration_rectification.npz")
+    assert os.path.isfile(tmp_path / "calibration_maps.npz")
