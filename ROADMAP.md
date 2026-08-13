@@ -572,7 +572,7 @@ unmerged remote branch, looks like it may be prior exploration relevant
 to Phase 10 (below) rather than this phase — worth checking before
 Phase 10 starts, not necessarily before this one.
 
-## Phase 10 — In-app stereo calibration workflow `[ ]`
+## Phase 10 — In-app stereo calibration workflow `[x]`
 
 Bring the stereo camera calibration step itself into Sizeamatic Pro,
 rather than treating a calibration NPZ as something produced entirely
@@ -584,13 +584,27 @@ checkerboard/ChArUco stills, then handed to the app as a finished folder.
 Planned out with the project owner before implementation, in explicit
 numbered steps to be done one after another rather than all at once:
 
-- [ ] **Step 0 — Reference the original zcam calibration code.** Before
+**Scope note:** closes with Steps 0-2 done and confirmed working by the
+project owner — frame-pair capture, running calibration, and fully
+configurable checkerboard/ChArUco board generation (both detection
+*and* printable targets, generated in-app rather than via a standalone
+script). Step 3 (OAK-D 3D camera compatibility) is deliberately
+cancelled rather than completed - the project owner decided not to
+pursue OAK-D-specific integration for now. None of Step 3's
+investigation was started, so picking OAK-D support back up later would
+need its own fresh planning pass rather than resuming this checklist
+item as-is.
+
+- [x] **Step 0 — Reference the original zcam calibration code.** Before
       this project existed, camera calibration was done in a separate
       zcam project: a Node.js process loading Python and sending it
       calibration requests, before the decision was made to do
-      calibration here instead. The project owner will locate and share
-      that code for reference once found — not yet in hand.
-- [ ] **Step 1 — Capture calibration frame pairs from live video.** A new
+      calibration here instead. Resolved: the unmerged
+      `origin/feature-onlineCalibrations` branch turned out to be that
+      same ported-from-zcam calibration code, and was used as reference
+      material throughout Steps 1-2 (see below) rather than a separate
+      zcam source ever being located.
+- [x] **Step 1 — Capture calibration frame pairs from live video.** A new
       top-level "Calibration" menu (`Load Calibration…` / `Perform
       Calibration…` / `Calibration Report…`, matching a UI precedent
       already found on the unmerged `origin/feature-onlineCalibrations`
@@ -603,7 +617,7 @@ numbered steps to be done one after another rather than all at once:
       branch's `_find_stereo_calibration_pairs`, chosen specifically so
       the existing detection/calibration code can be adapted with
       minimal changes rather than redesigned).
-- [ ] **Step 2 — Create a new calibration.** A calibration is just a
+- [x] **Step 2 — Create a new calibration.** A calibration is just a
       folder containing the four calibration NPZ files
       `calibration_io.py` already knows how to load — this step is
       about producing one of those folders from captured frame pairs
@@ -613,11 +627,18 @@ numbered steps to be done one after another rather than all at once:
       this app's exact current key names), likely alongside the
       captured calibration images themselves so a run can be reviewed or
       redone later. Detection supports both checkerboard and ChArUco
-      boards (also matching that branch).
-- [ ] **Step 3 — Investigate OAK-D 3D camera compatibility.** The
-      project owner supplied `assets/oakd_camera_info.json`, the
-      camera's own factory calibration data. Three angles to look into,
-      not yet planned in implementation detail:
+      boards (also matching that branch), with fully user-configurable
+      board dimensions for both (columns/rows, square size, marker
+      size) rather than a single fixed size for either. A new Generate
+      Calibration Target window (`generate_calibration_target.py`) prints
+      either board type from inside the app, with a live preview and the
+      actual board settings printed on the page as small text.
+- [ ] **Step 3 — Investigate OAK-D 3D camera compatibility.** Cancelled -
+      the project owner decided not to pursue OAK-D-specific integration
+      for now (see this phase's scope note). The project owner supplied
+      `assets/oakd_camera_info.json`, the camera's own factory
+      calibration data. Three angles were identified but never
+      investigated:
       1. Whether the OAK-D is already effectively pre-calibrated for
          this app's purposes — the JSON has per-camera intrinsics,
          extrinsics/baseline between sockets, and even precomputed
