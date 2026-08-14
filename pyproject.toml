@@ -7,10 +7,12 @@ authors = [
     { name = "Marine Applied Research & Exploration", email = "isaac@maregroup.org" },
 ]
 dependencies = [
+    "customtkinter>=6.0.0",
     "matplotlib>=3.11.1",
     "numpy>=2.5.1",
     "opencv-python>=5.0.0.93",
     "pillow>=12.3.0",
+    "pyside6>=6.11.1",
     "reportlab>=5.0.0",
 ]
 
