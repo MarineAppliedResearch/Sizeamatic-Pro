@@ -674,11 +674,25 @@ from, not something to merge wholesale.
 
 A dedicated pass on making the app's look and feel as cohesive and
 professional as possible, rather than squeezing visual polish into
-whatever feature happened to touch a given screen. Not yet scoped in
-detail (which screens, what specific visual language/theme, whether
-this touches ttk theming, spacing/layout consistency, iconography
-beyond the app icon itself, etc.) — needs its own planning pass before
-implementation starts, same as Phases 9 and 10.
+whatever feature happened to touch a given screen. Mid-phase, the UI
+framework itself was switched from Tkinter to PySide6/Qt (Tkinter's
+native menu bar can't be dark-themed on Windows) — main.py and
+video_overlay.py are ported; measurement_window.py,
+calibration_summary.py, perform_calibration.py, and
+generate_calibration_target.py still need porting.
+
+Still open within this phase:
+- Toolbar iconography — the transport controls (⏮◀⏯▶⏭) are currently
+  plain Unicode glyphs, which render inconsistently (font-dependent,
+  can fall back to emoji/missing-glyph boxes) and don't look
+  professional. Needs its own decision pass: a real icon set (SVG-based
+  custom icons vs. an icon font vs. Qt's built-in QStyle standard
+  icons), consistent sizing/stroke weight, and light/dark-safe coloring
+  — then applied consistently to every toolbar button, not just
+  transport controls.
+- General spacing/layout consistency pass beyond what's already been
+  fixed (menu/toolbar padding, font size, video pane borders, default
+  window sizing).
 
 ## Phase 12 — MARE API integration (future, not yet scoped) `[ ]`
 

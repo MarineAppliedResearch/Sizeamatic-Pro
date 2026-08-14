@@ -225,6 +225,17 @@ HANDLE_RADIUS_PX = 8
 MAX_POINTS_PER_PANE = 20
 """Hard cap on how many measurement points one pane can hold."""
 
+DEFAULT_VIDEO_ASPECT_RATIO = 1280 / 800
+"""Width/height ratio of the stereo rigs' actual footage - used to size
+the main window's default height so the video panes end up close to
+this ratio instead of leaving letterbox bars, whatever screen the app
+opens on. Individual videos can still be a different ratio - the panes
+just letterbox/pillarbox as usual in that case."""
+
+WINDOW_SCREEN_FRACTION = 0.9
+"""Fraction of the target screen's available width/height the main
+window sizes itself to on startup - see `_size_window_to_screen`."""
+
 SPEED_TABLE = {
     "0.25x": (1, 160),
     "0.5x": (1, 80),
@@ -316,10 +327,11 @@ class SizeamaticProApp(QMainWindow):
         """
         super().__init__()
         self.setWindowTitle("Sizeamatic Pro")
-        # Height tuned so the two panes' aspect ratio roughly matches the
-        # stereo rigs' actual footage (1280x800, a 1.6:1 ratio) by default,
-        # instead of leaving tall letterbox bars above/below the video.
-        self.resize(1400, 590)
+        # Fallback default size, used if `main()` can't detect a screen to
+        # size against (see `_size_window_to_screen`) - height still tuned
+        # to DEFAULT_VIDEO_ASPECT_RATIO so the panes don't letterbox by
+        # default even in that fallback case.
+        self.resize(1400, round(1400 / 2 / DEFAULT_VIDEO_ASPECT_RATIO) + 170)
 
         # assets/icon.ico is regenerated from assets/default-icon.png on
         # every build (create_app_icon.py); stays best-effort so a missing/
@@ -1447,6 +1459,44 @@ class SizeamaticProApp(QMainWindow):
         return "…" + path[-(max_len - 1) :]
 
 
+def _size_window_to_screen(window, screen):
+    """Resize `window` to fill most of `screen`, keeping the video panes
+    close to `DEFAULT_VIDEO_ASPECT_RATIO` rather than stretching them.
+
+    Sizes to `WINDOW_SCREEN_FRACTION` of the screen's available width,
+    then derives a matching height from the window's actual non-pane
+    chrome (menu bar, toolbar, slider row, status bar) - that overhead
+    is fixed regardless of window height, since the panes are the only
+    `stretch=1` widgets in their layout, so measuring it once at an
+    arbitrary height gives an exact answer.
+
+    Args:
+        window (SizeamaticProApp): The main window, already built (so
+            its panes/layout exist), not yet shown.
+        screen (QScreen | None): The screen to size against, or `None`
+            to leave the window's current (fallback) size alone.
+
+    Returns:
+        None
+    """
+    if screen is None:
+        return
+
+    available = screen.availableGeometry()
+    target_width = int(available.width() * WINDOW_SCREEN_FRACTION)
+
+    window.resize(target_width, available.height())
+    QApplication.processEvents()
+    pane_width = window.pane_left.width()
+    chrome_height = window.height() - window.pane_left.height()
+
+    target_height = min(
+        available.height(),
+        chrome_height + round(pane_width / DEFAULT_VIDEO_ASPECT_RATIO),
+    )
+    window.resize(target_width, target_height)
+
+
 def main():
     """Entry point: build the QApplication and main window, run the event loop.
 
@@ -1485,12 +1535,20 @@ def main():
 
     window = SizeamaticProApp()
 
+    # Show now (still hidden behind the splash, which stays on top) so
+    # the layout is actually live - a hidden top-level window doesn't
+    # recompute its child widgets' sizes on resize(), so
+    # `_size_window_to_screen` below would otherwise measure stale,
+    # pre-layout pane sizes.
+    window.show()
+
     # Open on whichever screen the splash just showed on (the one the
     # cursor's actually on) rather than wherever Qt/the OS would place a
     # brand new top-level window by default - on a multi-monitor setup
     # those aren't guaranteed to be the same screen, and the splash and
     # the real window ending up on different monitors reads as broken.
     screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+    _size_window_to_screen(window, screen)
     if screen is not None:
         available = screen.availableGeometry()
         x = available.x() + (available.width() - window.width()) // 2
@@ -1514,7 +1572,6 @@ def main():
 
     if splash is not None:
         splash.finish(window)
-    window.show()
 
     sys.exit(app.exec())
 
