@@ -4,7 +4,12 @@ Uses a FakeApp (via make_fake_app) rather than the real SizeamaticProApp
 for most tests: PerformCalibrationWindow only ever reads/writes a
 handful of specific app attributes (see AGENTS.md's Testing section for
 why a minimal stand-in is preferred over the full GUI here) - listed in
-this module's own docstring.
+this module's own docstring. Tests that touch a real Qt widget (status
+label, board-type combo, settings fields, the pairs list) need the
+qapp fixture; pure logic (folder scanning, metadata, detection,
+calibration math) does not - constructing PerformCalibrationWindow
+itself works fine without a QApplication already existing (verified
+directly), since PySide6 allows a bare QTimer construction without one.
 """
 
 import os
@@ -13,7 +18,7 @@ import queue
 import cv2
 import numpy as np
 import pytest
-import tkinter as tk
+from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QLineEdit
 
 import perform_calibration
 
@@ -168,42 +173,6 @@ def _make_warped_view(bgr_image, corner_shift):
     return cv2.warpPerspective(bgr_image, transform, (width, height))
 
 
-class _FakeVar:
-    """Minimal `.get()`/`.set()` stand-in for a Tk variable (IntVar/
-    StringVar), shared by every test in this file that needs one
-    without requiring a real Tk root."""
-
-    def __init__(self, value=""):
-        """Store the initial value this stand-in should report.
-
-        Args:
-            value: The initial value `.get()` should return.
-
-        Returns:
-            None
-        """
-        self._value = value
-
-    def set(self, value):
-        """Store a new value.
-
-        Args:
-            value: The new value to store.
-
-        Returns:
-            None
-        """
-        self._value = value
-
-    def get(self):
-        """Return the stored value.
-
-        Returns:
-            The most recently stored value.
-        """
-        return self._value
-
-
 def _fake_frame():
     """Build a tiny fake BGR frame for capture tests.
 
@@ -213,6 +182,38 @@ def _fake_frame():
         real decoded video frame.
     """
     return np.zeros((4, 4, 3), dtype=np.uint8)
+
+
+def _attach_settings_widgets(win):
+    """Attach real, standalone Qt settings widgets to a
+    `PerformCalibrationWindow` built without calling `ensure_window()`.
+
+    A real `QLineEdit`/`QComboBox`/`QLabel` works perfectly well
+    unshown and outside any layout, so this is simpler and more
+    faithful than a hand-rolled `.get()`/`.set()` stand-in - mirrors
+    `generate_calibration_target.py`'s own test pattern. Needs the
+    `qapp` fixture to already have run (a `QApplication` must exist to
+    construct any `QWidget`).
+
+    Args:
+        win (perform_calibration.PerformCalibrationWindow): The window
+            to attach widgets to.
+
+    Returns:
+        perform_calibration.PerformCalibrationWindow: The same `win`,
+        for chaining.
+    """
+    win.board_type_combo = QComboBox()
+    win.board_type_combo.addItems(["Checkerboard", "ChArUco"])
+    win.checkerboard_squares_x_edit = QLineEdit(str(perform_calibration.DEFAULT_CHECKERBOARD_SQUARES_X))
+    win.checkerboard_squares_y_edit = QLineEdit(str(perform_calibration.DEFAULT_CHECKERBOARD_SQUARES_Y))
+    win.checkerboard_square_size_edit = QLineEdit(str(perform_calibration.DEFAULT_CHECKERBOARD_SQUARE_SIZE_MM))
+    win.charuco_squares_x_edit = QLineEdit(str(perform_calibration.DEFAULT_CHARUCO_SQUARES_X))
+    win.charuco_squares_y_edit = QLineEdit(str(perform_calibration.DEFAULT_CHARUCO_SQUARES_Y))
+    win.charuco_square_size_edit = QLineEdit(str(perform_calibration.DEFAULT_CHARUCO_SQUARE_SIZE_MM))
+    win.charuco_marker_size_edit = QLineEdit(str(perform_calibration.DEFAULT_CHARUCO_MARKER_SIZE_MM))
+    win.status_label = QLabel("")
+    return win
 
 
 def test_scan_capture_folder_returns_empty_list_before_a_folder_is_chosen(make_fake_app):
@@ -322,7 +323,7 @@ def test_on_capture_frame_pair_requires_both_videos_loaded(monkeypatch, tmp_path
 
     errors = []
     monkeypatch.setattr(
-        "perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg)
+        "perform_calibration.QMessageBox.critical", staticmethod(lambda *args: errors.append(args[-1]))
     )
 
     win.on_capture_frame_pair()
@@ -345,7 +346,7 @@ def test_on_capture_frame_pair_requires_a_capture_folder(monkeypatch, make_fake_
 
     errors = []
     monkeypatch.setattr(
-        "perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg)
+        "perform_calibration.QMessageBox.critical", staticmethod(lambda *args: errors.append(args[-1]))
     )
 
     win.on_capture_frame_pair()
@@ -360,8 +361,8 @@ def test_on_capture_frame_pair_reports_a_decode_failure(monkeypatch, tmp_path, m
     app = make_fake_app(
         capL=object(),
         capR=object(),
-        left_frame_index=_FakeVar(0),
-        right_frame_index=_FakeVar(0),
+        left_frame_index=0,
+        right_frame_index=0,
         _read_frame_at=lambda cap, index: None,
     )
     win = perform_calibration.PerformCalibrationWindow(app)
@@ -369,7 +370,7 @@ def test_on_capture_frame_pair_reports_a_decode_failure(monkeypatch, tmp_path, m
 
     errors = []
     monkeypatch.setattr(
-        "perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg)
+        "perform_calibration.QMessageBox.critical", staticmethod(lambda *args: errors.append(args[-1]))
     )
 
     win.on_capture_frame_pair()
@@ -378,7 +379,7 @@ def test_on_capture_frame_pair_reports_a_decode_failure(monkeypatch, tmp_path, m
     assert list(tmp_path.iterdir()) == []
 
 
-def test_on_capture_frame_pair_saves_raw_frames_as_a_numbered_pair(tmp_path, make_fake_app):
+def test_on_capture_frame_pair_saves_raw_frames_as_a_numbered_pair(qapp, tmp_path, make_fake_app):
     """A successful capture should write left_0001.png/right_0001.png
     (reading via app._read_frame_at, never app.current_frameL/
     current_frameR - see the module docstring for why), record both
@@ -406,33 +407,31 @@ def test_on_capture_frame_pair_saves_raw_frames_as_a_numbered_pair(tmp_path, mak
     app = make_fake_app(
         capL=left_cap,
         capR=right_cap,
-        left_frame_index=_FakeVar(10),
-        right_frame_index=_FakeVar(13),
+        left_frame_index=10,
+        right_frame_index=13,
         _read_frame_at=_fake_read_frame_at,
     )
     win = perform_calibration.PerformCalibrationWindow(app)
     win.capture_folder = str(tmp_path)
-    win.status_var = _FakeVar("")
+    win.status_label = QLabel("")
 
     win.on_capture_frame_pair()
 
     assert os.path.isfile(tmp_path / "left_0001.png")
     assert os.path.isfile(tmp_path / "right_0001.png")
     assert read_calls == [(left_cap, 10), (right_cap, 13)]
-    assert "Captured pair 0001" in win.status_var.get()
-    assert "1 total" in win.status_var.get()
+    assert "Captured pair 0001" in win.status_label.text()
+    assert "1 total" in win.status_label.text()
     assert win._load_metadata() == {"1": {"left_frame_index": 10, "right_frame_index": 13}}
 
 
-def test_ensure_window_reuses_the_existing_window_instead_of_rebuilding(
-    hidden_tk_root, make_fake_app
-):
-    """Calling ensure_window twice should not build a second Toplevel -
+def test_ensure_window_reuses_the_existing_window_instead_of_rebuilding(qapp, make_fake_app_widget):
+    """Calling ensure_window twice should not build a second dialog -
     the second call should just raise the existing one, matching
     CalibrationSummaryWindow/MeasurementWindow's own ensure_window
     pattern."""
 
-    app = make_fake_app(root=hidden_tk_root)
+    app = make_fake_app_widget()
     win = perform_calibration.PerformCalibrationWindow(app)
 
     win.ensure_window()
@@ -445,9 +444,7 @@ def test_ensure_window_reuses_the_existing_window_instead_of_rebuilding(
     win._on_close()
 
 
-def test_choosing_a_capture_folder_updates_the_display_and_pairs_list(
-    hidden_tk_root, monkeypatch, tmp_path, make_fake_app
-):
+def test_choosing_a_capture_folder_updates_the_display_and_pairs_list(qapp, monkeypatch, tmp_path, make_fake_app_widget):
     """Choosing a folder that already has captured pairs in it (e.g.
     resuming an earlier session) should show that folder's path and
     populate the pairs list immediately, not just on the next capture."""
@@ -455,26 +452,24 @@ def test_choosing_a_capture_folder_updates_the_display_and_pairs_list(
     (tmp_path / "left_0001.png").write_bytes(b"")
     (tmp_path / "right_0001.png").write_bytes(b"")
 
-    app = make_fake_app(root=hidden_tk_root)
+    app = make_fake_app_widget()
     win = perform_calibration.PerformCalibrationWindow(app)
     win.ensure_window()
 
     monkeypatch.setattr(
-        "perform_calibration.filedialog.askdirectory", lambda **_kwargs: str(tmp_path)
+        "perform_calibration.QFileDialog.getExistingDirectory", staticmethod(lambda *a, **k: str(tmp_path))
     )
 
     win.on_choose_capture_folder()
 
     assert win.capture_folder == str(tmp_path)
-    assert win.folder_var.get() == str(tmp_path)
-    assert win.pairs_listbox.size() == 1
+    assert win.folder_label.text() == str(tmp_path)
+    assert win.pairs_list.count() == 1
 
     win._on_close()
 
 
-def test_on_pair_double_clicked_jumps_the_video_to_the_saved_frame_indices(
-    hidden_tk_root, tmp_path, make_fake_app
-):
+def test_on_pair_double_clicked_jumps_the_video_to_the_saved_frame_indices(qapp, tmp_path, make_fake_app_widget):
     """Double-clicking a captured pair should move both panes' frame
     index and slider to exactly the position that pair was captured
     from, then re-render - mirroring main.py's own
@@ -486,14 +481,20 @@ def test_on_pair_double_clicked_jumps_the_video_to_the_saved_frame_indices(
     render_calls = []
     label_calls = []
 
-    app = make_fake_app(
-        root=hidden_tk_root,
-        left_frame_index=_FakeVar(0),
-        right_frame_index=_FakeVar(0),
-        left_slider=_FakeVar(0),
-        right_slider=_FakeVar(0),
+    from PySide6.QtWidgets import QSlider
+
+    left_slider = QSlider()
+    left_slider.setRange(0, 1000)
+    right_slider = QSlider()
+    right_slider.setRange(0, 1000)
+
+    app = make_fake_app_widget(
+        left_frame_index=0,
+        right_frame_index=0,
+        left_slider=left_slider,
+        right_slider=right_slider,
         _suppress_slider_callbacks=False,
-        _render_current_frames=lambda: render_calls.append(True),
+        render_current_frames=lambda: render_calls.append(True),
         _update_frame_labels=lambda: label_calls.append(True),
     )
     win = perform_calibration.PerformCalibrationWindow(app)
@@ -501,13 +502,13 @@ def test_on_pair_double_clicked_jumps_the_video_to_the_saved_frame_indices(
     win._save_metadata({"7": {"left_frame_index": 40, "right_frame_index": 43}})
     win.ensure_window()
 
-    win.pairs_listbox.selection_set(0)
+    win.pairs_list.setCurrentRow(0)
     win.on_pair_double_clicked()
 
-    assert app.left_frame_index.get() == 40
-    assert app.right_frame_index.get() == 43
-    assert app.left_slider.get() == 40
-    assert app.right_slider.get() == 43
+    assert app.left_frame_index == 40
+    assert app.right_frame_index == 43
+    assert app.left_slider.value() == 40
+    assert app.right_slider.value() == 43
     assert app._suppress_slider_callbacks is False
     assert render_calls == [True]
     assert label_calls == [True]
@@ -515,9 +516,7 @@ def test_on_pair_double_clicked_jumps_the_video_to_the_saved_frame_indices(
     win._on_close()
 
 
-def test_on_pair_double_clicked_reports_an_error_for_a_pair_with_no_metadata(
-    hidden_tk_root, monkeypatch, tmp_path, make_fake_app
-):
+def test_on_pair_double_clicked_reports_an_error_for_a_pair_with_no_metadata(qapp, monkeypatch, tmp_path, make_fake_app_widget):
     """A pair with no matching metadata entry (e.g. an image dropped
     into the folder outside this window) should report a clear error
     rather than crashing with a KeyError."""
@@ -525,16 +524,16 @@ def test_on_pair_double_clicked_reports_an_error_for_a_pair_with_no_metadata(
     (tmp_path / "left_0001.png").write_bytes(b"")
     (tmp_path / "right_0001.png").write_bytes(b"")
 
-    app = make_fake_app(root=hidden_tk_root)
+    app = make_fake_app_widget()
     win = perform_calibration.PerformCalibrationWindow(app)
     win.capture_folder = str(tmp_path)
     win.ensure_window()
 
-    win.pairs_listbox.selection_set(0)
+    win.pairs_list.setCurrentRow(0)
 
     errors = []
     monkeypatch.setattr(
-        "perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg)
+        "perform_calibration.QMessageBox.critical", staticmethod(lambda *args: errors.append(args[-1]))
     )
 
     win.on_pair_double_clicked()
@@ -544,11 +543,11 @@ def test_on_pair_double_clicked_reports_an_error_for_a_pair_with_no_metadata(
     win._on_close()
 
 
-def test_on_pair_double_clicked_does_nothing_without_a_selection(hidden_tk_root, make_fake_app):
+def test_on_pair_double_clicked_does_nothing_without_a_selection(qapp, make_fake_app_widget):
     """Double-clicking with nothing selected in the list should just be
     a no-op, not raise."""
 
-    app = make_fake_app(root=hidden_tk_root)
+    app = make_fake_app_widget()
     win = perform_calibration.PerformCalibrationWindow(app)
     win.ensure_window()
 
@@ -557,47 +556,55 @@ def test_on_pair_double_clicked_does_nothing_without_a_selection(hidden_tk_root,
     win._on_close()
 
 
-def test_on_delete_selected_pair_removes_files_and_metadata(hidden_tk_root, monkeypatch, tmp_path, make_fake_app):
+def test_on_delete_selected_pair_removes_files_and_metadata(qapp, monkeypatch, tmp_path, make_fake_app_widget):
     """Deleting a selected pair (after confirming) should remove both
     its image files and its metadata entry, and refresh the list."""
 
     (tmp_path / "left_0001.png").write_bytes(b"")
     (tmp_path / "right_0001.png").write_bytes(b"")
 
-    app = make_fake_app(root=hidden_tk_root)
+    app = make_fake_app_widget()
     win = perform_calibration.PerformCalibrationWindow(app)
     win.capture_folder = str(tmp_path)
     win._save_metadata({"1": {"left_frame_index": 5, "right_frame_index": 5}})
     win.ensure_window()
 
-    win.pairs_listbox.selection_set(0)
-    monkeypatch.setattr("perform_calibration.messagebox.askyesno", lambda title, msg: True)
+    win.pairs_list.setCurrentRow(0)
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        "perform_calibration.QMessageBox.question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+    )
 
     win.on_delete_selected_pair()
 
     assert not os.path.isfile(tmp_path / "left_0001.png")
     assert not os.path.isfile(tmp_path / "right_0001.png")
     assert win._load_metadata() == {}
-    assert win.pairs_listbox.size() == 0
-    assert "Deleted pair 0001" in win.status_var.get()
+    assert win.pairs_list.count() == 0
+    assert "Deleted pair 0001" in win.status_label.text()
 
     win._on_close()
 
 
-def test_on_delete_selected_pair_keeps_files_if_not_confirmed(hidden_tk_root, monkeypatch, tmp_path, make_fake_app):
+def test_on_delete_selected_pair_keeps_files_if_not_confirmed(qapp, monkeypatch, tmp_path, make_fake_app_widget):
     """Answering "no" to the delete confirmation should leave the files
     untouched."""
 
     (tmp_path / "left_0001.png").write_bytes(b"")
     (tmp_path / "right_0001.png").write_bytes(b"")
 
-    app = make_fake_app(root=hidden_tk_root)
+    app = make_fake_app_widget()
     win = perform_calibration.PerformCalibrationWindow(app)
     win.capture_folder = str(tmp_path)
     win.ensure_window()
 
-    win.pairs_listbox.selection_set(0)
-    monkeypatch.setattr("perform_calibration.messagebox.askyesno", lambda title, msg: False)
+    win.pairs_list.setCurrentRow(0)
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        "perform_calibration.QMessageBox.question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.No)
+    )
 
     win.on_delete_selected_pair()
 
@@ -607,17 +614,17 @@ def test_on_delete_selected_pair_keeps_files_if_not_confirmed(hidden_tk_root, mo
     win._on_close()
 
 
-def test_on_delete_selected_pair_requires_a_selection(hidden_tk_root, monkeypatch, make_fake_app):
+def test_on_delete_selected_pair_requires_a_selection(qapp, monkeypatch, make_fake_app_widget):
     """Clicking delete with nothing selected should show a clear error
     rather than silently doing nothing."""
 
-    app = make_fake_app(root=hidden_tk_root)
+    app = make_fake_app_widget()
     win = perform_calibration.PerformCalibrationWindow(app)
     win.ensure_window()
 
     errors = []
     monkeypatch.setattr(
-        "perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg)
+        "perform_calibration.QMessageBox.critical", staticmethod(lambda *args: errors.append(args[-1]))
     )
 
     win.on_delete_selected_pair()
@@ -627,20 +634,17 @@ def test_on_delete_selected_pair_requires_a_selection(hidden_tk_root, monkeypatc
     win._on_close()
 
 
-def test_on_space_key_captures_when_no_text_entry_is_focused(hidden_tk_root, make_fake_app):
+def test_on_space_key_captures_when_no_text_entry_is_focused(qapp, monkeypatch, make_fake_app):
     """Pressing Space while some non-text widget (or nothing) has focus
     should trigger a capture.
 
-    Stubs `app.root.focus_get` directly rather than relying on real Tk
-    focus transfer, which isn't reliable against the shared *withdrawn*
-    `hidden_tk_root` used across the suite (see conftest.py) - this
-    tests `_on_space_key`'s own isinstance guard, not Tk's focus
-    machinery itself.
+    Stubs `QApplication.focusWidget` directly rather than relying on
+    real Qt focus transfer against an offscreen, never-shown widget.
     """
 
     captures = []
-    app = make_fake_app(root=hidden_tk_root)
-    app.root.focus_get = lambda: None
+    app = make_fake_app()
+    monkeypatch.setattr("perform_calibration.QApplication.focusWidget", staticmethod(lambda: None))
     win = perform_calibration.PerformCalibrationWindow(app)
     win.on_capture_frame_pair = lambda: captures.append(True)
 
@@ -649,24 +653,22 @@ def test_on_space_key_captures_when_no_text_entry_is_focused(hidden_tk_root, mak
     assert captures == [True]
 
 
-def test_on_space_key_does_nothing_while_a_text_entry_is_focused(hidden_tk_root, make_fake_app):
+def test_on_space_key_does_nothing_while_a_text_entry_is_focused(qapp, monkeypatch, make_fake_app):
     """Pressing Space while a text entry has keyboard focus should not
     trigger a capture - Space should still just type a literal space in
     the entry (e.g. one of the main window's real-time-sync boxes)."""
 
     captures = []
-    entry = tk.Entry(hidden_tk_root)
+    entry = QLineEdit()
 
-    app = make_fake_app(root=hidden_tk_root)
-    app.root.focus_get = lambda: entry
+    app = make_fake_app()
+    monkeypatch.setattr("perform_calibration.QApplication.focusWidget", staticmethod(lambda: entry))
     win = perform_calibration.PerformCalibrationWindow(app)
     win.on_capture_frame_pair = lambda: captures.append(True)
 
     win._on_space_key()
 
     assert captures == []
-
-    entry.destroy()
 
 
 def test_frame_has_checkerboard_detects_a_real_checkerboard():
@@ -818,7 +820,7 @@ def test_on_auto_scan_requires_both_videos_loaded(monkeypatch, make_fake_app):
 
     errors = []
     monkeypatch.setattr(
-        "perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg)
+        "perform_calibration.QMessageBox.critical", staticmethod(lambda *args: errors.append(args[-1]))
     )
 
     win.on_auto_scan_for_candidates()
@@ -836,7 +838,7 @@ def test_on_auto_scan_requires_a_capture_folder(monkeypatch, make_fake_app):
 
     errors = []
     monkeypatch.setattr(
-        "perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg)
+        "perform_calibration.QMessageBox.critical", staticmethod(lambda *args: errors.append(args[-1]))
     )
 
     win.on_auto_scan_for_candidates()
@@ -845,26 +847,26 @@ def test_on_auto_scan_requires_a_capture_folder(monkeypatch, make_fake_app):
     assert win._scan_thread is None
 
 
-def test_on_auto_scan_stops_an_already_running_scan_instead_of_starting_another(make_fake_app):
+def test_on_auto_scan_stops_an_already_running_scan_instead_of_starting_another(qapp, make_fake_app):
     """Clicking the button again while a scan is already running should
     request it stop, not start a second scan on top of it."""
 
     app = make_fake_app()
     win = perform_calibration.PerformCalibrationWindow(app)
     win._scan_thread = object()  # Any non-None sentinel - "a scan is running".
-    win.status_var = _FakeVar("")
+    win.status_label = QLabel("")
 
     win.on_auto_scan_for_candidates()
 
     assert win._scan_stop_requested is True
 
 
-def test_on_stop_scan_sets_the_stop_flag(make_fake_app):
+def test_on_stop_scan_sets_the_stop_flag(qapp, make_fake_app):
     """on_stop_scan should set the flag _run_auto_scan checks between samples."""
 
     app = make_fake_app()
     win = perform_calibration.PerformCalibrationWindow(app)
-    win.status_var = _FakeVar("")
+    win.status_label = QLabel("")
 
     win.on_stop_scan()
 
@@ -873,8 +875,8 @@ def test_on_stop_scan_sets_the_stop_flag(make_fake_app):
 
 def test_poll_scan_queue_does_nothing_once_the_window_is_closed(make_fake_app):
     """_poll_scan_queue should refuse to touch anything once self.win is
-    None, rather than erroring trying to call .after on a destroyed
-    window."""
+    None, rather than erroring trying to reschedule a timer for a
+    destroyed window."""
 
     app = make_fake_app()
     win = perform_calibration.PerformCalibrationWindow(app)
@@ -886,12 +888,12 @@ def test_poll_scan_queue_does_nothing_once_the_window_is_closed(make_fake_app):
     win._poll_scan_queue()
 
 
-def test_poll_scan_queue_resets_state_and_relabels_button_when_done(hidden_tk_root, make_fake_app):
+def test_poll_scan_queue_resets_state_and_relabels_button_when_done(qapp, make_fake_app_widget):
     """Once the "done" message is drained, the scan state should reset
     and the button should go back to its idle label - not stay stuck
     reading "Stop Scan" forever."""
 
-    app = make_fake_app(root=hidden_tk_root)
+    app = make_fake_app_widget()
     win = perform_calibration.PerformCalibrationWindow(app)
     win.ensure_window()
 
@@ -904,8 +906,8 @@ def test_poll_scan_queue_resets_state_and_relabels_button_when_done(hidden_tk_ro
 
     assert win._scan_thread is None
     assert win._scan_queue is None
-    assert win.auto_scan_button.cget("text") == "Auto-Scan for Candidates"
-    assert "Scan finished" in win.status_var.get()
+    assert win.auto_scan_button.text() == "Auto-Scan for Candidates"
+    assert "Scan finished" in win.status_label.text()
 
     win._on_close()
 
@@ -1126,7 +1128,7 @@ def test_on_run_calibration_requires_a_capture_folder(monkeypatch, make_fake_app
 
     errors = []
     monkeypatch.setattr(
-        "perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg)
+        "perform_calibration.QMessageBox.critical", staticmethod(lambda *args: errors.append(args[-1]))
     )
 
     win.on_run_calibration()
@@ -1144,7 +1146,7 @@ def test_on_run_calibration_requires_captured_pairs(monkeypatch, tmp_path, make_
 
     errors = []
     monkeypatch.setattr(
-        "perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg)
+        "perform_calibration.QMessageBox.critical", staticmethod(lambda *args: errors.append(args[-1]))
     )
 
     win.on_run_calibration()
@@ -1163,7 +1165,7 @@ def test_on_run_calibration_refuses_while_a_scan_is_running(monkeypatch, tmp_pat
 
     errors = []
     monkeypatch.setattr(
-        "perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg)
+        "perform_calibration.QMessageBox.critical", staticmethod(lambda *args: errors.append(args[-1]))
     )
 
     win.on_run_calibration()
@@ -1171,7 +1173,7 @@ def test_on_run_calibration_refuses_while_a_scan_is_running(monkeypatch, tmp_pat
     assert len(errors) == 1
 
 
-def test_on_run_calibration_rejects_an_invalid_checkerboard_square_size(monkeypatch, tmp_path, make_fake_app):
+def test_on_run_calibration_rejects_an_invalid_checkerboard_square_size(qapp, monkeypatch, tmp_path, make_fake_app):
     """A non-numeric checkerboard square size should show a clear error
     rather than crashing trying to convert it to a float."""
 
@@ -1181,14 +1183,12 @@ def test_on_run_calibration_rejects_an_invalid_checkerboard_square_size(monkeypa
     app = make_fake_app()
     win = perform_calibration.PerformCalibrationWindow(app)
     win.capture_folder = str(tmp_path)
-    win.board_type_var = _FakeVar("Checkerboard")
-    win.checkerboard_squares_x_var = _FakeVar(str(perform_calibration.DEFAULT_CHECKERBOARD_SQUARES_X))
-    win.checkerboard_squares_y_var = _FakeVar(str(perform_calibration.DEFAULT_CHECKERBOARD_SQUARES_Y))
-    win.checkerboard_square_size_var = _FakeVar("not a number")
+    _attach_settings_widgets(win)
+    win.checkerboard_square_size_edit.setText("not a number")
 
     errors = []
     monkeypatch.setattr(
-        "perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg)
+        "perform_calibration.QMessageBox.critical", staticmethod(lambda *args: errors.append(args[-1]))
     )
 
     win.on_run_calibration()
@@ -1196,7 +1196,7 @@ def test_on_run_calibration_rejects_an_invalid_checkerboard_square_size(monkeypa
     assert len(errors) == 1
 
 
-def test_on_run_calibration_reports_when_too_few_pairs_are_usable(monkeypatch, tmp_path, make_fake_app):
+def test_on_run_calibration_reports_when_too_few_pairs_are_usable(qapp, monkeypatch, tmp_path, make_fake_app):
     """If fewer than 3 pairs actually have a detectable board, this
     should report that clearly rather than letting run_stereo_calibration
     raise a less specific error."""
@@ -1210,16 +1210,17 @@ def test_on_run_calibration_reports_when_too_few_pairs_are_usable(monkeypatch, t
     app = make_fake_app()
     win = perform_calibration.PerformCalibrationWindow(app)
     win.capture_folder = str(tmp_path)
-    win.board_type_var = _FakeVar("ChArUco")
+    _attach_settings_widgets(win)
+    win.board_type_combo.setCurrentText("ChArUco")
     charuco_squares_x, charuco_squares_y, charuco_square_size_mm, charuco_marker_size_mm = TEST_CHARUCO_SETTINGS
-    win.charuco_squares_x_var = _FakeVar(str(charuco_squares_x))
-    win.charuco_squares_y_var = _FakeVar(str(charuco_squares_y))
-    win.charuco_square_size_var = _FakeVar(str(charuco_square_size_mm))
-    win.charuco_marker_size_var = _FakeVar(str(charuco_marker_size_mm))
+    win.charuco_squares_x_edit.setText(str(charuco_squares_x))
+    win.charuco_squares_y_edit.setText(str(charuco_squares_y))
+    win.charuco_square_size_edit.setText(str(charuco_square_size_mm))
+    win.charuco_marker_size_edit.setText(str(charuco_marker_size_mm))
 
     errors = []
     monkeypatch.setattr(
-        "perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg)
+        "perform_calibration.QMessageBox.critical", staticmethod(lambda *args: errors.append(args[-1]))
     )
 
     win.on_run_calibration()
@@ -1228,7 +1229,7 @@ def test_on_run_calibration_reports_when_too_few_pairs_are_usable(monkeypatch, t
     assert "0 usable pair" in errors[0]
 
 
-def test_on_run_calibration_end_to_end_with_real_charuco_images(monkeypatch, tmp_path, make_fake_app):
+def test_on_run_calibration_end_to_end_with_real_charuco_images(qapp, monkeypatch, tmp_path, make_fake_app):
     """A full happy-path run: real (perspective-warped, to simulate
     different capture poses) ChArUco board images written to disk as
     captured pairs, detected, calibrated, and saved - proving the
@@ -1236,7 +1237,6 @@ def test_on_run_calibration_end_to_end_with_real_charuco_images(monkeypatch, tmp
     isolation."""
 
     base_image = _make_charuco_board_bgr_image()
-    height, width = base_image.shape[:2]
 
     # A handful of distinct perspective warps per pair, with the right
     # side shifted slightly from the left, so both single-camera
@@ -1257,18 +1257,22 @@ def test_on_run_calibration_end_to_end_with_real_charuco_images(monkeypatch, tmp
     app = make_fake_app()
     win = perform_calibration.PerformCalibrationWindow(app)
     win.capture_folder = str(tmp_path)
-    win.board_type_var = _FakeVar("ChArUco")
+    _attach_settings_widgets(win)
+    win.board_type_combo.setCurrentText("ChArUco")
     charuco_squares_x, charuco_squares_y, charuco_square_size_mm, charuco_marker_size_mm = TEST_CHARUCO_SETTINGS
-    win.charuco_squares_x_var = _FakeVar(str(charuco_squares_x))
-    win.charuco_squares_y_var = _FakeVar(str(charuco_squares_y))
-    win.charuco_square_size_var = _FakeVar(str(charuco_square_size_mm))
-    win.charuco_marker_size_var = _FakeVar(str(charuco_marker_size_mm))
-    win.status_var = _FakeVar("")
+    win.charuco_squares_x_edit.setText(str(charuco_squares_x))
+    win.charuco_squares_y_edit.setText(str(charuco_squares_y))
+    win.charuco_square_size_edit.setText(str(charuco_square_size_mm))
+    win.charuco_marker_size_edit.setText(str(charuco_marker_size_mm))
 
     infos = []
     errors = []
-    monkeypatch.setattr("perform_calibration.messagebox.showinfo", lambda title, msg: infos.append(msg))
-    monkeypatch.setattr("perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg))
+    monkeypatch.setattr(
+        "perform_calibration.QMessageBox.information", staticmethod(lambda *args: infos.append(args[-1]))
+    )
+    monkeypatch.setattr(
+        "perform_calibration.QMessageBox.critical", staticmethod(lambda *args: errors.append(args[-1]))
+    )
 
     win.on_run_calibration()
 
@@ -1283,81 +1287,85 @@ def test_on_run_calibration_end_to_end_with_real_charuco_images(monkeypatch, tmp
     assert os.path.isfile(tmp_path / "calibration_maps.npz")
 
 
-def test_parse_checkerboard_settings_converts_squares_to_inner_corners(make_fake_app):
+def test_parse_checkerboard_settings_converts_squares_to_inner_corners(qapp, make_fake_app):
     """A 10x7-square board should parse to 9x6 inner corners - one
     fewer than the square count in each direction."""
 
     app = make_fake_app()
     win = perform_calibration.PerformCalibrationWindow(app)
-    win.checkerboard_squares_x_var = _FakeVar("10")
-    win.checkerboard_squares_y_var = _FakeVar("7")
-    win.checkerboard_square_size_var = _FakeVar("25.0")
+    _attach_settings_widgets(win)
+    win.checkerboard_squares_x_edit.setText("10")
+    win.checkerboard_squares_y_edit.setText("7")
+    win.checkerboard_square_size_edit.setText("25.0")
 
     result = win._parse_checkerboard_settings()
 
     assert result == ((9, 6), 25.0)
 
 
-def test_parse_checkerboard_settings_rejects_non_numeric_squares(monkeypatch, make_fake_app):
+def test_parse_checkerboard_settings_rejects_non_numeric_squares(qapp, monkeypatch, make_fake_app):
     """A non-numeric squares field should show a clear error and
     return None rather than crashing on int()."""
 
     app = make_fake_app()
     win = perform_calibration.PerformCalibrationWindow(app)
-    win.checkerboard_squares_x_var = _FakeVar("not a number")
-    win.checkerboard_squares_y_var = _FakeVar("7")
-    win.checkerboard_square_size_var = _FakeVar("25.0")
+    _attach_settings_widgets(win)
+    win.checkerboard_squares_x_edit.setText("not a number")
+    win.checkerboard_squares_y_edit.setText("7")
+    win.checkerboard_square_size_edit.setText("25.0")
 
     errors = []
     monkeypatch.setattr(
-        "perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg)
+        "perform_calibration.QMessageBox.critical", staticmethod(lambda *args: errors.append(args[-1]))
     )
 
     assert win._parse_checkerboard_settings() is None
     assert len(errors) == 1
 
 
-def test_parse_checkerboard_settings_rejects_too_few_squares(monkeypatch, make_fake_app):
+def test_parse_checkerboard_settings_rejects_too_few_squares(qapp, monkeypatch, make_fake_app):
     """Fewer than 2 squares in either direction has no inner corners at
     all, so this should be rejected rather than producing an empty or
     negative-sized detection target."""
 
     app = make_fake_app()
     win = perform_calibration.PerformCalibrationWindow(app)
-    win.checkerboard_squares_x_var = _FakeVar("1")
-    win.checkerboard_squares_y_var = _FakeVar("7")
-    win.checkerboard_square_size_var = _FakeVar("25.0")
+    _attach_settings_widgets(win)
+    win.checkerboard_squares_x_edit.setText("1")
+    win.checkerboard_squares_y_edit.setText("7")
+    win.checkerboard_square_size_edit.setText("25.0")
 
     errors = []
     monkeypatch.setattr(
-        "perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg)
+        "perform_calibration.QMessageBox.critical", staticmethod(lambda *args: errors.append(args[-1]))
     )
 
     assert win._parse_checkerboard_settings() is None
     assert len(errors) == 1
 
 
-def test_parse_checkerboard_settings_rejects_non_positive_square_size(monkeypatch, make_fake_app):
+def test_parse_checkerboard_settings_rejects_non_positive_square_size(qapp, monkeypatch, make_fake_app):
     """A zero or negative square size isn't physically meaningful and
     should be rejected rather than producing a degenerate object-point
     grid."""
 
     app = make_fake_app()
     win = perform_calibration.PerformCalibrationWindow(app)
-    win.checkerboard_squares_x_var = _FakeVar("10")
-    win.checkerboard_squares_y_var = _FakeVar("7")
-    win.checkerboard_square_size_var = _FakeVar("0")
+    _attach_settings_widgets(win)
+    win.checkerboard_squares_x_edit.setText("10")
+    win.checkerboard_squares_y_edit.setText("7")
+    win.checkerboard_square_size_edit.setText("0")
 
     errors = []
     monkeypatch.setattr(
-        "perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg)
+        "perform_calibration.QMessageBox.critical", staticmethod(lambda *args: errors.append(args[-1]))
     )
 
     assert win._parse_checkerboard_settings() is None
     assert len(errors) == 1
 
 
-def test_on_run_calibration_end_to_end_with_real_checkerboard_images(monkeypatch, tmp_path, make_fake_app):
+def test_on_run_calibration_end_to_end_with_real_checkerboard_images(qapp, monkeypatch, tmp_path, make_fake_app):
     """A full happy-path run for the checkerboard path specifically
     (the end-to-end test above covers ChArUco) - real (perspective-
     warped, to simulate different capture poses) checkerboard images
@@ -1392,18 +1400,21 @@ def test_on_run_calibration_end_to_end_with_real_checkerboard_images(monkeypatch
     app = make_fake_app()
     win = perform_calibration.PerformCalibrationWindow(app)
     win.capture_folder = str(tmp_path)
-    win.board_type_var = _FakeVar("Checkerboard")
+    _attach_settings_widgets(win)
     # _make_checkerboard_bgr_frame draws 10x7 squares - matching settings
     # here, not perform_calibration.py's own (now-removed) hardcoded size.
-    win.checkerboard_squares_x_var = _FakeVar("10")
-    win.checkerboard_squares_y_var = _FakeVar("7")
-    win.checkerboard_square_size_var = _FakeVar("25.0")
-    win.status_var = _FakeVar("")
+    win.checkerboard_squares_x_edit.setText("10")
+    win.checkerboard_squares_y_edit.setText("7")
+    win.checkerboard_square_size_edit.setText("25.0")
 
     infos = []
     errors = []
-    monkeypatch.setattr("perform_calibration.messagebox.showinfo", lambda title, msg: infos.append(msg))
-    monkeypatch.setattr("perform_calibration.messagebox.showerror", lambda title, msg: errors.append(msg))
+    monkeypatch.setattr(
+        "perform_calibration.QMessageBox.information", staticmethod(lambda *args: infos.append(args[-1]))
+    )
+    monkeypatch.setattr(
+        "perform_calibration.QMessageBox.critical", staticmethod(lambda *args: errors.append(args[-1]))
+    )
 
     win.on_run_calibration()
 

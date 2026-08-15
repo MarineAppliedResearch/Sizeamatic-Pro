@@ -18,6 +18,17 @@ pixel coordinates for a given 3D point analytically, then assert
 triangulation recovers that same point.
 """
 
+import os
+
+# Force Qt's offscreen platform plugin before anything in the suite gets a
+# chance to construct a QApplication - the four ported sub-window modules
+# (measurement_window.py, calibration_summary.py, etc.) build real QDialogs
+# in their tests, and without this a normal `pytest` run would flash a real,
+# visible window on screen for every one of them. setdefault so an explicit
+# override (e.g. a developer deliberately watching a test run on-screen)
+# still wins.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import matplotlib
 
 # generate_calibration_report.py imports matplotlib.pyplot, which on
@@ -34,6 +45,7 @@ import tkinter as tk
 
 import numpy as np
 import pytest
+from PySide6.QtWidgets import QApplication, QWidget
 
 import recent_projects
 
@@ -126,6 +138,33 @@ class FakeApp:
         """
         return "Sizeamatic Pro"
 
+    def screen(self):
+        """No-op stand-in for `QWidget.screen()`, so the four ported
+        sub-window modules' `ensure_window()` (which positions the new
+        dialog on whichever screen the main app window is on) falls back
+        to `QApplication.primaryScreen()` cleanly instead of raising
+        `AttributeError` on a `FakeApp` that isn't a real `QWidget`.
+
+        Returns:
+            None
+        """
+        return None
+
+
+@pytest.fixture(scope="session")
+def qapp():
+    """A shared `QApplication` instance for the whole test session.
+
+    Qt requires at least one `QApplication` to exist before any `QWidget`
+    can be constructed, and doesn't support creating more than one per
+    process - session-scoped so every test that touches real Qt widgets
+    (the four ported sub-window modules' dialogs) shares the same one.
+
+    Returns:
+        PySide6.QtWidgets.QApplication: The shared application instance.
+    """
+    return QApplication.instance() or QApplication([])
+
 
 @pytest.fixture
 def make_fake_app():
@@ -146,6 +185,52 @@ def make_fake_app():
             FakeApp: The constructed stand-in app.
         """
         app = FakeApp()
+        for key, value in kwargs.items():
+            setattr(app, key, value)
+        return app
+
+    return _make
+
+
+class FakeAppWidget(QWidget):
+    """A real `QWidget`-based stand-in for `main.SizeamaticProApp`,
+    for tests that need `self.app` to actually be a `QObject` -
+    `perform_calibration.py`'s `ensure_window()` parents a `QShortcut`
+    to `self.app` (the Space-bar capture shortcut, active while the
+    main app window has focus), which requires a real `QObject`/
+    `QWidget`, not the plain-object `FakeApp` above. Everything else
+    about it matches `FakeApp` (same stub methods) - `screen()` doesn't
+    need a stub here since a real `QWidget` already has a working one.
+    """
+
+    _set_status_mid = FakeApp._set_status_mid
+    _app_window_title = FakeApp._app_window_title
+
+
+@pytest.fixture
+def make_fake_app_widget(qapp):
+    """Fixture factory for building a `FakeAppWidget` with specific
+    attributes - like `make_fake_app`, but for tests that call code
+    requiring `self.app` to be a real `QObject` (see `FakeAppWidget`).
+    Depends on `qapp` directly since constructing any `QWidget` requires
+    a `QApplication` to already exist.
+
+    Returns:
+        Callable[..., FakeAppWidget]: A function that takes keyword
+        arguments and returns a `FakeAppWidget` with each one set as an
+        attribute.
+    """
+
+    def _make(**kwargs):
+        """Build one FakeAppWidget with the given attributes set on it.
+
+        Args:
+            **kwargs: Attribute name/value pairs to set on the FakeAppWidget.
+
+        Returns:
+            FakeAppWidget: The constructed stand-in app.
+        """
+        app = FakeAppWidget()
         for key, value in kwargs.items():
             setattr(app, key, value)
         return app

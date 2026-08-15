@@ -18,12 +18,17 @@ measurement/calibration math (`stereo_matching.py`, `calibration_io.py`,
 `project_io.py`) is completely framework-independent and needed zero
 changes for this port.
 
-This first-pass port covers the highest-risk, most-used piece: video
+Every screen from the original Tkinter app is now ported: video
 loading/playback/sync, pan/zoom, and point placement/dragging/
-refinement (see `video_overlay.py`). Project save/load, recent
-projects, the measurement results/calibration summary/perform
-calibration/generate target sub-windows, and real-time sync are not
-yet ported - see ROADMAP.md Phase 11's tracking for what's left.
+refinement (see `video_overlay.py`); the measurement pipeline, results
+window (`measurement_window.py`), and real-time sync; calibration
+summary (`calibration_summary.py`); frame-pair capture and running a
+new calibration (`perform_calibration.py`); printable calibration
+target generation (`generate_calibration_target.py`); the anaglyph 3D
+preview (`anaglyph_preview.py`); and project save/load/recent projects.
+Small shared Qt-only helpers (PIL-to-`QPixmap` conversion, a
+close-callback `QDialog` base) live in `qt_helpers.py` so the four
+sub-window modules can use them without importing back from this file.
 
 See `ARCHITECTURE.md` for how responsibilities are currently split
 across files, and `README.md` for the user-facing description of the
@@ -31,6 +36,7 @@ app.
 """
 
 import ctypes
+import datetime
 import os
 import sys
 import time
@@ -48,10 +54,12 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QSplashScreen,
@@ -62,12 +70,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+import anaglyph_preview
 import calibration_io
+import calibration_summary
+import generate_calibration_target
+import measurement_window
+import perform_calibration
 import prepare_splash_image
 import project_io
 import recent_projects
 import stereo_matching
 import video_overlay
+from qt_helpers import enable_dark_title_bar, pil_image_to_qpixmap
 
 
 def resource_path(relative_path):
@@ -119,24 +133,6 @@ STARTUP_SPLASH_MAX_WIDTH_PX = 720
 proportionally if it's larger. Unchanged from the original."""
 
 
-def _pil_image_to_qpixmap(img):
-    """Convert a PIL RGB image to a `QPixmap`.
-
-    Builds a `QImage` from the raw pixel bytes directly (same approach
-    `video_overlay.py` uses for video frames) rather than depending on
-    `PIL.ImageQt`'s own Qt-binding auto-detection.
-
-    Args:
-        img (PIL.Image.Image): An RGB image.
-
-    Returns:
-        QPixmap: The converted pixmap.
-    """
-    data = img.tobytes("raw", "RGB")
-    qimage = QImage(data, img.width, img.height, img.width * 3, QImage.Format.Format_RGB888)
-    return QPixmap.fromImage(qimage.copy())
-
-
 def _show_startup_splash():
     """Show a splash screen while the rest of the app builds.
 
@@ -165,7 +161,7 @@ def _show_startup_splash():
             scale = STARTUP_SPLASH_MAX_WIDTH_PX / img.width
             img = img.resize((STARTUP_SPLASH_MAX_WIDTH_PX, round(img.height * scale)), Image.LANCZOS)
 
-        pixmap = _pil_image_to_qpixmap(img)
+        pixmap = pil_image_to_qpixmap(img)
     except Exception:
         return None
 
@@ -381,20 +377,38 @@ class SizeamaticProApp(QMainWindow):
         self.ptsL = []
         self.ptsR = []
 
+        self.click_sigma_px = 3.0
+        """Assumed user click-placement uncertainty, in image pixels. An
+        explicit modeling assumption (not a measured value) fed into
+        `stereo_matching.py`'s perturbation-based uncertainty estimates
+        (`estimate_point_sigma_mm`, `estimate_segment_sigma_len_mm`) to
+        translate pixel-level click imprecision into millimeter-level
+        depth/length uncertainty estimates."""
+
         # ---- Project save/load state ----
-        # Plain passthrough attributes for the sub-windows/features this
-        # port hasn't reached yet (measurement log, real-time anchor,
-        # perform-calibration capture folder) - not yet settable from
-        # this app's UI, but preserved round-trip through save/open so a
-        # project file saved by (or containing data from) a more-complete
-        # version of this app doesn't lose that data if reopened and
-        # resaved here in the meantime.
         self.current_project_name = None
-        self.measurement_log_text = ""
         self.last_recorded_snapshot = None
+
         self.real_time_anchor_frame = None
+        """The left-timeline frame index the user was on when they last
+        set the real-world time anchor (`on_real_time_entered`), or None
+        if no anchor has been set."""
+
         self.real_time_anchor_iso = None
-        self.perform_calibration_capture_folder = None
+        """The persisted (project-file-friendly) ISO-8601 form of the
+        real-time anchor, or None. `self.real_time_anchor_dt` below is
+        the live `datetime.datetime` parsed from this - kept as a
+        separate attribute rather than parsing on every read, and kept
+        as an ISO string here (rather than storing the `datetime`
+        directly) since that's the format `project_io.py` round-trips
+        through JSON."""
+
+        self.real_time_anchor_dt = None
+        """The `datetime.datetime` parsed from `self.real_time_anchor_iso`,
+        read off whatever real-world clock is burned into the video at
+        `self.real_time_anchor_frame`. Together with the left video's
+        fps, this is what `_format_actual_time` uses to project the
+        real-world time at any other frame."""
 
         # ---- Shared pan/zoom/interaction constants (read by VideoPane) ----
         self.zoom_min = ZOOM_MIN
@@ -411,6 +425,30 @@ class SizeamaticProApp(QMainWindow):
 
         self._suppress_slider_callbacks = False
 
+        self.measurement_window = measurement_window.MeasurementWindow(self)
+        """Owns the measurement results dialog and its widgets. See
+        `measurement_window.MeasurementWindow`."""
+
+        self.cal_summary_window = calibration_summary.CalibrationSummaryWindow(self)
+        """Owns the calibration summary dialog and its widgets. See
+        `calibration_summary.CalibrationSummaryWindow`."""
+
+        self.anaglyph_preview = anaglyph_preview.AnaglyphPreview(self)
+        """Owns the anaglyph preview's OpenCV window and playback state.
+        See `anaglyph_preview.AnaglyphPreview`."""
+        self.anaglyph_preview.window_name = "Sizeamatic Pro - Anaglyph 3D"
+
+        self.perform_calibration_window = perform_calibration.PerformCalibrationWindow(self)
+        """Owns the Perform Calibration dialog and its widgets - capturing
+        calibration frame pairs from the currently loaded left/right
+        video and running the calibration computation on them. See
+        `perform_calibration.PerformCalibrationWindow`."""
+
+        self.generate_calibration_target_window = generate_calibration_target.GenerateCalibrationTargetWindow(self)
+        """Owns the Generate Calibration Target dialog and its widgets -
+        printing a checkerboard/ChArUco calibration board. See
+        `generate_calibration_target.GenerateCalibrationTargetWindow`."""
+
         self._build_menu()
         self._build_toolbar()
         self._build_central_widget()
@@ -418,6 +456,43 @@ class SizeamaticProApp(QMainWindow):
 
         self._update_slider_ranges()
         self._refresh_window_title()
+
+    def closeEvent(self, event):
+        """Stop playback/preview loops and release video captures before closing.
+
+        Direct port of the original's `on_app_close`. Also explicitly
+        closes the four sub-window dialogs if still open - they're
+        deliberately built with no Qt parent (see `qt_helpers.ClosableDialog`),
+        so Qt's default quit-on-last-window-closed can't be relied on to
+        clean them up as a side effect of the main window closing.
+
+        Args:
+            event (QCloseEvent): The close event.
+
+        Returns:
+            None
+        """
+        self.is_playing = False
+        self.playback_timer.stop()
+
+        if self.anaglyph_preview.active:
+            self.anaglyph_preview.stop()
+
+        if self.capL:
+            self.capL.release()
+        if self.capR:
+            self.capR.release()
+
+        for sub_window in (
+            self.measurement_window,
+            self.cal_summary_window,
+            self.perform_calibration_window,
+            self.generate_calibration_target_window,
+        ):
+            if sub_window.win is not None:
+                sub_window.win.close()
+
+        super().closeEvent(event)
 
     # -------------------------------------------------------------------------
     # Menu bar
@@ -454,10 +529,16 @@ class SizeamaticProApp(QMainWindow):
         self.action_show_rectified.toggled.connect(self.on_toggle_view_rectified)
         view_menu.addAction(self.action_show_rectified)
 
+        view_menu.addAction("Anaglyph 3D Preview…", self.on_toggle_anaglyph_preview)
         view_menu.addAction("Reset Pan/Zoom", self.on_reset_pan_zoom)
+        view_menu.addSeparator()
+        view_menu.addAction("Calibration Summary…", self.on_show_calibration_summary)
 
         calibration_menu = menubar.addMenu("Calibration")
         calibration_menu.addAction("Load Calibration…", self.on_load_calibration_folder)
+        calibration_menu.addSeparator()
+        calibration_menu.addAction("Perform Calibration…", self.on_perform_calibration)
+        calibration_menu.addAction("Generate Calibration Target…", self.on_generate_calibration_target)
 
     # -------------------------------------------------------------------------
     # Toolbar
@@ -514,6 +595,100 @@ class SizeamaticProApp(QMainWindow):
         self.rectified_indicator.setProperty("state", "not_rectified")
         toolbar.addWidget(self.rectified_indicator)
 
+        self._build_real_time_sync_group(toolbar)
+
+    def _build_real_time_sync_group(self, toolbar):
+        """Build the real-world time anchor entry group.
+
+        Six separate plain text boxes (year/month/day/hour/minute/
+        second), not one free-text field to parse and not spinners -
+        the project owner specifically didn't want either. Starts
+        empty, not pre-filled with "now": the boxes exist to be typed
+        into, matching whatever's burned into the video, not edited
+        from a default that has nothing to do with the footage.
+        Nothing here is validated/applied until "Set Time Sync" is
+        pressed (`on_real_time_entered`) - direct port of the original's
+        toolbar section of the same name.
+
+        Args:
+            toolbar (QToolBar): The toolbar to add this group to.
+
+        Returns:
+            None
+        """
+        toolbar.addWidget(QLabel("   "))
+
+        box_specs = [
+            ("real_time_year_edit", 4, "YYYY"),
+            ("real_time_month_edit", 2, "MM"),
+            ("real_time_day_edit", 2, "DD"),
+            ("real_time_hour_edit", 2, "HH"),
+            ("real_time_minute_edit", 2, "MM"),
+            ("real_time_second_edit", 2, "SS"),
+        ]
+        # Separator text drawn between consecutive boxes (index i sits
+        # between box i and box i+1) - one shorter than the number of boxes.
+        separators = ["-", "-", "  ", ":", ":"]
+
+        self.real_time_entries = []
+        """The six real-time-anchor `QLineEdit`s (year/month/day/hour/
+        minute/second, in that order) - kept so each box's auto-advance
+        handler can focus the *next* one, and so tests can drive them
+        uniformly without naming each one."""
+
+        for i, (attr_name, max_len, placeholder) in enumerate(box_specs):
+            entry = QLineEdit()
+            entry.setPlaceholderText(placeholder)
+            entry.setFixedWidth(14 * (max_len + 1))
+            entry.setMaxLength(max_len)
+            setattr(self, attr_name, entry)
+            self.real_time_entries.append(entry)
+            toolbar.addWidget(entry)
+
+            if i < len(separators):
+                toolbar.addWidget(QLabel(separators[i]))
+
+        # Auto-advance to the next box once this one looks full - purely a
+        # focus convenience, not validation (nothing is checked/applied here).
+        for i, entry in enumerate(self.real_time_entries):
+            max_len = box_specs[i][1]
+            next_entry = self.real_time_entries[i + 1] if i + 1 < len(self.real_time_entries) else None
+            entry.textChanged.connect(
+                lambda _text, e=entry, n=next_entry, m=max_len: self._advance_real_time_focus(e, n, m)
+            )
+
+        self.btn_set_time_sync = QPushButton("Set Time Sync")
+        self.btn_set_time_sync.clicked.connect(self.on_real_time_entered)
+        toolbar.addWidget(self.btn_set_time_sync)
+
+        # Synced indicator: a checkmark next to the button, shown by
+        # on_real_time_entered once an anchor is actually set; empty
+        # until then.
+        self.time_sync_indicator = QLabel("")
+        self.time_sync_indicator.setStyleSheet("color: #2fbf71;")
+        toolbar.addWidget(self.time_sync_indicator)
+
+    def _advance_real_time_focus(self, entry, next_entry, max_len):
+        """Move focus to the next real-time-anchor box once this one looks full.
+
+        Purely a typing convenience - does not validate or apply
+        anything; that only happens when "Set Time Sync" is pressed
+        (`on_real_time_entered`).
+
+        Args:
+            entry (QLineEdit): The box that was just typed into.
+            next_entry (QLineEdit | None): The box to focus next, or
+                None if this is the last one (seconds).
+            max_len (int): How many characters this box is expected to
+                hold (e.g. 4 for year, 2 for the rest) before advancing.
+
+        Returns:
+            None
+        """
+        if next_entry is not None and len(entry.text()) >= max_len:
+            next_entry.setFocus()
+            next_entry.selectAll()
+
     # -------------------------------------------------------------------------
     # Central widget: dual video panes + sliders
     # -------------------------------------------------------------------------
@@ -533,6 +708,13 @@ class SizeamaticProApp(QMainWindow):
 
         self.pane_left, self.left_slider, self.left_frame_label = self._build_pane_column(splitter, "L")
         self.pane_right, self.right_slider, self.right_frame_label = self._build_pane_column(splitter, "R")
+
+        # Shared Frame/Video Time/Actual Time readout, by the scrub bars
+        # (right below both panes) rather than up in the toolbar - one
+        # shared readout since it's a single anchor, not duplicated per pane.
+        self.time_readout_label = QLabel("")
+        self.time_readout_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        root_layout.addWidget(self.time_readout_label)
 
     def _build_pane_column(self, parent, which):
         """Build one side's video pane + slider + frame label column.
@@ -569,13 +751,100 @@ class SizeamaticProApp(QMainWindow):
         return pane, slider, frame_label
 
     def _build_statusbar(self):
-        """Build the status bar.
+        """Build the 3-section status bar (left/mid/right labels).
+
+        Direct port of the original's `_build_statusbar` - one QStatusBar
+        holding three QLabels instead of Tkinter's 3-column grid frame.
+        Left shows file/cal/view state, mid shows transient action
+        messages, right shows the live measurement summary.
 
         Returns:
             None
         """
-        self.setStatusBar(QStatusBar())
-        self.statusBar().showMessage("Ready")
+        status_bar = QStatusBar()
+        self.setStatusBar(status_bar)
+
+        self.status_left = QLabel("")
+        self.status_right = QLabel("")
+
+        self.status_mid = QLabel("")
+        self.status_mid.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # A plain QLabel's minimumSizeHint equals its full unwrapped text
+        # width (it won't shrink/elide on its own) - status_left/
+        # status_right's content is bounded by design (`_short_path`'s
+        # truncation, small fixed-format numbers) so their natural width
+        # is fine left alone, but status_mid carries arbitrary transient
+        # messages (e.g. the anaglyph preview's ~65-character keyboard-
+        # controls tip) that would otherwise force this whole window
+        # wider to fit, growing every time a longer message came along.
+        # `Ignored` tells the layout to disregard its size hint for
+        # sizing purposes, so a long message clips instead of ever
+        # resizing the window - matching the original Tkinter status
+        # bar's fixed-character-width label, which had the same "just
+        # clip it" behavior. Relies on the stretch factor below to still
+        # give it real width to work with, since `Ignored` alone would
+        # otherwise let it collapse to zero.
+        self.status_mid.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+        status_bar.addWidget(self.status_left)
+        status_bar.addWidget(self.status_mid, 1)
+        status_bar.addWidget(self.status_right)
+
+        self._set_status_mid("Ready")
+
+    def _set_status_mid(self, text):
+        """Set the status bar's center (message/warning) text.
+
+        Args:
+            text (str): The text to display.
+
+        Returns:
+            None
+        """
+        self.status_mid.setText(text)
+
+    def _set_status_right(self, text):
+        """Set the status bar's right (measurement results) text.
+
+        Args:
+            text (str): The text to display.
+
+        Returns:
+            None
+        """
+        self.status_right.setText(text)
+
+    def _both_videos_loaded(self):
+        """Check whether both left and right video captures and metadata exist.
+
+        Returns:
+            bool: True only when both `capL`/`capR` and `metaL`/`metaR`
+            are set.
+        """
+        return self.capL is not None and self.capR is not None and self.metaL is not None and self.metaR is not None
+
+    def _refresh_status_left(self):
+        """Refresh the status bar's left section with file/view/lock state.
+
+        Returns:
+            None
+        """
+        l = self.left_video_path if self.left_video_path else "(none)"
+        r = self.right_video_path if self.right_video_path else "(none)"
+        c = self.calibration_folder if self.calibration_folder else "(none)"
+        view = "Rectified" if self.view_rectified.get() else "Raw"
+        lock = "Locked" if self.lock_lr else "Unlocked"
+
+        # Only show an offset when lock is enabled and both videos are loaded.
+        # This keeps the status line clean when you are still loading files.
+        offset_txt = ""
+        if self.lock_lr and self._both_videos_loaded():
+            offset_txt = f" | Offset: {self.lock_offset_frames:+d}f"
+
+        self.status_left.setText(
+            f"L: {self._short_path(l)} | R: {self._short_path(r)} | Cal: {self._short_path(c)} | View: {view} | {lock}{offset_txt}"
+        )
 
     # -------------------------------------------------------------------------
     # Video loading
@@ -659,7 +928,7 @@ class SizeamaticProApp(QMainWindow):
 
         self._update_slider_ranges()
         self.render_current_frames()
-        self.statusBar().showMessage(
+        self._set_status_mid(
             f"Loaded left video ({meta['width']}×{meta['height']}, fps={meta['fps']:.3f}, frames={meta['frame_count']})"
         )
         return True
@@ -709,7 +978,7 @@ class SizeamaticProApp(QMainWindow):
 
         self._update_slider_ranges()
         self.render_current_frames()
-        self.statusBar().showMessage(
+        self._set_status_mid(
             f"Loaded right video ({meta['width']}×{meta['height']}, fps={meta['fps']:.3f}, frames={meta['frame_count']})"
         )
         return True
@@ -717,17 +986,78 @@ class SizeamaticProApp(QMainWindow):
     def on_load_calibration_folder(self):
         """Prompt for and load a calibration folder.
 
-        Just handles the folder dialog; the actual loading logic lives
-        in `_load_calibration_from_folder` so `_open_project_from_path`
-        can reuse it with a path read from a project file instead.
+        Just handles the file dialog; the actual loading logic lives in
+        `_load_calibration_from_folder` so `_open_project_from_path` can
+        reuse it with a folder path read from a project file instead.
+
+        Note:
+            Deliberately uses an *open file* dialog rather than a folder
+            picker, even though what's actually wanted is a folder.
+            Windows' native folder-picker dialog only shows folder
+            names, never the files inside them - so a user comparing
+            several candidate folders has no way to see which one
+            actually contains the expected NPZ files before picking.
+            Asking for "any file inside the calibration folder" instead,
+            filtered to `calibration_*.npz`, means the picker's own file
+            list does the job the dialog title alone couldn't: the four
+            expected files are right there to look at. The containing
+            folder is then just the dirname of whichever one gets
+            picked.
 
         Returns:
             None
         """
-        folder = QFileDialog.getExistingDirectory(self, "Load Calibration Folder")
-        if not folder:
+        sample_path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Select any file inside the calibration folder — expects "
+            "calibration_intrinsics.npz, calibration_extrinsics.npz, "
+            "calibration_rectification.npz, calibration_maps.npz",
+            "",
+            "Calibration NPZ (calibration_*.npz);;All Files (*)",
+        )
+        if not sample_path:
             return
+
+        folder = os.path.dirname(sample_path)
         self._load_calibration_from_folder(folder)
+
+    def on_show_calibration_summary(self):
+        """Open (or focus) the calibration summary window.
+
+        Requires calibration to already be loaded.
+
+        Returns:
+            None
+        """
+        if self.cal is None:
+            self._set_status_mid("Load calibration first")
+            return
+
+        self.cal_summary_window.ensure_window()
+        self.cal_summary_window.update_window()
+
+    def on_perform_calibration(self):
+        """Open (or focus) the Perform Calibration window.
+
+        Unlike `on_show_calibration_summary`, this doesn't require an
+        existing calibration to already be loaded — capturing frame
+        pairs is how a *new* calibration gets built in the first place.
+
+        Returns:
+            None
+        """
+        self.perform_calibration_window.ensure_window()
+
+    def on_generate_calibration_target(self):
+        """Open (or focus) the Generate Calibration Target window.
+
+        Doesn't require any video or calibration to be loaded - printing
+        a target is a prep step done before capturing anything.
+
+        Returns:
+            None
+        """
+        self.generate_calibration_target_window.ensure_window()
 
     def _load_calibration_from_folder(self, folder):
         """Load a calibration bundle from an already-known folder path.
@@ -750,7 +1080,8 @@ class SizeamaticProApp(QMainWindow):
 
         self.cal = cal
         self.calibration_folder = folder
-        self.statusBar().showMessage(f"Loaded calibration from {folder}")
+        self._set_status_mid(f"Loaded calibration from {folder}")
+        self._refresh_status_left()
         return True
 
     # -------------------------------------------------------------------------
@@ -819,13 +1150,236 @@ class SizeamaticProApp(QMainWindow):
         self.pane_right.update()
 
     def on_points_changed(self):
-        """Redraw both panes after a measurement point was placed/moved.
+        """Redraw both panes and recompute measurements after a point
+        was placed/moved.
 
         Returns:
             None
         """
         self.pane_left.update()
         self.pane_right.update()
+        self._update_measurement_status_stub()
+
+    def _current_measurement_context(self):
+        """Build the video/frame/timestamp identifying info for the
+        current measurement.
+
+        This is what lets a copied-and-pasted measurement row still
+        mean something once it's sitting in a spreadsheet with no other
+        context. Always reads the *left* timeline/video, since
+        measurements are computed in the rectified left camera
+        coordinate frame (see `README.md`'s "Measurement notes").
+
+        Returns:
+            dict: Keys "video_name" (str), "frame_index" (int),
+            "timestamp" (str, elapsed video time since frame 0), and
+            "actual_time" (str, the calculated real-world time if a
+            real-time anchor is set, or "" if not).
+        """
+        if self.left_video_path:
+            video_name = os.path.basename(self.left_video_path)
+        else:
+            video_name = "(no video)"
+
+        frame_index = int(self.left_frame_index)
+        fps = self.metaL["fps"] if self.metaL else None
+
+        actual_time = self._format_actual_time(frame_index)
+        if actual_time == "(not set)":
+            # A spreadsheet column should be empty when there's nothing to
+            # show, not carry a placeholder string as if it were real data.
+            actual_time = ""
+
+        return {
+            "video_name": video_name,
+            "frame_index": frame_index,
+            "timestamp": self._format_timestamp(frame_index, fps),
+            "actual_time": actual_time,
+        }
+
+    def _update_measurement_status_stub(self):
+        """Recompute measurements from current points and refresh the UI.
+
+        Triangulates all currently paired left/right points, builds one
+        unified list of result rows (a "Point" row per point, a
+        "Segment" row per consecutive pair, and - for 2+ points - one
+        "Total" row summing the connected chain's segment lengths),
+        updates the status bar's right section with a short summary (or
+        the reason measurement isn't available), and refreshes the
+        measurement results window.
+
+        Note:
+            If a point in the middle of the list fails to triangulate,
+            the loop below stops there (via `break`) but the function
+            still continues on to report a summary count for whatever
+            points triangulated successfully beforehand - the partial-
+            failure `err_msg` is passed on to the measurement popup
+            window (which does display it), but is not shown in this
+            window's own status bar, which instead gets overwritten with
+            the "Measured N pts" summary.
+
+        Returns:
+            None
+        """
+        l_count = len(self.ptsL)
+        r_count = len(self.ptsR)
+
+        # Quick gating messages stay in the status bar.
+        if l_count == 0 and r_count == 0:
+            self._set_status_right("")
+            return
+
+        if l_count != r_count:
+            self._set_status_right(f"Point pair incomplete: L={l_count} R={r_count}")
+            return
+
+        if not self.view_rectified.get():
+            self._set_status_right("Enable rectified view to measure")
+            return
+
+        if self.cal is None:
+            self._set_status_right("Load calibration to measure")
+            return
+
+        n = min(l_count, r_count)
+
+        # Compute 3D points as many as we can.
+        pts3d = []
+        err_msg = ""
+
+        for i in range(n):
+            P, err = stereo_matching.triangulate_point_pair(self, i)
+            if err is not None:
+                err_msg = f"Point {i} failed: {err}"
+                break
+            pts3d.append(P)
+
+        # If we got nothing, show the error and return.
+        if len(pts3d) == 0:
+            self._set_status_right(err_msg if err_msg else "No valid points")
+            return
+
+        # Video/frame/timestamp context, shared by every row this call produces.
+        ctx = self._current_measurement_context()
+        video_col = ctx["video_name"]
+        frame_col = str(ctx["frame_index"])
+        time_col = ctx["timestamp"]
+        actual_time_col = ctx["actual_time"]
+
+        rows = []
+        sigma_px = float(self.click_sigma_px)
+
+        # Build one "Point" row per clicked point pair.
+        for i, (X, Y, Z) in enumerate(pts3d):
+            R = (X * X + Y * Y + Z * Z) ** 0.5
+
+            # Assumption-free quality metric.
+            erms = stereo_matching.reprojection_rms_px(self, i)
+            erms_str = f"{erms:.2f}" if erms is not None else ""
+
+            # Assumption-based uncertainty in mm.
+            sig = stereo_matching.estimate_point_sigma_mm(self, i, sigma_px)
+            if sig is None:
+                sZ_str = ""
+                sR_str = ""
+            else:
+                sZ, sR = sig
+                sZ_str = f"{sZ:.1f}"
+                sR_str = f"{sR:.1f}"
+
+            # Read the clicked left and right pixels for this point.
+            xL, yL = self.ptsL[i]
+            xR, yR = self.ptsR[i]
+
+            # Compute disparity, which drives stereo depth.
+            disp = xL - xR
+
+            # Compute rectified Y mismatch between left and right clicks.
+            dy = yR - yL
+
+            rows.append((
+                video_col, frame_col, time_col, actual_time_col, "",
+                "Point", str(i),
+                f"{X:.1f}", f"{Y:.1f}", f"{Z:.1f}", f"{R:.1f}",
+                f"{disp:.2f}", f"{dy:.2f}", erms_str, sZ_str, sR_str,
+            ))
+
+        # Build one "Segment" row per consecutive point pair (the chain is a
+        # single connected polyline: 0-1, 1-2, 2-3, ...), plus a running
+        # total length and quadrature-summed sigma across the whole chain.
+        total_len_mm = 0.0
+        total_var_mm2 = 0.0
+        have_total_sigma = True
+
+        if len(pts3d) >= 2:
+            for i in range(1, len(pts3d)):
+                X0, Y0, Z0 = pts3d[i - 1]
+                X1, Y1, Z1 = pts3d[i]
+                dX = X1 - X0
+                dY = Y1 - Y0
+                dZ = Z1 - Z0
+                L = (dX * dX + dY * dY + dZ * dZ) ** 0.5
+                total_len_mm += L
+
+                # Segment sigma length estimate.
+                seg_est = stereo_matching.estimate_segment_sigma_len_mm(self, i - 1, i, sigma_px)
+                if seg_est is None:
+                    sL_str = ""
+                    # Can't propagate a total sigma if any segment along the
+                    # chain is missing one.
+                    have_total_sigma = False
+                else:
+                    _L0, sL = seg_est
+                    sL_str = f"{sL:.1f}"
+                    total_var_mm2 += sL * sL
+
+                rows.append((
+                    video_col, frame_col, time_col, actual_time_col, "",
+                    "Segment", f"{i-1}-{i}",
+                    f"{dX:.1f}", f"{dY:.1f}", f"{dZ:.1f}", f"{L:.1f}",
+                    "", "", "", sL_str, "",
+                ))
+
+            # Total: sum of the connected chain's segment lengths. Segment
+            # sigmas are each estimated independently, so a sum of
+            # independent errors adds in quadrature:
+            # sigma_total = sqrt(sum(sigma_i^2)).
+            total_sigma_str = f"{total_var_mm2 ** 0.5:.1f}" if have_total_sigma else ""
+            rows.append((
+                video_col, frame_col, time_col, actual_time_col, "",
+                "Total", "",
+                "", "", "", f"{total_len_mm:.1f}",
+                "", "", "", total_sigma_str, "",
+            ))
+
+            self._set_status_right(
+                f"Measured {len(pts3d)} pts, {len(pts3d) - 1} segs, total {total_len_mm:.1f}mm"
+            )
+        else:
+            self._set_status_right("Measured 1 point")
+
+        # Update popup window (creates it on first valid measurement).
+        self.measurement_window.update_window(rows, err_msg)
+
+    def _on_measurement_recorded(self):
+        """Snapshot enough state to restore this exact measurement later.
+
+        Called by `self.measurement_window.record_current_measurement`
+        right after it successfully appends to the Log. Records which
+        frame each timeline was on and the exact clicked points at this
+        moment, so a saved project file can jump back to "the very last
+        place that was recorded" and show those same points again on
+        reopen (`_open_project_from_path`).
+
+        Returns:
+            None
+        """
+        self.last_recorded_snapshot = {
+            "left_frame_index": int(self.left_frame_index),
+            "right_frame_index": int(self.right_frame_index),
+            "ptsL": [list(p) for p in self.ptsL],
+            "ptsR": [list(p) for p in self.ptsR],
+        }
 
     def on_clear_points(self):
         """Clear all measurement points in both panes.
@@ -850,16 +1404,189 @@ class SizeamaticProApp(QMainWindow):
             pane.pan_last_pos = None
 
         self.on_points_changed()
-        self.statusBar().showMessage("Cleared all points")
+        self._set_status_mid("Cleared all points")
 
     def _update_frame_labels(self):
-        """Refresh the "Frame: i/max" labels under each slider.
+        """Refresh the "Frame: i/max" labels, the shared Frame/Video
+        Time/Actual Time readout, the status bar's left section, and
+        (if an anchor is set) the six real-time entry boxes themselves.
 
         Returns:
             None
         """
-        self.left_frame_label.setText(f"Frame: {self.left_frame_index}/{self.left_frame_max}")
-        self.right_frame_label.setText(f"Frame: {self.right_frame_index}/{self.right_frame_max}")
+        lmax = max(0, int(self.left_frame_max))
+        rmax = max(0, int(self.right_frame_max))
+        li = int(self.left_frame_index)
+        ri = int(self.right_frame_index)
+
+        self.left_frame_label.setText(f"Frame: {li}/{lmax}")
+        self.right_frame_label.setText(f"Frame: {ri}/{rmax}")
+
+        # The shared readout is referenced to the left/master timeline, same
+        # as the real-world time anchor itself.
+        video_time = self._format_timestamp(li, self.metaL["fps"] if self.metaL else None)
+        actual_time = self._format_actual_time(li)
+        self.time_readout_label.setText(f"Frame: {li}/{lmax} | Video: {video_time} | Actual: {actual_time}")
+
+        self._refresh_status_left()
+
+        # Keep the entry boxes live-tracking the current frame's actual time,
+        # once an anchor exists (a no-op before that, so typing a fresh
+        # anchor isn't clobbered by this running on every frame change).
+        self._refresh_real_time_entries(li)
+
+    # -------------------------------------------------------------------------
+    # Real-time sync
+    # -------------------------------------------------------------------------
+
+    def _format_timestamp(self, frame_index, fps):
+        """Format a frame index as an HH:MM:SS:FF timecode.
+
+        The trailing "FF" is the frame number *within* that second
+        (0-based, wrapping at the video's own fps) - not a fraction of a
+        second - so scrubbing to a specific frame shows exactly which
+        frame that is, the same way professional video timecode does.
+
+        Args:
+            frame_index (int): Zero-based frame index.
+            fps (float | None): The video's frames-per-second, or None/0
+                if unknown.
+
+        Returns:
+            str: The formatted timecode, or "?" if `fps` isn't a usable
+            positive number (e.g. no video loaded yet).
+        """
+        if not fps or fps <= 0:
+            return "?"
+
+        fps_int = max(1, round(float(fps)))
+        frame_index = int(frame_index)
+
+        whole_seconds, frame_in_second = divmod(frame_index, fps_int)
+        hours = whole_seconds // 3600
+        minutes = (whole_seconds % 3600) // 60
+        seconds = whole_seconds % 60
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}:{frame_in_second:02d}"
+
+    def _format_actual_time(self, frame_index):
+        """Calculate and format the real-world time at a given frame.
+
+        Uses the real-world time anchor (`self.real_time_anchor_frame`/
+        `self.real_time_anchor_dt`, set by `on_real_time_entered`) plus
+        the left video's fps to project forward/backward from that one
+        known point, in whole frames rather than fractional seconds -
+        see `_format_timestamp`'s docstring for why.
+
+        Args:
+            frame_index (int): The left-timeline frame index to
+                calculate the real-world time for.
+
+        Returns:
+            str: The calculated real-world time as
+            "YYYY-MM-DD HH:MM:SS:FF" (FF = frame number within that
+            second), or "(not set)" if no anchor has been set yet or the
+            left video's fps isn't known.
+        """
+        if self.real_time_anchor_frame is None or self.real_time_anchor_dt is None:
+            return "(not set)"
+
+        fps = self.metaL["fps"] if self.metaL else None
+        if not fps or fps <= 0:
+            return "(not set)"
+
+        fps_int = max(1, round(float(fps)))
+        frame_delta = int(frame_index) - int(self.real_time_anchor_frame)
+
+        # divmod floors toward negative infinity for a positive divisor, so a
+        # negative frame_delta still lands on a frame_in_second in [0, fps_int)
+        # rather than a negative frame count - e.g. one frame before the
+        # anchor is "the second before, frame fps_int - 1", not "-1 frames".
+        whole_seconds_delta, frame_in_second = divmod(frame_delta, fps_int)
+
+        actual_dt = self.real_time_anchor_dt + datetime.timedelta(seconds=whole_seconds_delta)
+        return actual_dt.strftime("%Y-%m-%d %H:%M:%S") + f":{frame_in_second:02d}"
+
+    def on_real_time_entered(self):
+        """Handle the user pressing "Set Time Sync".
+
+        Reads the six year/month/day/hour/minute/second boxes and, if
+        they form a valid date/time, anchors it to the left timeline's
+        current frame index - from then on, `_format_actual_time` can
+        calculate the real-world time at any other frame. Requires the
+        left video to already be loaded (its fps is needed for that
+        calculation). Nothing is validated or applied by typing alone -
+        only this explicit action does that, deliberately, so a
+        half-typed date never triggers a premature error dialog.
+
+        Returns:
+            None
+        """
+        try:
+            year = int(self.real_time_year_edit.text().strip())
+            month = int(self.real_time_month_edit.text().strip())
+            day = int(self.real_time_day_edit.text().strip())
+            hour = int(self.real_time_hour_edit.text().strip())
+            minute = int(self.real_time_minute_edit.text().strip())
+            second = int(self.real_time_second_edit.text().strip())
+            parsed = datetime.datetime(year, month, day, hour, minute, second)
+        except ValueError:
+            # A box is empty/non-numeric, or the values parsed as ints fine
+            # but don't form a real date (e.g. day 31 in a 30-day month).
+            # Either way, there's nothing safe to anchor yet.
+            QMessageBox.critical(
+                self,
+                "Real Time",
+                "That's not a valid date/time — check that every box is "
+                "filled in and the day of month is valid.",
+            )
+            return
+
+        if not self.metaL:
+            self._set_status_mid("Load the left video before setting a real-time anchor")
+            return
+
+        self.real_time_anchor_frame = int(self.left_frame_index)
+        self.real_time_anchor_dt = parsed
+        self.real_time_anchor_iso = parsed.isoformat()
+
+        self._set_status_mid(f"Real time anchored at frame {self.real_time_anchor_frame}")
+        self.time_sync_indicator.setText("✓ Synced")
+        self._update_frame_labels()
+
+    def _refresh_real_time_entries(self, frame_index):
+        """Update the six real-time anchor boxes to the calculated actual
+        time at a given frame.
+
+        A no-op if no anchor is set yet - so the boxes stay exactly as
+        the user is typing them until "Set Time Sync" actually
+        establishes an anchor; once one exists, this keeps the boxes
+        live-tracking the calculated real-world time as the frame
+        changes (scrubbing, playback, stepping), not frozen at the
+        original anchor value.
+
+        Args:
+            frame_index (int): The left-timeline frame index to display
+                the calculated actual time for.
+
+        Returns:
+            None
+        """
+        if self.real_time_anchor_frame is None or self.real_time_anchor_dt is None:
+            return
+
+        fps = self.metaL["fps"] if self.metaL else None
+        if not fps or fps <= 0:
+            return
+
+        elapsed_seconds = (float(frame_index) - float(self.real_time_anchor_frame)) / float(fps)
+        current_dt = self.real_time_anchor_dt + datetime.timedelta(seconds=elapsed_seconds)
+
+        self.real_time_year_edit.setText(f"{current_dt.year:04d}")
+        self.real_time_month_edit.setText(f"{current_dt.month:02d}")
+        self.real_time_day_edit.setText(f"{current_dt.day:02d}")
+        self.real_time_hour_edit.setText(f"{current_dt.hour:02d}")
+        self.real_time_minute_edit.setText(f"{current_dt.minute:02d}")
+        self.real_time_second_edit.setText(f"{current_dt.second:02d}")
 
     # -------------------------------------------------------------------------
     # Slider ranges / lock-sync
@@ -1032,6 +1759,7 @@ class SizeamaticProApp(QMainWindow):
             self.offset_spin.setValue(self.lock_offset_frames)
             self.offset_spin.blockSignals(False)
         self._update_slider_ranges()
+        self._refresh_status_left()
 
     def on_offset_changed(self, value):
         """Handle the Offset spin box changing.
@@ -1224,7 +1952,26 @@ class SizeamaticProApp(QMainWindow):
         self.action_show_rectified.setChecked(False)
         self.action_show_rectified.blockSignals(False)
         self.view_rectified.set(False)
-        self.statusBar().showMessage(message)
+        self._set_status_mid(message)
+
+    def on_toggle_anaglyph_preview(self):
+        """Start or stop the anaglyph preview window.
+
+        Requires both videos to be loaded. Toggles based on the current
+        `self.anaglyph_preview.active` state.
+
+        Returns:
+            None
+        """
+        if not self._both_videos_loaded():
+            self._set_status_mid("Load both videos to use anaglyph preview")
+            return
+
+        if self.anaglyph_preview.active:
+            self.anaglyph_preview.stop()
+            return
+
+        self.anaglyph_preview.start()
 
     def on_reset_pan_zoom(self):
         """Reset both panes' zoom/pan back to the plain fit view.
@@ -1259,12 +2006,18 @@ class SizeamaticProApp(QMainWindow):
         return base
 
     def _refresh_window_title(self):
-        """Reapply this window's title, e.g. after a project is saved/opened.
+        """Reapply this window's title, plus any open sub-window's, e.g.
+        after a project is saved/opened.
 
         Returns:
             None
         """
-        self.setWindowTitle(self._app_window_title())
+        title = self._app_window_title()
+        self.setWindowTitle(title)
+        if self.measurement_window.win is not None:
+            self.measurement_window.win.setWindowTitle(title)
+        if self.cal_summary_window.win is not None:
+            self.cal_summary_window.win.setWindowTitle(title)
 
     def on_save_project(self):
         """Prompt for a save location and write the current project state.
@@ -1294,11 +2047,11 @@ class SizeamaticProApp(QMainWindow):
             self.lock_offset_frames,
             self.view_rectified.get(),
             get_app_version(),
-            self.measurement_log_text,
+            self.measurement_window.get_log_text(),
             self.last_recorded_snapshot,
             self.real_time_anchor_frame,
             self.real_time_anchor_iso,
-            self.perform_calibration_capture_folder,
+            self.perform_calibration_window.capture_folder,
         )
 
         if error is not None:
@@ -1309,7 +2062,7 @@ class SizeamaticProApp(QMainWindow):
 
         self.current_project_name = os.path.splitext(os.path.basename(path))[0]
         self._refresh_window_title()
-        self.statusBar().showMessage("Project saved")
+        self._set_status_mid("Project saved")
 
     def on_open_project(self):
         """Prompt for a project file and reload the saved video/calibration state.
@@ -1376,13 +2129,23 @@ class SizeamaticProApp(QMainWindow):
         self.action_show_rectified.blockSignals(False)
         self.on_toggle_view_rectified(bool(project["view_rectified"]))
 
-        # Preserve (but don't yet act on) the fields this port hasn't
-        # reached - see __init__'s note on these passthrough attributes.
-        self.measurement_log_text = project["measurement_log_text"]
         self.last_recorded_snapshot = project["last_recorded_snapshot"]
         self.real_time_anchor_frame = project["real_time_anchor_frame"]
         self.real_time_anchor_iso = project["real_time_anchor_iso"]
-        self.perform_calibration_capture_folder = project["perform_calibration_capture_folder"]
+        self.real_time_anchor_dt = (
+            datetime.datetime.fromisoformat(self.real_time_anchor_iso) if self.real_time_anchor_iso else None
+        )
+        if self.real_time_anchor_dt is not None:
+            self.time_sync_indicator.setText("✓ Synced")
+
+        self.measurement_window.restore_log_text(project["measurement_log_text"])
+
+        self.perform_calibration_window.capture_folder = project["perform_calibration_capture_folder"]
+        if self.perform_calibration_window.win is not None:
+            self.perform_calibration_window.folder_label.setText(
+                self.perform_calibration_window.capture_folder or "(no capture folder chosen yet)"
+            )
+            self.perform_calibration_window._refresh_pairs_listbox()
 
         # Jump back to "the very last place that was recorded" and show
         # that same measurement on screen again - last, since it depends
@@ -1404,7 +2167,7 @@ class SizeamaticProApp(QMainWindow):
 
         self.current_project_name = os.path.splitext(os.path.basename(path))[0]
         self._refresh_window_title()
-        self.statusBar().showMessage("Project opened")
+        self._set_status_mid("Project opened")
 
     def on_open_recent_project(self, path):
         """Open a project path chosen from the File > Recent Projects submenu.
@@ -1534,6 +2297,7 @@ def main():
     splash_shown_at = time.monotonic()
 
     window = SizeamaticProApp()
+    enable_dark_title_bar(window)
 
     # Show now (still hidden behind the splash, which stays on top) so
     # the layout is actually live - a hidden top-level window doesn't

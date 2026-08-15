@@ -1,19 +1,26 @@
-"""Perform Calibration window for Sizeamatic Pro.
+"""PySide6 Perform Calibration window for Sizeamatic Pro.
 
-This module creates and manages the Tkinter window used to build a new
-stereo calibration from scratch (ROADMAP.md Phase 10), rather than only
-ever loading an already-finished one (`calibration_io.py`). Step 1 of
-that phase is frame-pair capture: letting the project owner either
-manually scrub the already-loaded left/right video pair to a frame
-showing a checkerboard/ChArUco calibration target and capture it, or
-run an automatic scan that samples through the video looking for
-frames where a board is actually detected and captures those on its
-own. Step 2 is running the actual calibration computation
+This module creates and manages the window used to build a new stereo
+calibration from scratch (ROADMAP.md Phase 10), rather than only ever
+loading an already-finished one (`calibration_io.py`). Step 1 of that
+phase is frame-pair capture: letting the project owner either manually
+scrub the already-loaded left/right video pair to a frame showing a
+checkerboard/ChArUco calibration target and capture it, or run an
+automatic scan that samples through the video looking for frames where
+a board is actually detected and captures those on its own. Step 2 is
+running the actual calibration computation
 (`cv2.calibrateCamera`/`stereoCalibrate`/`stereoRectify`) on those
 captured pairs, saving the four calibration NPZ files
 `calibration_io.py` already knows how to load, directly into the same
 capture folder the source images live in - one button in this same
 window, rather than a separate one.
+
+This is a PySide6 port of the original Tkinter module (ROADMAP.md Phase
+11) - see `main.py`'s module docstring for why the app switched
+frameworks. Every module-level detection/calibration function below is
+unchanged (pure cv2/numpy, zero Tkinter dependency to begin with); only
+`PerformCalibrationWindow`'s widgets and its auto-scan progress
+scheduling changed.
 
 Contents:
     - `PerformCalibrationWindow` — owns the window and its widgets.
@@ -39,11 +46,7 @@ Design notes:
     numbering rather than colliding with them) is deliberately the same
     one already implemented - and proven against this app's own
     calibration NPZ format - on the unmerged `feature-onlineCalibrations`
-    branch's `perform_calibration.py`. Matching it here means the actual
-    calibration-computation code that branch already has can be adapted
-    for a later Phase 10 step with minimal changes, rather than also
-    needing its file-discovery logic rewritten to match a different
-    convention invented here instead.
+    branch's `perform_calibration.py`.
 
     Alongside the image pairs themselves, a small `capture_metadata.json`
     in the capture folder records which left/right frame index each
@@ -55,7 +58,7 @@ Design notes:
     still displays and can still be deleted; it just can't be jumped to.
 
     The auto-scan (`on_auto_scan_for_candidates`) runs on a background
-    `threading.Thread`, not the main Tk thread, since decoding and
+    `threading.Thread`, not the main Qt thread, since decoding and
     running two board detectors across a whole video is too slow to do
     without freezing the UI. It opens its *own* fresh
     `cv2.VideoCapture`s on the video file paths rather than reusing
@@ -63,12 +66,12 @@ Design notes:
     thread while the main thread might simultaneously be scrubbing the
     same capture object for display. Progress/results cross back to the
     main thread through a `queue.Queue`, drained by `_poll_scan_queue`
-    via `Tk.after` polling - the standard safe pattern for a background
-    worker that needs to update Tkinter widgets, since Tkinter itself
-    isn't thread-safe to touch directly from a worker thread.
+    via a `QTimer` (`self._poll_timer`) - this port's equivalent of the
+    original's `Tk.after` polling, since Qt widgets also must only be
+    touched from the main thread.
 
     `on_run_calibration` (Step 2) needs the project owner to pick one
-    board type up front (`self.board_type_var`, "Checkerboard" - the
+    board type up front (`self.board_type_combo`, "Checkerboard" - the
     priority - or "ChArUco") rather than auto-detecting it per pair the
     way the auto-scan does - `cv2.calibrateCamera`/`stereoCalibrate`
     need every view's object points to describe the *same physical
@@ -76,43 +79,32 @@ Design notes:
     run isn't valid the way "detect whichever's present" is for the
     auto-scan's much simpler yes/no question. Both board types have
     fully user-set dimensions - checkerboard's squares/square size
-    (`self.checkerboard_squares_x_var`/`_y_var`/
-    `checkerboard_square_size_var`) and ChArUco's squares/square size/
-    marker size (`self.charuco_squares_x_var`/`_y_var`/
-    `charuco_square_size_var`/`charuco_marker_size_var`) - defaulting to
+    and ChArUco's squares/square size/marker size - defaulting to
     `create_checkerboard_calibration_target.py`'s/
     `create_charuco_calibration_target.py`'s own default printable
     boards respectively, so a board printed with either generator
     script's defaults is exactly what a freshly opened Perform
-    Calibration window expects. A board printed at a different size, or
-    with a different square/row count, wouldn't be detected (or would
-    calibrate in the wrong real-world units) against the wrong settings
-    - the same reasoning applies to ChArUco here as it already did to
-    checkerboard, since ChArUco's ArUco markers encode each corner's
-    *ID*, not the board's overall physical dimensions - the detector
-    still has to be built with the right square/marker sizes for
-    `cv2.calibrateCamera` to produce real-world units. Only the ArUco
-    *dictionary* (`CHARUCO_DICTIONARY_ID`) stays a fixed module
-    constant, not user-set - unlike squares/sizes, picking the wrong
-    dictionary makes detection fail outright rather than merely
-    calibrating in the wrong units, and this app only ever needs one.
+    Calibration window expects. Only the ArUco *dictionary*
+    (`CHARUCO_DICTIONARY_ID`) stays a fixed module constant, not
+    user-set - unlike squares/sizes, picking the wrong dictionary makes
+    detection fail outright rather than merely calibrating in the wrong
+    units, and this app only ever needs one.
 
 Assumptions:
-    - The main application exposes: `app.root` (the Tk root window);
-      `app.capL`/`app.capR` (the loaded `cv2.VideoCapture` objects);
-      `app.left_video_path`/`app.right_video_path` (the same videos'
-      file paths, for the auto-scan's own independent captures);
-      `app.left_frame_index`/`app.right_frame_index` and
-      `app.left_slider`/`app.right_slider` (each pane's current frame
-      and its slider widget, as Tk variables/widgets);
-      `app.left_frame_max` (the left video's highest valid frame
-      index); `app.lock_offset_frames` (the current
+    - The main application exposes: `app.capL`/`app.capR` (the loaded
+      `cv2.VideoCapture` objects); `app.left_video_path`/
+      `app.right_video_path` (the same videos' file paths, for the
+      auto-scan's own independent captures); `app.left_frame_index`/
+      `app.right_frame_index` (plain ints) and `app.left_slider`/
+      `app.right_slider` (each pane's current frame and its slider
+      widget); `app.left_frame_max` (the left video's highest valid
+      frame index); `app.lock_offset_frames` (the current
       `right_index - left_index` sync offset, used to derive each
       scanned frame's right-side index from its left-side one);
       `app._suppress_slider_callbacks` (a flag `main.py` already uses
       to move both sliders without re-triggering their own lock-offset
       jump logic); `app._read_frame_at` (a raw, unrectified frame
-      reader); `app._update_frame_labels`/`app._render_current_frames`
+      reader); `app._update_frame_labels`/`app.render_current_frames`
       (redraw hooks); and `app._app_window_title` (this app's
       project-aware window title, shared by every window). All defined
       on `main.py`'s `SizeamaticProApp`.
@@ -133,11 +125,28 @@ import json
 import os
 import queue
 import threading
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
 
 import cv2
 import numpy as np
+
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtWidgets import (
+    QAbstractSpinBox,
+    QApplication,
+    QComboBox,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QMessageBox,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+from qt_helpers import ClosableDialog, move_to_same_screen_as
 
 PAIR_ID_DIGITS = 4
 """Zero-padding width for captured pair filenames (e.g. `left_0007.png`)
@@ -149,10 +158,10 @@ DEFAULT_CHECKERBOARD_SQUARES_X = 10
 `create_checkerboard_calibration_target.py`'s own default printable
 board - so a board printed with that script's defaults is exactly what
 the calibration UI's own default settings expect. The project owner can
-override this per capture folder (`self.checkerboard_squares_x_var`) for
-a different physical board - a plain checkerboard has no way to encode
-its own dimensions the way a ChArUco board's markers encode corner IDs,
-so there's no single "right" fixed size to hardcode instead."""
+override this per capture folder for a different physical board - a
+plain checkerboard has no way to encode its own dimensions the way a
+ChArUco board's markers encode corner IDs, so there's no single "right"
+fixed size to hardcode instead."""
 
 DEFAULT_CHECKERBOARD_SQUARES_Y = 7
 """Default checkerboard height in squares. See
@@ -167,8 +176,8 @@ DEFAULT_CHARUCO_SQUARES_X = 11
 `create_charuco_calibration_target.py`'s own default printable board -
 so a board printed with that script's defaults is exactly what this
 window's own default settings expect. The project owner can override
-this (`self.charuco_squares_x_var`) for a different physical ChArUco
-board, same as checkerboard's own squares settings."""
+this for a different physical ChArUco board, same as checkerboard's own
+squares settings."""
 
 DEFAULT_CHARUCO_SQUARES_Y = 8
 """Default ChArUco board height in squares. See
@@ -379,8 +388,7 @@ def match_charuco_points_for_pair(left_corners, left_ids, right_corners, right_i
     This keeps only the IDs seen on *both* sides, in a consistent
     matching order, and looks up each one's real-world object point
     directly from the board geometry (`board.getChessboardCorners()`
-    is indexed by corner ID, matching how the reference
-    `feature-onlineCalibrations` branch this was adapted from does it).
+    is indexed by corner ID).
 
     Args:
         left_corners (numpy.ndarray): Left-image ChArUco corners, from
@@ -419,9 +427,7 @@ def run_stereo_calibration(object_points_list, left_image_points_list, right_ima
     stereo extrinsics between them (holding intrinsics fixed, via
     `cv2.CALIB_FIX_INTRINSIC`), then the rectification transforms/remap
     tables - the same sequence, and the same output file names/keys,
-    `calibration_io.py` already expects (matching the reference
-    `feature-onlineCalibrations` branch's own `_run_stereo_calibration`,
-    which was written against this exact loader format).
+    `calibration_io.py` already expects.
 
     Args:
         object_points_list (list[numpy.ndarray]): One real-world
@@ -549,10 +555,9 @@ def run_stereo_calibration(object_points_list, left_image_points_list, right_ima
 
 
 class PerformCalibrationWindow:
-    """Owns the Perform Calibration Toplevel window and its widgets.
+    """Owns the Perform Calibration dialog and its widgets.
 
-    Currently implements only frame-pair capture (ROADMAP.md Phase 10,
-    Step 1). One instance lives on the main application
+    One instance lives on the main application
     (`app.perform_calibration_window`), created once and reused for the
     lifetime of the app, matching `CalibrationSummaryWindow`'s pattern.
     """
@@ -561,12 +566,11 @@ class PerformCalibrationWindow:
         """Store the owning app and initialize widget/session state to None.
 
         Args:
-            app: The main application object - used for the Tk root
-                window that owns this Toplevel, the currently loaded
-                left/right video captures and frame indices, and the
-                raw-frame reader (`app._read_frame_at`). See this
-                module's docstring for the exact attributes assumed to
-                exist on it.
+            app: The main application object - used as the dialog's
+                parent, the currently loaded left/right video captures
+                and frame indices, and the raw-frame reader
+                (`app._read_frame_at`). See this module's docstring for
+                the exact attributes assumed to exist on it.
 
         Returns:
             None
@@ -574,8 +578,8 @@ class PerformCalibrationWindow:
         self.app = app
 
         self.win = None
-        """The Perform Calibration Toplevel window, or None if it
-        hasn't been opened yet (or was closed)."""
+        """The Perform Calibration dialog, or None if it hasn't been
+        opened yet (or was closed)."""
 
         self.capture_folder = None
         """The folder captured calibration frame pairs are saved into,
@@ -589,18 +593,17 @@ class PerformCalibrationWindow:
         in-progress capture session survives a save/reload the same way
         the rest of the app's session state does."""
 
-        self.folder_var = None
-        """`tk.StringVar` mirroring `self.capture_folder` for display in
-        the window - created in `ensure_window` (needs a Tk root to
-        exist first), read by nothing else."""
+        self.folder_label = None
+        """`QLabel` mirroring `self.capture_folder` for display in the
+        window - created in `ensure_window`."""
 
-        self.status_var = None
-        """`tk.StringVar` holding the window's status/error line, e.g.
+        self.status_label = None
+        """`QLabel` holding the window's status/error line, e.g.
         "Captured pair 0007 (7 total)". Created in `ensure_window`."""
 
-        self.pairs_listbox = None
-        """The `tkinter.Listbox` showing every captured pair currently
-        in `self.capture_folder`, or None until `ensure_window` builds
+        self.pairs_list = None
+        """The `QListWidget` showing every captured pair currently in
+        `self.capture_folder`, or None until `ensure_window` builds
         it."""
 
         self.auto_scan_button = None
@@ -627,105 +630,121 @@ class PerformCalibrationWindow:
         `_run_auto_scan` between sampled frames so it can exit early
         rather than always running to the end of the video."""
 
-        self.board_type_var = None
-        """`tk.StringVar` holding which board type `on_run_calibration`
+        self._poll_timer = QTimer()
+        """`QTimer` driving `_poll_scan_queue` while a scan is running -
+        this port's equivalent of the original's `Tk.after` polling.
+        Single-shot, restarted at the end of each poll that isn't
+        finished yet."""
+        self._poll_timer.setSingleShot(True)
+        self._poll_timer.timeout.connect(self._poll_scan_queue)
+
+        self.board_type_combo = None
+        """`QComboBox` holding which board type `on_run_calibration`
         (Step 2) should treat every captured pair as - `"Checkerboard"`
         or `"ChArUco"`. Created in `ensure_window`. See this module's
         docstring for why a calibration run needs one consistent board
         type rather than auto-detecting it per pair the way the
         auto-scan does."""
 
-        self.checkerboard_square_size_var = None
-        """`tk.StringVar` holding the checkerboard's real-world square
+        self.checkerboard_square_size_edit = None
+        """`QLineEdit` holding the checkerboard's real-world square
         size in millimeters, read by `on_run_calibration` only when
-        `self.board_type_var` is `"Checkerboard"`. Created in
+        `self.board_type_combo` reads "Checkerboard". Created in
         `ensure_window`."""
 
-        self.checkerboard_squares_x_var = None
-        """`tk.StringVar` holding the checkerboard's width in *squares*
+        self.checkerboard_squares_x_edit = None
+        """`QLineEdit` holding the checkerboard's width in *squares*
         (not inner corners - see `frame_has_checkerboard`), read by both
         `on_run_calibration` and the auto-scan
         (`on_auto_scan_for_candidates`) whenever checkerboard detection
-        is relevant. A plain checkerboard has no marker IDs to encode
-        its own size, so there's no single fixed default that works for
-        every physical board - this is user-set instead, defaulting to
-        `DEFAULT_CHECKERBOARD_SQUARES_X` (matching
-        `create_checkerboard_calibration_target.py`'s own default
-        printable board, so the two line up out of the box). Created in
-        `ensure_window`."""
+        is relevant. Defaults to `DEFAULT_CHECKERBOARD_SQUARES_X`.
+        Created in `ensure_window`."""
 
-        self.checkerboard_squares_y_var = None
-        """`tk.StringVar` holding the checkerboard's height in squares.
-        See `self.checkerboard_squares_x_var`."""
+        self.checkerboard_squares_y_edit = None
+        """`QLineEdit` holding the checkerboard's height in squares. See
+        `self.checkerboard_squares_x_edit`."""
 
-        self.charuco_squares_x_var = None
-        """`tk.StringVar` holding the ChArUco board's width in squares,
+        self.charuco_squares_x_edit = None
+        """`QLineEdit` holding the ChArUco board's width in squares,
         read by both `on_run_calibration` and the auto-scan whenever
         ChArUco detection is relevant, defaulting to
-        `DEFAULT_CHARUCO_SQUARES_X` (matching
-        `create_charuco_calibration_target.py`'s own default printable
-        board). Created in `ensure_window`."""
+        `DEFAULT_CHARUCO_SQUARES_X`. Created in `ensure_window`."""
 
-        self.charuco_squares_y_var = None
-        """`tk.StringVar` holding the ChArUco board's height in squares.
-        See `self.charuco_squares_x_var`."""
+        self.charuco_squares_y_edit = None
+        """`QLineEdit` holding the ChArUco board's height in squares.
+        See `self.charuco_squares_x_edit`."""
 
-        self.charuco_square_size_var = None
-        """`tk.StringVar` holding the ChArUco board's real-world square
-        size in millimeters. See `self.charuco_squares_x_var`."""
+        self.charuco_square_size_edit = None
+        """`QLineEdit` holding the ChArUco board's real-world square
+        size in millimeters. See `self.charuco_squares_x_edit`."""
 
-        self.charuco_marker_size_var = None
-        """`tk.StringVar` holding the ChArUco board's real-world ArUco
+        self.charuco_marker_size_edit = None
+        """`QLineEdit` holding the ChArUco board's real-world ArUco
         marker size in millimeters - must be smaller than the square
         size (`_parse_charuco_settings` enforces this). See
-        `self.charuco_squares_x_var`."""
+        `self.charuco_squares_x_edit`."""
 
         self.checkerboard_row = None
-        """The `ttk.Frame` holding the checkerboard-specific settings -
-        shown only while `self.board_type_var` is `"Checkerboard"`.
+        """The `QWidget` holding the checkerboard-specific settings -
+        shown only while `self.board_type_combo` reads "Checkerboard".
         Created in `ensure_window`."""
 
         self.charuco_row = None
-        """The `ttk.Frame` holding the ChArUco-specific settings - shown
-        only while `self.board_type_var` is `"ChArUco"`. Created in
+        """The `QWidget` holding the ChArUco-specific settings - shown
+        only while `self.board_type_combo` reads "ChArUco". Created in
         `ensure_window`."""
+
+        self._space_shortcut_win = None
+        """`QShortcut` capturing Space while this dialog has focus, or
+        None until `ensure_window` builds it. See `_on_space_key`."""
+
+        self._space_shortcut_app = None
+        """`QShortcut` capturing Space while the main app window has
+        focus, or None until `ensure_window` builds it - together with
+        `self._space_shortcut_win`, lets Space capture a pair regardless
+        of which of the two windows currently has keyboard focus,
+        mirroring the original's dual Tkinter `bind()` calls."""
 
     def _on_close(self):
         """Handle the user manually closing the window.
 
-        Destroys the Tkinter window and clears the stored widget
-        references (matching `CalibrationSummaryWindow._on_close`'s
-        reasoning) - the next `ensure_window` call needs to know the
-        widgets no longer exist and must rebuild them, rather than
-        holding onto references to already-destroyed widgets. Also
-        unbinds the Space capture shortcut from the main app window (so
-        Space goes back to doing nothing there once this window isn't
-        open), and requests any running auto-scan stop - `self.win`
-        becomes None right after this, and `_poll_scan_queue` refuses to
-        touch a None window, so a scan left running with no window to
-        report progress to would otherwise just keep going invisibly
-        until the video ends.
+        Clears the stored widget references (matching
+        `CalibrationSummaryWindow._on_close`'s reasoning) - the next
+        `ensure_window` call needs to know the widgets no longer exist
+        and must rebuild them, rather than holding onto references to
+        already-destroyed widgets. Also disables the Space capture
+        shortcuts (so Space goes back to doing nothing once this window
+        isn't open), and requests any running auto-scan stop -
+        `self.win` becomes None right after this, and `_poll_scan_queue`
+        refuses to touch a None window, so a scan left running with no
+        window to report progress to would otherwise just keep going
+        invisibly until the video ends.
 
         Returns:
             None
         """
-        self.app.root.unbind("<space>")
+        if self._space_shortcut_win is not None:
+            self._space_shortcut_win.setEnabled(False)
+            self._space_shortcut_win = None
+        if self._space_shortcut_app is not None:
+            self._space_shortcut_app.setEnabled(False)
+            self._space_shortcut_app = None
+
         self._scan_stop_requested = True
 
-        self.win.destroy()
         self.win = None
-        self.folder_var = None
-        self.status_var = None
-        self.pairs_listbox = None
+        self.folder_label = None
+        self.status_label = None
+        self.pairs_list = None
         self.auto_scan_button = None
-        self.board_type_var = None
-        self.checkerboard_square_size_var = None
-        self.checkerboard_squares_x_var = None
-        self.checkerboard_squares_y_var = None
-        self.charuco_squares_x_var = None
-        self.charuco_squares_y_var = None
-        self.charuco_square_size_var = None
-        self.charuco_marker_size_var = None
+        self.board_type_combo = None
+        self.checkerboard_square_size_edit = None
+        self.checkerboard_squares_x_edit = None
+        self.checkerboard_squares_y_edit = None
+        self.charuco_squares_x_edit = None
+        self.charuco_squares_y_edit = None
+        self.charuco_square_size_edit = None
+        self.charuco_marker_size_edit = None
         self.checkerboard_row = None
         self.charuco_row = None
 
@@ -789,105 +808,64 @@ class PerformCalibrationWindow:
         Returns:
             None
         """
-
-        # If the window already exists, bring it to the front and reuse it
-        # instead of creating a duplicate window.
         if self.win is not None:
-            try:
-                self.win.lift()
-                return
+            self.win.show()
+            self.win.raise_()
+            self.win.activateWindow()
+            return
 
-            # If the stored window reference is stale, clear it so a new
-            # window can be created below.
-            except Exception:
-                self.win = None
+        win = ClosableDialog(self._on_close)
+        win.setWindowTitle(self.app._app_window_title())
+        win.resize(600, 560)
 
-        # Create a separate top level window owned by the main application root.
-        win = tk.Toplevel(self.app.root)
-
-        # Match the main window's project-aware title, same as the other
-        # sub-windows.
-        win.title(self.app._app_window_title())
-
-        # Give the window an initial size large enough for the folder row,
-        # capture/calibration buttons, and pairs list without feeling
-        # cramped.
-        win.geometry("600x560")
-
-        # Use the cleanup callback when the user closes this window.
-        win.protocol("WM_DELETE_WINDOW", self._on_close)
-
-        # Create one padded outer frame to hold all of this window's content.
-        outer = ttk.Frame(win, padding=(10, 10))
-        outer.grid(row=0, column=0, sticky="nsew")
-
-        # Let the outer frame expand with the window.
-        win.grid_rowconfigure(0, weight=1)
-        win.grid_columnconfigure(0, weight=1)
-        outer.grid_columnconfigure(0, weight=1)
+        outer = QVBoxLayout(win)
 
         # ---- Heading ----
-        ttk.Label(
-            outer,
-            text="Perform Calibration — capture frame pairs",
-            font=("Segoe UI", 11, "bold"),
-        ).grid(row=0, column=0, sticky="w")
+        heading = QLabel("Perform Calibration — capture frame pairs")
+        heading.setStyleSheet("font-weight: bold;")
+        outer.addWidget(heading)
 
         # ---- Capture folder row ----
-        # Shows the currently chosen capture folder (or a placeholder if
-        # none has been chosen yet), plus the button to choose/create one.
-        folder_row = ttk.Frame(outer)
-        folder_row.grid(row=1, column=0, sticky="ew", pady=(10, 0))
-        folder_row.grid_columnconfigure(0, weight=1)
-
-        self.folder_var = tk.StringVar(value=self.capture_folder or "(no capture folder chosen yet)")
-        ttk.Label(folder_row, textvariable=self.folder_var, anchor="w").grid(row=0, column=0, sticky="ew")
-        ttk.Button(
-            folder_row,
-            text="Choose Folder…",
-            command=self.on_choose_capture_folder,
-        ).grid(row=0, column=1, padx=(8, 0))
+        folder_row = QHBoxLayout()
+        self.folder_label = QLabel(self.capture_folder or "(no capture folder chosen yet)")
+        folder_row.addWidget(self.folder_label, stretch=1)
+        choose_folder_button = QPushButton("Choose Folder…")
+        choose_folder_button.clicked.connect(self.on_choose_capture_folder)
+        folder_row.addWidget(choose_folder_button)
+        outer.addLayout(folder_row)
 
         # ---- Capture/delete buttons ----
         # Deliberately don't disable themselves based on whether a folder is
         # chosen yet, videos are loaded, or a pair is selected -
         # on_capture_frame_pair/on_delete_selected_pair already report
-        # exactly what's missing via a messagebox, which reads more clearly
+        # exactly what's missing via a message box, which reads more clearly
         # than a greyed-out button with no explanation attached.
-        button_row = ttk.Frame(outer)
-        button_row.grid(row=2, column=0, sticky="w", pady=(10, 0))
+        button_row = QHBoxLayout()
+        capture_button = QPushButton("Capture Frame Pair")
+        capture_button.clicked.connect(self.on_capture_frame_pair)
+        button_row.addWidget(capture_button)
 
-        ttk.Button(
-            button_row,
-            text="Capture Frame Pair",
-            command=self.on_capture_frame_pair,
-        ).grid(row=0, column=0)
-        ttk.Button(
-            button_row,
-            text="Delete Selected Pair",
-            command=self.on_delete_selected_pair,
-        ).grid(row=0, column=1, padx=(8, 0))
+        delete_button = QPushButton("Delete Selected Pair")
+        delete_button.clicked.connect(self.on_delete_selected_pair)
+        button_row.addWidget(delete_button)
 
         # Single button that toggles between starting and stopping the
         # auto-scan - see on_auto_scan_for_candidates/on_stop_scan.
-        self.auto_scan_button = ttk.Button(
-            button_row,
-            text="Auto-Scan for Candidates",
-            command=self.on_auto_scan_for_candidates,
-        )
-        self.auto_scan_button.grid(row=0, column=2, padx=(8, 0))
+        self.auto_scan_button = QPushButton("Auto-Scan for Candidates")
+        self.auto_scan_button.clicked.connect(self.on_auto_scan_for_candidates)
+        button_row.addWidget(self.auto_scan_button)
+        button_row.addStretch(1)
+        outer.addLayout(button_row)
 
-        ttk.Label(
-            outer,
-            text=(
-                "Tip: press Space to capture without reaching for the button. Double-click a pair "
-                "below to jump the video back to it. Auto-Scan samples every "
-                f"{AUTO_SCAN_FRAME_STRIDE} frames looking for a checkerboard/ChArUco board and "
-                "captures whatever it finds - review the results below and delete any you don't want."
-            ),
-            foreground="#555555",
-            wraplength=520,
-        ).grid(row=3, column=0, sticky="w", pady=(6, 0))
+        tip_label = QLabel(
+            "Tip: press Space to capture without reaching for the button. Double-click a pair "
+            "below to jump the video back to it. Auto-Scan samples every "
+            f"{AUTO_SCAN_FRAME_STRIDE} frames looking for a checkerboard/ChArUco board and "
+            "captures whatever it finds - review the results below and delete any you don't want."
+        )
+        tip_label.setWordWrap(True)
+        tip_label.setStyleSheet("color: #8ea2c6;")
+        outer.addWidget(tip_label)
 
         # ---- Calibration row ----
         # Board type (a run needs one consistent type - see this module's
@@ -895,100 +873,79 @@ class PerformCalibrationWindow:
         # math (Step 2). Choosing a board type here shows that type's own
         # size/dimension fields below (checkerboard_row/charuco_row) and
         # hides the other - see _on_board_type_changed.
-        calibration_row = ttk.Frame(outer)
-        calibration_row.grid(row=4, column=0, sticky="w", pady=(10, 0))
+        calibration_row = QHBoxLayout()
+        calibration_row.addWidget(QLabel("Board type:"))
+        self.board_type_combo = QComboBox()
+        self.board_type_combo.addItems(["Checkerboard", "ChArUco"])
+        self.board_type_combo.currentTextChanged.connect(lambda _text: self._on_board_type_changed())
+        calibration_row.addWidget(self.board_type_combo)
 
-        ttk.Label(calibration_row, text="Board type:").grid(row=0, column=0)
-        self.board_type_var = tk.StringVar(value="Checkerboard")
-        board_type_combo = ttk.Combobox(
-            calibration_row,
-            textvariable=self.board_type_var,
-            values=["Checkerboard", "ChArUco"],
-            width=12,
-            state="readonly",
-        )
-        board_type_combo.grid(row=0, column=1, padx=(4, 12))
-        board_type_combo.bind("<<ComboboxSelected>>", lambda event: self._on_board_type_changed())
-
-        ttk.Button(
-            calibration_row,
-            text="Run Calibration",
-            command=self.on_run_calibration,
-        ).grid(row=0, column=2)
+        run_calibration_button = QPushButton("Run Calibration")
+        run_calibration_button.clicked.connect(self.on_run_calibration)
+        calibration_row.addWidget(run_calibration_button)
+        calibration_row.addStretch(1)
+        outer.addLayout(calibration_row)
 
         # A plain checkerboard has no marker IDs to encode its own
         # dimensions, so its size has to be set here, matching whatever
-        # physical board is actually in use. Gridded onto the same row as
-        # charuco_row below - only one of the two is ever visible at a
-        # time, toggled by _on_board_type_changed.
-        self.checkerboard_row = ttk.Frame(outer)
-        self.checkerboard_row.grid(row=5, column=0, sticky="w", pady=(6, 0))
+        # physical board is actually in use. Only one of checkerboard_row/
+        # charuco_row is ever visible at a time - see _on_board_type_changed.
+        self.checkerboard_row = QWidget()
+        checkerboard_layout = QHBoxLayout(self.checkerboard_row)
+        checkerboard_layout.setContentsMargins(0, 0, 0, 0)
 
-        ttk.Label(self.checkerboard_row, text="Checkerboard squares (columns x rows):").grid(row=0, column=0)
-        self.checkerboard_squares_x_var = tk.StringVar(value=str(DEFAULT_CHECKERBOARD_SQUARES_X))
-        ttk.Entry(self.checkerboard_row, textvariable=self.checkerboard_squares_x_var, width=4).grid(
-            row=0, column=1, padx=(4, 2)
-        )
-        ttk.Label(self.checkerboard_row, text="x").grid(row=0, column=2)
-        self.checkerboard_squares_y_var = tk.StringVar(value=str(DEFAULT_CHECKERBOARD_SQUARES_Y))
-        ttk.Entry(self.checkerboard_row, textvariable=self.checkerboard_squares_y_var, width=4).grid(
-            row=0, column=3, padx=(2, 12)
-        )
+        checkerboard_layout.addWidget(QLabel("Checkerboard squares (columns x rows):"))
+        self.checkerboard_squares_x_edit = QLineEdit(str(DEFAULT_CHECKERBOARD_SQUARES_X))
+        self.checkerboard_squares_x_edit.setFixedWidth(45)
+        checkerboard_layout.addWidget(self.checkerboard_squares_x_edit)
+        checkerboard_layout.addWidget(QLabel("x"))
+        self.checkerboard_squares_y_edit = QLineEdit(str(DEFAULT_CHECKERBOARD_SQUARES_Y))
+        self.checkerboard_squares_y_edit.setFixedWidth(45)
+        checkerboard_layout.addWidget(self.checkerboard_squares_y_edit)
 
-        ttk.Label(self.checkerboard_row, text="Square size (mm):").grid(row=0, column=4)
-        self.checkerboard_square_size_var = tk.StringVar(value=str(DEFAULT_CHECKERBOARD_SQUARE_SIZE_MM))
-        ttk.Entry(self.checkerboard_row, textvariable=self.checkerboard_square_size_var, width=8).grid(
-            row=0, column=5, padx=(4, 0)
-        )
+        checkerboard_layout.addWidget(QLabel("Square size (mm):"))
+        self.checkerboard_square_size_edit = QLineEdit(str(DEFAULT_CHECKERBOARD_SQUARE_SIZE_MM))
+        self.checkerboard_square_size_edit.setFixedWidth(70)
+        checkerboard_layout.addWidget(self.checkerboard_square_size_edit)
+        checkerboard_layout.addStretch(1)
+        outer.addWidget(self.checkerboard_row)
 
         # ChArUco's own size/dimension/marker fields - see this module's
         # docstring for why ChArUco's geometry is user-set too, not fixed.
-        self.charuco_row = ttk.Frame(outer)
-        self.charuco_row.grid(row=5, column=0, sticky="w", pady=(6, 0))
+        self.charuco_row = QWidget()
+        charuco_layout = QHBoxLayout(self.charuco_row)
+        charuco_layout.setContentsMargins(0, 0, 0, 0)
 
-        ttk.Label(self.charuco_row, text="ChArUco squares (columns x rows):").grid(row=0, column=0)
-        self.charuco_squares_x_var = tk.StringVar(value=str(DEFAULT_CHARUCO_SQUARES_X))
-        ttk.Entry(self.charuco_row, textvariable=self.charuco_squares_x_var, width=4).grid(
-            row=0, column=1, padx=(4, 2)
-        )
-        ttk.Label(self.charuco_row, text="x").grid(row=0, column=2)
-        self.charuco_squares_y_var = tk.StringVar(value=str(DEFAULT_CHARUCO_SQUARES_Y))
-        ttk.Entry(self.charuco_row, textvariable=self.charuco_squares_y_var, width=4).grid(
-            row=0, column=3, padx=(2, 12)
-        )
+        charuco_layout.addWidget(QLabel("ChArUco squares (columns x rows):"))
+        self.charuco_squares_x_edit = QLineEdit(str(DEFAULT_CHARUCO_SQUARES_X))
+        self.charuco_squares_x_edit.setFixedWidth(45)
+        charuco_layout.addWidget(self.charuco_squares_x_edit)
+        charuco_layout.addWidget(QLabel("x"))
+        self.charuco_squares_y_edit = QLineEdit(str(DEFAULT_CHARUCO_SQUARES_Y))
+        self.charuco_squares_y_edit.setFixedWidth(45)
+        charuco_layout.addWidget(self.charuco_squares_y_edit)
 
-        ttk.Label(self.charuco_row, text="Square (mm):").grid(row=0, column=4)
-        self.charuco_square_size_var = tk.StringVar(value=str(DEFAULT_CHARUCO_SQUARE_SIZE_MM))
-        ttk.Entry(self.charuco_row, textvariable=self.charuco_square_size_var, width=6).grid(
-            row=0, column=5, padx=(4, 12)
-        )
+        charuco_layout.addWidget(QLabel("Square (mm):"))
+        self.charuco_square_size_edit = QLineEdit(str(DEFAULT_CHARUCO_SQUARE_SIZE_MM))
+        self.charuco_square_size_edit.setFixedWidth(55)
+        charuco_layout.addWidget(self.charuco_square_size_edit)
 
-        ttk.Label(self.charuco_row, text="Marker (mm):").grid(row=0, column=6)
-        self.charuco_marker_size_var = tk.StringVar(value=str(DEFAULT_CHARUCO_MARKER_SIZE_MM))
-        ttk.Entry(self.charuco_row, textvariable=self.charuco_marker_size_var, width=6).grid(
-            row=0, column=7, padx=(4, 0)
-        )
+        charuco_layout.addWidget(QLabel("Marker (mm):"))
+        self.charuco_marker_size_edit = QLineEdit(str(DEFAULT_CHARUCO_MARKER_SIZE_MM))
+        self.charuco_marker_size_edit.setFixedWidth(55)
+        charuco_layout.addWidget(self.charuco_marker_size_edit)
+        charuco_layout.addStretch(1)
+        outer.addWidget(self.charuco_row)
 
         # ---- Captured pairs list ----
-        list_frame = ttk.Frame(outer)
-        list_frame.grid(row=6, column=0, sticky="nsew", pady=(10, 0))
-        list_frame.grid_rowconfigure(0, weight=1)
-        list_frame.grid_columnconfigure(0, weight=1)
-
-        self.pairs_listbox = tk.Listbox(list_frame)
-        self.pairs_listbox.grid(row=0, column=0, sticky="nsew")
-        self.pairs_listbox.bind("<Double-Button-1>", self.on_pair_double_clicked)
-
-        # Attach a vertical scrollbar so a long capture session stays usable.
-        pairs_scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.pairs_listbox.yview)
-        pairs_scrollbar.grid(row=0, column=1, sticky="ns")
-        self.pairs_listbox.configure(yscrollcommand=pairs_scrollbar.set)
+        self.pairs_list = QListWidget()
+        self.pairs_list.itemDoubleClicked.connect(self.on_pair_double_clicked)
+        outer.addWidget(self.pairs_list, stretch=1)
 
         # ---- Status line ----
-        self.status_var = tk.StringVar(value="")
-        ttk.Label(outer, textvariable=self.status_var, foreground="#555555").grid(
-            row=7, column=0, sticky="w", pady=(6, 0)
-        )
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("color: #8ea2c6;")
+        outer.addWidget(self.status_label)
 
         self.win = win
 
@@ -997,14 +954,12 @@ class PerformCalibrationWindow:
         # the two currently has keyboard focus - the project owner's whole
         # point is scrubbing the *main* window's video with this window
         # merely open alongside it, not needing to click back and forth.
-        # Unbound again in _on_close so Space stops doing anything once
+        # Disabled again in _on_close so Space stops doing anything once
         # this window isn't open.
-        win.bind("<space>", self._on_space_key)
-        self.app.root.bind("<space>", self._on_space_key)
-
-        # Let the captured-pairs list get the extra vertical space when the
-        # window resizes; everything above it stays a fixed height.
-        outer.grid_rowconfigure(6, weight=1)
+        self._space_shortcut_win = QShortcut(QKeySequence(Qt.Key.Key_Space), win)
+        self._space_shortcut_win.activated.connect(self._on_space_key)
+        self._space_shortcut_app = QShortcut(QKeySequence(Qt.Key.Key_Space), self.app)
+        self._space_shortcut_app.activated.connect(self._on_space_key)
 
         # Show only the settings row matching the current (default)
         # board type.
@@ -1014,59 +969,59 @@ class PerformCalibrationWindow:
         # chosen in an earlier call this session and already has captures.
         self._refresh_pairs_listbox()
 
+        win.show()
+        # Positioned only after show(), which finalizes the window's real
+        # layout-driven size rather than the initial resize() hint.
+        move_to_same_screen_as(win, self.app)
+
     def _on_board_type_changed(self):
         """Show the settings row matching the selected board type.
 
-        `self.checkerboard_row` and `self.charuco_row` are gridded onto
-        the same row - only one is ever visible at a time. Called when
-        the board type combobox changes, and once from `ensure_window`
-        to set the correct initial visibility.
+        Called when the board type combo box changes, and once from
+        `ensure_window` to set the correct initial visibility.
 
         Returns:
             None
         """
-        if self.board_type_var.get() == "Checkerboard":
-            self.charuco_row.grid_remove()
-            self.checkerboard_row.grid()
-        else:
-            self.checkerboard_row.grid_remove()
-            self.charuco_row.grid()
+        is_checkerboard = self.board_type_combo.currentText() == "Checkerboard"
+        self.checkerboard_row.setVisible(is_checkerboard)
+        self.charuco_row.setVisible(not is_checkerboard)
 
     def on_choose_capture_folder(self):
         """Choose (or create) the folder captured frame pairs get saved into.
 
-        Uses `filedialog.askdirectory`, whose native picker already
-        supports creating a new folder from within it - covering both
-        "start a brand new calibration capture session" and "add more
-        frames to a folder from an earlier session" with the same
-        dialog, no separate "New" vs. "Existing" choice needed. Refuses
-        to change folders while a scan is running, since `_run_auto_scan`
-        reads `self.capture_folder` live rather than a snapshot taken
-        when it started - switching folders mid-scan would make it
-        start writing into the new folder partway through.
+        Uses `QFileDialog.getExistingDirectory`, whose native picker
+        already supports creating a new folder from within it -
+        covering both "start a brand new calibration capture session"
+        and "add more frames to a folder from an earlier session" with
+        the same dialog, no separate "New" vs. "Existing" choice
+        needed. Refuses to change folders while a scan is running,
+        since `_run_auto_scan` reads `self.capture_folder` live rather
+        than a snapshot taken when it started - switching folders
+        mid-scan would make it start writing into the new folder
+        partway through.
 
         Returns:
             None
         """
         if self._scan_thread is not None:
-            messagebox.showerror("Perform Calibration", "Stop the current scan before choosing a different folder.")
+            QMessageBox.critical(
+                self.win, "Perform Calibration", "Stop the current scan before choosing a different folder."
+            )
             return
 
-        folder = filedialog.askdirectory(title="Choose Calibration Capture Folder")
-
-        # A cancelled dialog returns an empty string, not None - treat both
-        # as "no change" rather than clearing an already-chosen folder.
+        folder = QFileDialog.getExistingDirectory(self.win, "Choose Calibration Capture Folder")
         if not folder:
             return
 
         self.capture_folder = folder
-        self.folder_var.set(folder)
+        self.folder_label.setText(folder)
 
         # Show whatever's already captured in this folder, in case it's an
         # existing capture session being resumed rather than a brand new one.
         self._refresh_pairs_listbox()
 
-    def _on_space_key(self, _event=None):
+    def _on_space_key(self):
         """Handle the Space-bar capture shortcut.
 
         Bound to both this window and the main app window (see
@@ -1078,15 +1033,11 @@ class PerformCalibrationWindow:
         while filling in one of the main window's own text boxes (e.g.
         the real-time-sync entries) rather than also capturing a pair.
 
-        Args:
-            _event (tkinter.Event | None): The key event, unused -
-                required by Tkinter's bind signature.
-
         Returns:
             None
         """
-        focused = self.app.root.focus_get()
-        if isinstance(focused, (tk.Entry, ttk.Entry, tk.Spinbox, ttk.Spinbox)):
+        focused = QApplication.focusWidget()
+        if isinstance(focused, (QLineEdit, QAbstractSpinBox)):
             return
 
         self.on_capture_frame_pair()
@@ -1096,7 +1047,7 @@ class PerformCalibrationWindow:
 
         Requires both videos to already be loaded and a capture folder
         to already be chosen - reports exactly which is missing via a
-        messagebox rather than silently doing nothing. Reads the *raw*
+        message box rather than silently doing nothing. Reads the *raw*
         decoded frame at each pane's current index directly
         (`app._read_frame_at`), not `app.current_frameL`/
         `current_frameR`, since those may already be rectified if
@@ -1110,7 +1061,7 @@ class PerformCalibrationWindow:
             None
         """
         if self._scan_thread is not None:
-            messagebox.showerror("Perform Calibration", "A scan is already running.")
+            QMessageBox.critical(self.win, "Perform Calibration", "A scan is already running.")
             return
 
         app = self.app
@@ -1118,23 +1069,24 @@ class PerformCalibrationWindow:
         # Require both videos to actually be loaded before trying to read a
         # frame from either one.
         if not app.capL or not app.capR:
-            messagebox.showerror("Perform Calibration", "Load both the left and right videos first.")
+            QMessageBox.critical(self.win, "Perform Calibration", "Load both the left and right videos first.")
             return
 
         # Require a capture folder to already be chosen.
         if not self.capture_folder:
-            messagebox.showerror("Perform Calibration", "Choose a capture folder first.")
+            QMessageBox.critical(self.win, "Perform Calibration", "Choose a capture folder first.")
             return
 
         # Read the raw (unrectified) frame at each pane's current index.
-        left_index = int(app.left_frame_index.get())
-        right_index = int(app.right_frame_index.get())
+        left_index = int(app.left_frame_index)
+        right_index = int(app.right_frame_index)
         frame_l = app._read_frame_at(app.capL, left_index)
         frame_r = app._read_frame_at(app.capR, right_index)
 
         # Report a decode failure rather than silently saving nothing.
         if frame_l is None or frame_r is None:
-            messagebox.showerror(
+            QMessageBox.critical(
+                self.win,
                 "Perform Calibration",
                 "Could not read the current frame from one or both videos.",
             )
@@ -1163,9 +1115,9 @@ class PerformCalibrationWindow:
         # Refresh the visible pairs list and report the capture.
         self._refresh_pairs_listbox()
         pair_count = len(self._scan_capture_folder())
-        self.status_var.set(f"Captured pair {next_id:0{PAIR_ID_DIGITS}d} ({pair_count} total)")
+        self.status_label.setText(f"Captured pair {next_id:0{PAIR_ID_DIGITS}d} ({pair_count} total)")
 
-    def on_pair_double_clicked(self, _event=None):
+    def on_pair_double_clicked(self, _item=None):
         """Jump the main window's video back to a double-clicked pair's frame.
 
         Reads the selected pair's frame indices from
@@ -1176,25 +1128,27 @@ class PerformCalibrationWindow:
         jump logic.
 
         Args:
-            _event (tkinter.Event | None): The double-click event,
-                unused - required by Tkinter's bind signature.
+            _item (QListWidgetItem | None): The double-clicked item,
+                unused - `self.pairs_list.currentRow()` is read directly
+                instead so this can also be called from tests without
+                needing a real item.
 
         Returns:
             None
         """
-        selection = self.pairs_listbox.curselection()
-        if not selection:
+        selected_index = self.pairs_list.currentRow()
+        if selected_index < 0:
             return
 
         pairs = self._scan_capture_folder()
-        selected_index = selection[0]
         if selected_index >= len(pairs):
             return
         pair_id, _left_filename, _right_filename = pairs[selected_index]
 
         entry = self._load_metadata().get(str(pair_id))
         if entry is None:
-            messagebox.showerror(
+            QMessageBox.critical(
+                self.win,
                 "Perform Calibration",
                 "No saved frame position for this pair (it may have been added outside this window).",
             )
@@ -1204,53 +1158,53 @@ class PerformCalibrationWindow:
         left_index = int(entry["left_frame_index"])
         right_index = int(entry["right_frame_index"])
 
-        app.left_frame_index.set(left_index)
-        app.right_frame_index.set(right_index)
+        app.left_frame_index = left_index
+        app.right_frame_index = right_index
 
         # Move the slider widgets to match without re-triggering their own
         # lock-offset jump logic.
         app._suppress_slider_callbacks = True
         try:
-            app.left_slider.set(left_index)
-            app.right_slider.set(right_index)
+            app.left_slider.setValue(left_index)
+            app.right_slider.setValue(right_index)
         finally:
             app._suppress_slider_callbacks = False
 
         app._update_frame_labels()
-        app._render_current_frames()
+        app.render_current_frames()
 
     def on_delete_selected_pair(self):
         """Delete the selected captured pair's image files and metadata.
 
-        Asks for confirmation first (`messagebox.askyesno`), since this
-        permanently removes files from disk rather than something
-        recoverable within the app itself. Refused while an auto-scan
-        is running - see `on_choose_capture_folder`'s docstring for why.
+        Asks for confirmation first, since this permanently removes
+        files from disk rather than something recoverable within the
+        app itself. Refused while an auto-scan is running - see
+        `on_choose_capture_folder`'s docstring for why.
 
         Returns:
             None
         """
         if self._scan_thread is not None:
-            messagebox.showerror("Perform Calibration", "Stop the current scan before deleting a pair.")
+            QMessageBox.critical(self.win, "Perform Calibration", "Stop the current scan before deleting a pair.")
             return
 
-        selection = self.pairs_listbox.curselection()
-        if not selection:
-            messagebox.showerror("Perform Calibration", "Select a captured pair to delete first.")
+        selected_index = self.pairs_list.currentRow()
+        if selected_index < 0:
+            QMessageBox.critical(self.win, "Perform Calibration", "Select a captured pair to delete first.")
             return
 
         pairs = self._scan_capture_folder()
-        selected_index = selection[0]
         if selected_index >= len(pairs):
             return
         pair_id, left_filename, right_filename = pairs[selected_index]
 
-        confirmed = messagebox.askyesno(
+        confirmed = QMessageBox.question(
+            self.win,
             "Perform Calibration",
             f"Delete captured pair {pair_id:0{PAIR_ID_DIGITS}d}? This removes both image files "
             "and can't be undone.",
         )
-        if not confirmed:
+        if confirmed != QMessageBox.StandardButton.Yes:
             return
 
         for filename in (left_filename, right_filename):
@@ -1264,7 +1218,7 @@ class PerformCalibrationWindow:
 
         self._refresh_pairs_listbox()
         pair_count = len(self._scan_capture_folder())
-        self.status_var.set(f"Deleted pair {pair_id:0{PAIR_ID_DIGITS}d} ({pair_count} total)")
+        self.status_label.setText(f"Deleted pair {pair_id:0{PAIR_ID_DIGITS}d} ({pair_count} total)")
 
     def on_auto_scan_for_candidates(self):
         """Start (or stop) a background scan for calibration candidate frames.
@@ -1291,15 +1245,15 @@ class PerformCalibrationWindow:
         app = self.app
 
         if not app.left_video_path or not app.right_video_path:
-            messagebox.showerror("Perform Calibration", "Load both the left and right videos first.")
+            QMessageBox.critical(self.win, "Perform Calibration", "Load both the left and right videos first.")
             return
 
         if not self.capture_folder:
-            messagebox.showerror("Perform Calibration", "Choose a capture folder first.")
+            QMessageBox.critical(self.win, "Perform Calibration", "Choose a capture folder first.")
             return
 
         # The scan always tries both checkerboard and ChArUco detection
-        # regardless of self.board_type_var (see
+        # regardless of self.board_type_combo (see
         # frame_has_calibration_board), so it needs valid settings for
         # *both* board types even though only one is actually selected
         # for the eventual calibration run.
@@ -1328,9 +1282,9 @@ class PerformCalibrationWindow:
         )
         self._scan_thread.start()
 
-        self.auto_scan_button.config(text="Stop Scan")
-        self.status_var.set("Scanning…")
-        self.win.after(100, self._poll_scan_queue)
+        self.auto_scan_button.setText("Stop Scan")
+        self.status_label.setText("Scanning…")
+        self._poll_timer.start(100)
 
     def on_stop_scan(self):
         """Request the running auto-scan stop early, at its next sampled frame.
@@ -1344,7 +1298,7 @@ class PerformCalibrationWindow:
             None
         """
         self._scan_stop_requested = True
-        self.status_var.set("Stopping scan…")
+        self.status_label.setText("Stopping scan…")
 
     def _run_auto_scan(
         self,
@@ -1357,12 +1311,12 @@ class PerformCalibrationWindow:
     ):
         """Background worker: scan both videos for calibration candidate frames.
 
-        Runs on a separate thread from the Tk main loop - see this
+        Runs on a separate thread from the Qt main loop - see this
         module's docstring for why it opens its own fresh
         `cv2.VideoCapture`s instead of reusing `app.capL`/`app.capR`,
         and why it posts messages onto `self._scan_queue` rather than
-        updating any Tkinter widget directly (`_poll_scan_queue` does
-        that, on the main thread). Saves each detected candidate pair
+        updating any Qt widget directly (`_poll_scan_queue` does that,
+        on the main thread). Saves each detected candidate pair
         immediately (same file/metadata writes `on_capture_frame_pair`
         does) rather than collecting them all and saving at the end -
         see this module's docstring for why manual capture/deletion are
@@ -1379,8 +1333,8 @@ class PerformCalibrationWindow:
                 rows)` of checkerboard inner corners to look for - see
                 `frame_has_checkerboard`. Passed in from
                 `on_auto_scan_for_candidates` (already parsed/validated
-                there) rather than read from `self` directly, since Tk
-                variables aren't safe to read from a background thread.
+                there) rather than read from `self` directly, since Qt
+                widgets aren't safe to read from a background thread.
             charuco_settings (tuple[int, int, float, float]): The
                 `(squares_x, squares_y, square_size_mm, marker_size_mm)`
                 ChArUco board geometry to look for - see
@@ -1442,10 +1396,10 @@ class PerformCalibrationWindow:
     def _poll_scan_queue(self):
         """Drain the scan progress queue and refresh the UI on the main thread.
 
-        Rescheduled via `Tk.after` every 100ms while a scan is running -
-        the standard safe way to let a background thread's results
-        reach Tkinter widgets, since Tkinter itself must only be
-        touched from the main thread. Stops rescheduling itself once
+        Rescheduled via `self._poll_timer` every 100ms while a scan is
+        running - the standard safe way to let a background thread's
+        results reach Qt widgets, since Qt widgets themselves must only
+        be touched from the main thread. Stops rescheduling itself once
         the scan reports it's done, or if this window has been closed
         in the meantime (`self.win` is None).
 
@@ -1465,20 +1419,20 @@ class PerformCalibrationWindow:
             kind = message[0]
             if kind == "progress":
                 _kind, left_index, left_frame_max, found_count = message
-                self.status_var.set(f"Scanning… frame {left_index}/{left_frame_max}, {found_count} found")
+                self.status_label.setText(f"Scanning… frame {left_index}/{left_frame_max}, {found_count} found")
                 self._refresh_pairs_listbox()
             elif kind == "done":
                 _kind, found_count = message
-                self.status_var.set(f"Scan finished — {found_count} candidate pair(s) found")
+                self.status_label.setText(f"Scan finished — {found_count} candidate pair(s) found")
                 finished = True
 
         if finished:
             self._scan_thread = None
             self._scan_queue = None
-            self.auto_scan_button.config(text="Auto-Scan for Candidates")
+            self.auto_scan_button.setText("Auto-Scan for Candidates")
             return
 
-        self.win.after(100, self._poll_scan_queue)
+        self._poll_timer.start(100)
 
     def _parse_checkerboard_settings(self):
         """Parse and validate the checkerboard squares/size fields.
@@ -1487,35 +1441,39 @@ class PerformCalibrationWindow:
         and `on_auto_scan_for_candidates` (only needs the inner-corner
         count, to know what to look for - checkerboard is one of two
         detectors the scan always tries, regardless of
-        `self.board_type_var`, so it needs valid squares even when a
+        `self.board_type_combo`, so it needs valid squares even when a
         ChArUco run is what's actually selected).
 
         Returns:
             tuple[tuple[int, int], float] | None: `((inner_columns,
             inner_rows), square_size_mm)` if every field is valid. If
-            any field isn't, an error messagebox is shown and this
+            any field isn't, an error message box is shown and this
             returns None - callers just need to return early in that
             case, not show their own error too.
         """
         try:
-            squares_x = int(self.checkerboard_squares_x_var.get())
-            squares_y = int(self.checkerboard_squares_y_var.get())
+            squares_x = int(self.checkerboard_squares_x_edit.text())
+            squares_y = int(self.checkerboard_squares_y_edit.text())
         except ValueError:
-            messagebox.showerror("Perform Calibration", "Enter valid whole numbers for the checkerboard's squares.")
+            QMessageBox.critical(
+                self.win, "Perform Calibration", "Enter valid whole numbers for the checkerboard's squares."
+            )
             return None
 
         if squares_x < 2 or squares_y < 2:
-            messagebox.showerror("Perform Calibration", "Checkerboard squares must be at least 2 in each direction.")
+            QMessageBox.critical(
+                self.win, "Perform Calibration", "Checkerboard squares must be at least 2 in each direction."
+            )
             return None
 
         try:
-            square_size_mm = float(self.checkerboard_square_size_var.get())
+            square_size_mm = float(self.checkerboard_square_size_edit.text())
         except ValueError:
-            messagebox.showerror("Perform Calibration", "Enter a valid checkerboard square size in millimeters.")
+            QMessageBox.critical(self.win, "Perform Calibration", "Enter a valid checkerboard square size in millimeters.")
             return None
 
         if square_size_mm <= 0:
-            messagebox.showerror("Perform Calibration", "Checkerboard square size must be greater than zero.")
+            QMessageBox.critical(self.win, "Perform Calibration", "Checkerboard square size must be greater than zero.")
             return None
 
         # findChessboardCorners/calibrateCamera work in inner corners, one
@@ -1529,43 +1487,43 @@ class PerformCalibrationWindow:
 
         Shared by `on_run_calibration` and `on_auto_scan_for_candidates`
         (ChArUco is one of two detectors the scan always tries,
-        regardless of `self.board_type_var`, so it needs valid settings
-        even when a checkerboard run is what's actually selected) -
-        mirrors `_parse_checkerboard_settings`.
+        regardless of `self.board_type_combo`, so it needs valid
+        settings even when a checkerboard run is what's actually
+        selected) - mirrors `_parse_checkerboard_settings`.
 
         Returns:
             tuple[int, int, float, float] | None: `(squares_x, squares_y,
             square_size_mm, marker_size_mm)` if every field is valid. If
-            any field isn't, an error messagebox is shown and this
+            any field isn't, an error message box is shown and this
             returns None - callers just need to return early in that
             case, not show their own error too.
         """
         try:
-            squares_x = int(self.charuco_squares_x_var.get())
-            squares_y = int(self.charuco_squares_y_var.get())
+            squares_x = int(self.charuco_squares_x_edit.text())
+            squares_y = int(self.charuco_squares_y_edit.text())
         except ValueError:
-            messagebox.showerror("Perform Calibration", "Enter valid whole numbers for the ChArUco board's squares.")
-            return None
-
-        if squares_x < 2 or squares_y < 2:
-            messagebox.showerror("Perform Calibration", "ChArUco squares must be at least 2 in each direction.")
-            return None
-
-        try:
-            square_size_mm = float(self.charuco_square_size_var.get())
-            marker_size_mm = float(self.charuco_marker_size_var.get())
-        except ValueError:
-            messagebox.showerror(
-                "Perform Calibration", "Enter valid ChArUco square/marker sizes in millimeters."
+            QMessageBox.critical(
+                self.win, "Perform Calibration", "Enter valid whole numbers for the ChArUco board's squares."
             )
             return None
 
+        if squares_x < 2 or squares_y < 2:
+            QMessageBox.critical(self.win, "Perform Calibration", "ChArUco squares must be at least 2 in each direction.")
+            return None
+
+        try:
+            square_size_mm = float(self.charuco_square_size_edit.text())
+            marker_size_mm = float(self.charuco_marker_size_edit.text())
+        except ValueError:
+            QMessageBox.critical(self.win, "Perform Calibration", "Enter valid ChArUco square/marker sizes in millimeters.")
+            return None
+
         if square_size_mm <= 0 or marker_size_mm <= 0:
-            messagebox.showerror("Perform Calibration", "ChArUco square/marker sizes must be greater than zero.")
+            QMessageBox.critical(self.win, "Perform Calibration", "ChArUco square/marker sizes must be greater than zero.")
             return None
 
         if marker_size_mm >= square_size_mm:
-            messagebox.showerror("Perform Calibration", "ChArUco marker size must be smaller than the square size.")
+            QMessageBox.critical(self.win, "Perform Calibration", "ChArUco marker size must be smaller than the square size.")
             return None
 
         return squares_x, squares_y, square_size_mm, marker_size_mm
@@ -1575,7 +1533,7 @@ class PerformCalibrationWindow:
 
         Detects board points in every pair currently in the capture
         folder, using whichever single board type is selected
-        (`self.board_type_var`) - not auto-detected per pair, see this
+        (`self.board_type_combo`) - not auto-detected per pair, see this
         module's docstring for why a run needs one consistent type.
         Pairs where detection fails on either side (or, for ChArUco,
         where fewer than 4 corner IDs are shared between the two sides)
@@ -1589,19 +1547,19 @@ class PerformCalibrationWindow:
             None
         """
         if self._scan_thread is not None:
-            messagebox.showerror("Perform Calibration", "Stop the current scan before running calibration.")
+            QMessageBox.critical(self.win, "Perform Calibration", "Stop the current scan before running calibration.")
             return
 
         if not self.capture_folder:
-            messagebox.showerror("Perform Calibration", "Choose a capture folder first.")
+            QMessageBox.critical(self.win, "Perform Calibration", "Choose a capture folder first.")
             return
 
         pairs = self._scan_capture_folder()
         if not pairs:
-            messagebox.showerror("Perform Calibration", "No captured pairs to calibrate from.")
+            QMessageBox.critical(self.win, "Perform Calibration", "No captured pairs to calibrate from.")
             return
 
-        board_type = self.board_type_var.get()
+        board_type = self.board_type_combo.currentText()
 
         if board_type == "Checkerboard":
             parsed_settings = self._parse_checkerboard_settings()
@@ -1669,7 +1627,8 @@ class PerformCalibrationWindow:
                 right_image_points_list.append(right_points)
 
         if len(object_points_list) < 3:
-            messagebox.showerror(
+            QMessageBox.critical(
+                self.win,
                 "Perform Calibration",
                 f"Only {len(object_points_list)} usable pair(s) out of {len(pairs)} - at least 3 are "
                 "needed. Capture more pairs with the board clearly visible in both frames.",
@@ -1681,16 +1640,17 @@ class PerformCalibrationWindow:
                 object_points_list, left_image_points_list, right_image_points_list, image_size, self.capture_folder
             )
         except ValueError as e:
-            messagebox.showerror("Perform Calibration", str(e))
+            QMessageBox.critical(self.win, "Perform Calibration", str(e))
             return
 
         skipped_note = f", {skipped_pair_count} skipped" if skipped_pair_count else ""
-        self.status_var.set(
+        self.status_label.setText(
             f"Calibration saved — stereo RMS {result['stereo_rms']:.3f} "
             f"(left {result['left_rms']:.3f}, right {result['right_rms']:.3f}), "
             f"{result['valid_pair_count']} pair(s) used{skipped_note}"
         )
-        messagebox.showinfo(
+        QMessageBox.information(
+            self.win,
             "Perform Calibration",
             f"Calibration saved to:\n{self.capture_folder}\n\n"
             f"Stereo RMS: {result['stereo_rms']:.4f}\n"
@@ -1758,7 +1718,7 @@ class PerformCalibrationWindow:
         return highest_id + 1
 
     def _refresh_pairs_listbox(self):
-        """Repopulate the captured-pairs listbox from the capture folder.
+        """Repopulate the captured-pairs list from the capture folder.
 
         Re-scans the folder from disk every time (via
         `_scan_capture_folder`) rather than tracking captures in memory,
@@ -1768,9 +1728,9 @@ class PerformCalibrationWindow:
         Returns:
             None
         """
-        if self.pairs_listbox is None:
+        if self.pairs_list is None:
             return
 
-        self.pairs_listbox.delete(0, "end")
+        self.pairs_list.clear()
         for _pair_id, left_filename, right_filename in self._scan_capture_folder():
-            self.pairs_listbox.insert("end", f"{left_filename}   /   {right_filename}")
+            self.pairs_list.addItem(f"{left_filename}   /   {right_filename}")

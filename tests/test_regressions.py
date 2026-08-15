@@ -6,7 +6,7 @@ import anaglyph_preview
 import calibration_summary
 
 
-def test_calibration_window_close_then_update_does_not_crash(hidden_tk_root, make_fake_app):
+def test_calibration_window_close_then_update_does_not_crash(qapp, make_fake_app):
     """FINDINGS.md #1: closing the calibration summary window used to
     leave cal_win/cal_tree/cal_copy_text pointing at destroyed widgets
     (because the nested _on_close closure was missing its own `global`
@@ -19,19 +19,19 @@ def test_calibration_window_close_then_update_does_not_crash(hidden_tk_root, mak
     behavior still works as intended.
     """
 
-    app = make_fake_app(root=hidden_tk_root, cal=None)
+    app = make_fake_app(cal=None)
     win = calibration_summary.CalibrationSummaryWindow(app)
 
     win.ensure_window()
     assert win.win is not None
-    assert win.tree is not None
+    assert win.table is not None
 
     # Simulate the user closing the window — the same callback the real
-    # WM_DELETE_WINDOW protocol triggers.
+    # closeEvent triggers.
     win._on_close()
 
     assert win.win is None
-    assert win.tree is None
+    assert win.table is None
     assert win.copy_text is None
 
     # Should just no-op (app.cal is also None).
@@ -60,23 +60,22 @@ def test_stop_anaglyph_preview_without_prior_tick_does_not_raise(make_fake_app):
     assert preview.active is False
 
 
-def test_on_app_close_with_active_anaglyph_preview_does_not_raise(sizeamatic_app):
+def test_on_app_close_with_active_anaglyph_preview_does_not_raise(qapp):
     """FINDINGS.md #3: `on_app_close` used to call
     `anaglyph_preview.stop_anaglyph_preview()` with no `app` argument,
     raising TypeError whenever the anaglyph preview was open at the
     moment the app closed.
 
-    That failure mode is now structurally impossible: `on_app_close` calls
-    `self.anaglyph_preview.stop()`, a bound method that always has access
-    to the right app — there's no separate argument to forget to pass.
+    That failure mode is now structurally impossible: the Qt port's
+    `closeEvent` (the `on_app_close` equivalent) calls
+    `self.anaglyph_preview.stop()`, a bound method that always has
+    access to the right app — there's no separate argument to forget
+    to pass.
     """
+    import main
+    from PySide6.QtGui import QCloseEvent
 
-    sizeamatic_app.anaglyph_preview.active = True
+    app = main.SizeamaticProApp()
+    app.anaglyph_preview.active = True
 
-    # on_app_close's real job here is calling self.anaglyph_preview.stop()
-    # correctly — not tearing down the session's shared Tk root, which
-    # Tcl/Tk doesn't reliably support doing repeatedly within one process
-    # (see hidden_tk_root's docstring). Patch out just the final destroy.
-    sizeamatic_app.root.destroy = lambda: None
-
-    sizeamatic_app.on_app_close()  # should not raise TypeError
+    app.closeEvent(QCloseEvent())  # should not raise TypeError
