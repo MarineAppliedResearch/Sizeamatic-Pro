@@ -38,14 +38,16 @@ app.
 import ctypes
 import datetime
 import os
+import signal
 import sys
 import time
 import tomllib
 
 import cv2
+import qtawesome as qta
 from PIL import Image
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QSize, QTimer, Qt
 from PySide6.QtGui import QAction, QCursor, QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -208,6 +210,11 @@ def _show_startup_splash():
     splash.show()
     return splash
 
+
+ICON_COLOR = "#e8eefc"
+"""Toolbar icon color - matches DARK_QSS's primary text color, so
+qtawesome-rendered Font Awesome icons (`qta.icon(name, color=ICON_COLOR)`)
+read consistently with the surrounding button/label text."""
 
 ZOOM_MIN = 1.0
 ZOOM_MAX = 10.0
@@ -554,14 +561,23 @@ class SizeamaticProApp(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        self.btn_to_start = QPushButton("⏮")
-        self.btn_step_back = QPushButton("◀")
-        self.btn_play_pause = QPushButton("⏯")
-        self.btn_step_forward = QPushButton("▶")
-        self.btn_to_end = QPushButton("⏭")
+        icon_size = QSize(18, 18)
+
+        self.btn_to_start = QPushButton()
+        self.btn_to_start.setIcon(qta.icon("fa5s.fast-backward", color=ICON_COLOR))
+        self.btn_step_back = QPushButton()
+        self.btn_step_back.setIcon(qta.icon("fa5s.step-backward", color=ICON_COLOR))
+        self.btn_play_pause = QPushButton()
+        self.btn_step_forward = QPushButton()
+        self.btn_step_forward.setIcon(qta.icon("fa5s.step-forward", color=ICON_COLOR))
+        self.btn_to_end = QPushButton()
+        self.btn_to_end.setIcon(qta.icon("fa5s.fast-forward", color=ICON_COLOR))
         for btn in (self.btn_to_start, self.btn_step_back, self.btn_play_pause, self.btn_step_forward, self.btn_to_end):
             btn.setFixedWidth(36)
+            btn.setIconSize(icon_size)
             toolbar.addWidget(btn)
+
+        self._update_play_pause_icon()
 
         self.btn_to_start.clicked.connect(self.on_to_start)
         self.btn_step_back.clicked.connect(self.on_step_back)
@@ -586,7 +602,8 @@ class SizeamaticProApp(QMainWindow):
         self.offset_spin.valueChanged.connect(self.on_offset_changed)
         toolbar.addWidget(self.offset_spin)
 
-        self.btn_clear_points = QPushButton("  Clear Points  ")
+        self.btn_clear_points = QPushButton("  Clear Points")
+        self.btn_clear_points.setIcon(qta.icon("fa5s.trash", color=ICON_COLOR))
         self.btn_clear_points.clicked.connect(self.on_clear_points)
         toolbar.addWidget(self.btn_clear_points)
 
@@ -616,8 +633,6 @@ class SizeamaticProApp(QMainWindow):
         Returns:
             None
         """
-        toolbar.addWidget(QLabel("   "))
-
         box_specs = [
             ("real_time_year_edit", 4, "YYYY"),
             ("real_time_month_edit", 2, "MM"),
@@ -636,6 +651,17 @@ class SizeamaticProApp(QMainWindow):
         handler can focus the *next* one, and so tests can drive them
         uniformly without naming each one."""
 
+        # A single tight container for the boxes + separators, rather than
+        # adding each one straight to the toolbar - QToolBar's own QSS
+        # `spacing` applies between every item added to it, which otherwise
+        # stacks with the "-"/":" separator labels themselves and spreads
+        # "YYYY-MM-DD" out into visibly gapped characters instead of one
+        # tight date/time group.
+        box_group = QWidget()
+        box_layout = QHBoxLayout(box_group)
+        box_layout.setContentsMargins(0, 0, 0, 0)
+        box_layout.setSpacing(2)
+
         for i, (attr_name, max_len, placeholder) in enumerate(box_specs):
             entry = QLineEdit()
             entry.setPlaceholderText(placeholder)
@@ -643,10 +669,12 @@ class SizeamaticProApp(QMainWindow):
             entry.setMaxLength(max_len)
             setattr(self, attr_name, entry)
             self.real_time_entries.append(entry)
-            toolbar.addWidget(entry)
+            box_layout.addWidget(entry)
 
             if i < len(separators):
-                toolbar.addWidget(QLabel(separators[i]))
+                box_layout.addWidget(QLabel(separators[i]))
+
+        toolbar.addWidget(box_group)
 
         # Auto-advance to the next box once this one looks full - purely a
         # focus convenience, not validation (nothing is checked/applied here).
@@ -1788,10 +1816,20 @@ class SizeamaticProApp(QMainWindow):
             return
 
         self.is_playing = not self.is_playing
+        self._update_play_pause_icon()
         if self.is_playing:
             self._playback_tick()
         else:
             self.playback_timer.stop()
+
+    def _update_play_pause_icon(self):
+        """Set the play/pause button's icon to match `self.is_playing`.
+
+        Returns:
+            None
+        """
+        icon_name = "fa5s.pause" if self.is_playing else "fa5s.play"
+        self.btn_play_pause.setIcon(qta.icon(icon_name, color=ICON_COLOR))
 
     def _playback_tick(self):
         """Advance playback by one speed-dependent step, then reschedule.
@@ -1812,6 +1850,7 @@ class SizeamaticProApp(QMainWindow):
             nxt = self.left_frame_index + step
             if nxt > master_max:
                 self.is_playing = False
+                self._update_play_pause_icon()
                 return
             self._jump_frames_locked_with_offset("L", nxt)
         else:
@@ -2280,6 +2319,19 @@ def main():
     app = QApplication(sys.argv)
     app.setStyleSheet(DARK_QSS)
 
+    # Qt's C++ event loop (app.exec(), below) never yields back to the
+    # Python interpreter on its own, so a Ctrl+C at the console (SIGINT)
+    # has no chance to actually get processed - Python only checks for a
+    # pending signal between bytecode instructions, and exec() blocks
+    # entirely outside that. Restoring the default handler (so SIGINT
+    # really does terminate rather than whatever Qt/PySide may have set)
+    # plus a trivial repeating QTimer (so the interpreter regains control
+    # briefly every 200ms) together make Ctrl+C work again.
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    keep_alive_timer = QTimer()
+    keep_alive_timer.start(200)
+    keep_alive_timer.timeout.connect(lambda: None)
+
     icon_path = resource_path("assets/icon.ico")
     if os.path.isfile(icon_path):
         app.setWindowIcon(QIcon(icon_path))
@@ -2299,11 +2351,16 @@ def main():
     window = SizeamaticProApp()
     enable_dark_title_bar(window)
 
-    # Show now (still hidden behind the splash, which stays on top) so
-    # the layout is actually live - a hidden top-level window doesn't
-    # recompute its child widgets' sizes on resize(), so
-    # `_size_window_to_screen` below would otherwise measure stale,
-    # pre-layout pane sizes.
+    # Park far off any real monitor, then show - still needs a real
+    # show() so the layout actually goes live (a hidden top-level window
+    # doesn't recompute its child widgets' sizes on resize(), which
+    # `_size_window_to_screen` below depends on), but parking it off-
+    # screen first means the user never sees it pop up/flash on top of
+    # the splash before the splash's animation finishes - relying on the
+    # splash merely "staying on top" isn't reliable enough on its own
+    # (window activation on show can still bring the main window forward
+    # mid-animation).
+    window.move(-32000, -32000)
     window.show()
 
     # Open on whichever screen the splash just showed on (the one the
@@ -2313,17 +2370,19 @@ def main():
     # the real window ending up on different monitors reads as broken.
     screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
     _size_window_to_screen(window, screen)
+
+    final_x, final_y = None, None
     if screen is not None:
         available = screen.availableGeometry()
-        x = available.x() + (available.width() - window.width()) // 2
-        y = available.y() + (available.height() - window.height()) // 2
-        window.move(x, y)
+        final_x = available.x() + (available.width() - window.width()) // 2
+        final_y = available.y() + (available.height() - window.height()) // 2
 
     # Smoothly drive the splash's progress bar from 0 to 100 across
     # STARTUP_SPLASH_MIN_SECONDS (measured from when the splash first
     # appeared, not from here - building `window` above already used up
     # part of that budget), rather than jumping straight to 100 the
-    # instant the app happens to finish building.
+    # instant the app happens to finish building. The main window stays
+    # parked off-screen (see above) for this entire loop.
     while True:
         elapsed = time.monotonic() - splash_shown_at
         fraction = min(1.0, elapsed / STARTUP_SPLASH_MIN_SECONDS)
@@ -2333,6 +2392,11 @@ def main():
             break
         app.processEvents()
         time.sleep(0.01)
+
+    # Only now move the window onto the screen for real, right as the
+    # splash is about to hand off to it.
+    if final_x is not None:
+        window.move(final_x, final_y)
 
     if splash is not None:
         splash.finish(window)

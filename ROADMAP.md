@@ -682,14 +682,15 @@ calibration_summary.py, perform_calibration.py, and
 generate_calibration_target.py still need porting.
 
 Still open within this phase:
-- Toolbar iconography — the transport controls (⏮◀⏯▶⏭) are currently
-  plain Unicode glyphs, which render inconsistently (font-dependent,
-  can fall back to emoji/missing-glyph boxes) and don't look
-  professional. Needs its own decision pass: a real icon set (SVG-based
-  custom icons vs. an icon font vs. Qt's built-in QStyle standard
-  icons), consistent sizing/stroke weight, and light/dark-safe coloring
-  — then applied consistently to every toolbar button, not just
-  transport controls.
+- ~~Toolbar iconography~~ — done: the transport controls and Clear
+  Points button now use real Font Awesome icons via the `qtawesome`
+  package (`qta.icon("fa5s.play", color=ICON_COLOR)`, etc.) instead of
+  plain Unicode glyphs, which rendered inconsistently (font-dependent,
+  fell back to emoji/missing-glyph boxes for a couple of the transport
+  symbols specifically). Play/pause now also swaps icon to reflect
+  actual playback state. Any *other* icons this app adds later (menu
+  items, additional dialogs) should reuse the same `qta.icon(name,
+  color=ICON_COLOR)` pattern rather than introducing a second source.
 - General spacing/layout consistency pass beyond what's already been
   fixed (menu/toolbar padding, font size, video pane borders, default
   window sizing).
