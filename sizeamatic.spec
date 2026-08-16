@@ -72,7 +72,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="SizeamaticPro",
+    name=f"SizeamaticPro-v{APP_VERSION}",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
