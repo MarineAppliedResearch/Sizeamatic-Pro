@@ -733,7 +733,7 @@ spacing issues sight-unseen.
       there's been more hands-on time with the ported app to see what
       still looks off.
 
-## Phase 12 — Object-space stereo ray residual (`StereoRayResidual(mm)`) `[~]`
+## Phase 12 — Object-space stereo ray residual (`StereoRayResidual(mm)`) `[x]`
 
 Add an EventMeasure-comparable object-space diagnostic alongside the existing
 pixel-space `ReprojRMS(px)`, so match/calibration quality can be judged in
@@ -769,7 +769,7 @@ Purely additive — doesn't change triangulation or any existing output.
       `RESULT_COLUMNS`/`RESULT_HEADERS`, populated in `main.py`'s
       `_update_measurement_status_stub`
 - [x] Update `ARCHITECTURE.md`
-- [ ] Manual proof test with project owner
+- [x] Manual proof test with project owner — confirmed working
 
 ## Phase 13 — Jacobian/covariance uncertainty propagation `[ ]`
 
