@@ -1,10 +1,10 @@
 """Smoke test for Sizeamatic Pro.
 
-Launches the app, lets the Tk event loop run briefly, then triggers the
-same close path a user closing the window would (`app.on_app_close`), and
-exits. Intended for an agent (or a developer) to quickly verify the app at
-least launches and shuts down cleanly, without a full test suite — that's
-Phase 4 in `ROADMAP.md`.
+Launches the app, lets the Qt event loop run briefly, then triggers the
+same close path a user closing the window would (`window.close()`,
+which fires the real `closeEvent`), and exits. Intended for an agent
+(or a developer) to quickly verify the app at least launches and shuts
+down cleanly, without a full test suite.
 
 Usage:
     python smoke_test.py [duration_ms]
@@ -17,42 +17,42 @@ smoke test, not a suite that catches and reports failures gracefully.
 
 import sys
 
-import tkinter as tk
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
 
 from main import SizeamaticProApp
 
 
-def run_smoke_test(duration_ms: int = 1000, root: "tk.Tk | None" = None) -> None:
+def run_smoke_test(duration_ms: int = 1000, app: "QApplication | None" = None) -> None:
     """Launch, briefly run, and cleanly close the app.
 
     Args:
-        duration_ms (int): How long to let the Tk event loop run before
+        duration_ms (int): How long to let the Qt event loop run before
             triggering close, in milliseconds.
-        root (tkinter.Tk | None): An existing Tk root to reuse instead of
-            creating a new one. Defaults to None, which creates a fresh
-            root — the right choice for standalone script usage, where
-            this is the only Tk() the process will ever create. The
-            pytest wrapper (tests/test_smoke.py) passes in the test
-            session's shared root instead, since Tcl/Tk does not reliably
-            support multiple create-then-destroy cycles within one
-            process — see hidden_tk_root's docstring in
-            tests/conftest.py.
+        app (QApplication | None): An existing QApplication to reuse
+            instead of creating a new one. Defaults to None, which
+            creates a fresh one — the right choice for standalone
+            script usage, where this is the only QApplication the
+            process will ever create. The pytest wrapper
+            (tests/test_smoke.py) passes in the test session's shared
+            `qapp` fixture instead, since Qt does not support more than
+            one QApplication per process.
 
     Returns:
         None
     """
+    if app is None:
+        app = QApplication.instance() or QApplication(sys.argv)
 
-    # Build the same root/app pair main() would, without the icon/taskbar
-    # setup that's irrelevant to whether the app itself works.
-    if root is None:
-        root = tk.Tk()
-    app = SizeamaticProApp(root)
+    window = SizeamaticProApp()
+    window.show()
 
     # Schedule the same close path a real window-close would trigger, so
-    # this also exercises on_app_close (including anaglyph/capture cleanup).
-    root.after(duration_ms, app.on_app_close)
+    # this also exercises closeEvent (including anaglyph/capture cleanup,
+    # video capture release).
+    QTimer.singleShot(duration_ms, window.close)
 
-    root.mainloop()
+    app.exec()
 
 
 if __name__ == "__main__":

@@ -32,6 +32,17 @@
       "justMyCode": true,
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe"
+    },
+    {
+      "name": "Run Test Suite (pytest)",
+      "type": "python",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["tests"],
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "cwd": "${workspaceFolder}",
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe"
     }
   ]
 }

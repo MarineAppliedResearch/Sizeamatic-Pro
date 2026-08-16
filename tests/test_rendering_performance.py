@@ -26,16 +26,17 @@ FRAMES_TO_RENDER = 60
     not (os.path.isfile(LEFT_VIDEO) and os.path.isfile(RIGHT_VIDEO)),
     reason="Real example videos are gitignored/local-only, not present here.",
 )
-def test_rectified_rendering_framerate(sizeamatic_app):
+def test_rectified_rendering_framerate(qapp):
     """Rectified playback should sustain well above the old (pre-fix)
     performance ceiling.
 
     Renders a batch of real frame pairs through the actual app machinery
-    (`_render_current_frames`, the same method the real UI calls on every
+    (`render_current_frames`, the same method the real UI calls on every
     slider move and playback tick) and reports the achieved fps.
     """
+    import main
 
-    app = sizeamatic_app
+    app = main.SizeamaticProApp()
 
     # Load left/right videos the same way on_load_left_video/
     # on_load_right_video do, without the file-picker dialog.
@@ -59,9 +60,9 @@ def test_rectified_rendering_framerate(sizeamatic_app):
 
     t0 = time.perf_counter()
     for i in range(max_index + 1):
-        app.left_frame_index.set(i)
-        app.right_frame_index.set(i)
-        app._render_current_frames()
+        app.left_frame_index = i
+        app.right_frame_index = i
+        app.render_current_frames()
     elapsed = time.perf_counter() - t0
 
     frames_rendered = max_index + 1

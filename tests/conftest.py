@@ -5,7 +5,7 @@ that take an `app` parameter but only read a handful of specific
 attributes off it (`app.cal`, `app.ptsL`/`app.ptsR`,
 `app.view_rectified.get()`, etc.) — see `ARCHITECTURE.md`. That means most
 of these functions can be unit-tested with a lightweight stand-in object
-instead of constructing the real Tkinter GUI. `FakeApp` (via
+instead of constructing the real Qt GUI. `FakeApp` (via
 `make_fake_app`) is that stand-in; reach for the real `sizeamatic_app`
 fixture only when a test genuinely needs the GUI (e.g. a regression test
 for a bug in window-close handling).
@@ -31,17 +31,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import matplotlib
 
-# generate_calibration_report.py imports matplotlib.pyplot, which on
-# Windows can auto-select a Tk-based GUI backend. That backend competes
-# with our own direct tkinter usage (hidden_tk_root/sizeamatic_app) for
-# the process's single Tcl/Tk interpreter, causing intermittent
-# "invalid command name tcl_findLibrary" errors when a test that creates
-# its own tk.Tk() runs after generate_calibration_report has been
-# imported. Force a non-GUI backend before anything else in the suite
-# gets a chance to import pyplot.
+# generate_calibration_report.py imports matplotlib.pyplot, which can
+# auto-select an interactive GUI backend depending on what's installed.
+# Force a non-GUI backend before anything else in the suite gets a
+# chance to import pyplot, so running the suite headless (as CI/the
+# offscreen Qt platform below both expect) never depends on one being
+# available.
 matplotlib.use("Agg")
-
-import tkinter as tk
 
 import numpy as np
 import pytest
@@ -356,51 +352,238 @@ def known_chain_pixels(synthetic_cal):
     return {"points": points, "total_length_mm": total_length_mm}
 
 
-@pytest.fixture(scope="session")
-def hidden_tk_root():
-    """A withdrawn (invisible) Tk root window, shared for the whole test
-    session and torn down once at the very end.
-
-    Session-scoped deliberately: Tcl/Tk does not reliably support
-    repeated full create-then-destroy cycles within a single process —
-    empirically, giving each GUI-touching test its own fresh `tk.Tk()`
-    made the suite intermittently fail with
-    `TclError: invalid command name "tcl_findLibrary"` on the second or
-    third such cycle. One shared root for the whole session avoids that.
-    Tests that need to build/destroy something should create a
-    `tk.Toplevel(root)` child instead of touching the root itself — see
-    `test_regressions.py`'s calibration-window test for that pattern, and
-    the on_app_close test for how to test root-destroying code without
-    actually destroying this shared root.
-
-    Returns:
-        tkinter.Tk: The shared hidden root window.
-    """
-    root = tk.Tk()
-    root.withdraw()
-    yield root
-    root.destroy()
-
-
 @pytest.fixture
-def sizeamatic_app(hidden_tk_root):
-    """A real `SizeamaticProApp` built on the shared hidden root, for
-    tests that genuinely need the GUI rather than a `FakeApp` stand-in
-    (e.g. regression tests for window-close bugs).
+def sizeamatic_app(qapp):
+    """A real `SizeamaticProApp` (PySide6), for tests that genuinely need
+    the GUI rather than a `FakeApp`/`FakeAppWidget` stand-in (e.g.
+    regression tests for window-close bugs).
 
-    Note:
-        Built on the session-shared `hidden_tk_root`, not a fresh root of
-        its own. If a test needs to exercise code that calls
-        `self.root.destroy()` (like `on_app_close`), patch that method out
-        first rather than letting it actually tear down the shared root —
-        see `test_regressions.py`'s on_app_close test.
+    Built fresh per test and closed afterward via the real `.close()`
+    path (the same thing a user clicking the window's close button
+    triggers), rather than shared session-wide — Qt widgets, unlike the
+    old Tk root, tear down cleanly per-instance.
 
     Args:
-        hidden_tk_root (tkinter.Tk): The `hidden_tk_root` fixture.
+        qapp (QApplication): The shared session `qapp` fixture.
 
-    Returns:
+    Yields:
         main.SizeamaticProApp: The constructed app instance.
     """
     import main
 
-    return main.SizeamaticProApp(hidden_tk_root)
+    app = main.SizeamaticProApp()
+    yield app
+    app.close()
+
+
+# ---------------------------------------------------------------------------
+# Custom terminal report
+#
+# Replaces pytest's default one-line-per-test "PASSED [ x%]" stream (mostly
+# noise for a suite this size) with a single report at the end of the run:
+# one aggregated line per test file, a boxed totals summary, and a bullet
+# list of any failures. Tracebacks for actual failures/errors still come
+# from pytest's own built-in reporting (summary_failures/summary_errors),
+# untouched — only the per-test progress line and the final counts line are
+# replaced.
+# ---------------------------------------------------------------------------
+
+import time as _time
+
+from _pytest.terminal import pytest_report_teststatus as _default_report_teststatus
+
+
+class _FileStats:
+    def __init__(self):
+        self.total = 0
+        self.passed = 0
+        self.failed = 0
+        self.errors = 0
+        self.duration = 0.0
+
+
+_file_stats = {}
+_failed_nodeids = []
+_session_start = None
+_config = None
+_current_file = None
+_name_width = None
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_configure(config):
+    """Silence pytest's built-in per-test progress line and its final
+    counts line; `pytest_runtest_logreport`/`pytest_sessionfinish` below
+    replace both with the grouped-by-file report.
+
+    `trylast=True` matters here: `_pytest.terminal`'s own
+    `pytest_configure` is what constructs and registers the
+    `TerminalReporter` plugin in the first place, and pluggy calls
+    conftest hookimpls before built-in ones by default (reverse
+    registration order) — without `trylast`, `get_plugin("terminalreporter")`
+    below runs before that reporter exists yet and silently finds nothing
+    to patch.
+
+    There's no supported config flag for suppressing just these two
+    pieces while keeping traceback reporting, so this patches the two
+    `TerminalReporter` methods responsible for them directly. If a future
+    pytest version renames these methods, this silently stops
+    overriding them rather than erroring — worst case is pytest's
+    default lines reappearing alongside ours.
+    """
+    global _session_start, _config
+    _session_start = _time.perf_counter()
+    _config = config
+
+    terminal_reporter = config.pluginmanager.get_plugin("terminalreporter")
+    if terminal_reporter is not None:
+        if hasattr(terminal_reporter, "summary_stats"):
+            terminal_reporter.summary_stats = lambda: None
+        if hasattr(terminal_reporter, "short_test_summary"):
+            terminal_reporter.short_test_summary = lambda: None
+        if hasattr(terminal_reporter, "write_fspath_result"):
+            # pytest_runtest_logstart echoes each file's path (plus a
+            # running "[ x%]") the moment its first test starts, ahead of
+            # and independent from pytest_report_teststatus below —
+            # silence it too so nothing prints until our own report.
+            terminal_reporter.write_fspath_result = lambda *a, **k: None
+        if hasattr(terminal_reporter, "write_ensure_prefix"):
+            # The -v/verbose equivalent of write_fspath_result above —
+            # prints each test's bare node id ahead of its (blanked)
+            # status word. Silence this too so `-v` doesn't reintroduce
+            # a dangling list of test names above our own report.
+            terminal_reporter.write_ensure_prefix = lambda *a, **k: None
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_report_teststatus(report, config):
+    """Blank out just the visible letter/word for every phase, so nothing
+    streams live (`pytest_runtest_logreport` below prints our own line per
+    file instead) — but keep the real category pytest would have computed.
+
+    The category (not the letter/word) is what `self.stats` gets filed
+    under, and pytest's own FAILURES/ERRORS traceback sections read
+    straight from `self.stats["failed"]`/`self.stats["error"]` — returning
+    a blank category here would silently make those sections (which we
+    deliberately leave untouched) find nothing to report.
+    """
+    category, _letter, _word = _default_report_teststatus(report)
+    return category, "", ""
+
+
+def _file_line(file_path, stats):
+    """Format one file's aggregated result line and its color markup."""
+    ok = stats.failed == 0 and stats.errors == 0
+    width = _name_width or (len(file_path) + 2)
+    if ok:
+        fraction = f"{stats.passed}/{stats.total} passed"
+    else:
+        fraction = (
+            f"{stats.passed}/{stats.total} passed, "
+            f"{stats.failed + stats.errors} failed"
+        )
+    line = f"{file_path:<{width}} {fraction:<28} {stats.duration:6.2f}s"
+    markup = {"bold": True, "green": True} if ok else {"bold": True, "red": True}
+    return line, markup
+
+
+def _flush_file(file_path):
+    """Print the now-complete previous file's line immediately, rather
+    than waiting for the whole session to finish — see pytest_runtest_logreport."""
+    stats = _file_stats.get(file_path)
+    if stats is None or _config is None:
+        return
+    terminal_reporter = _config.pluginmanager.get_plugin("terminalreporter")
+    if terminal_reporter is None:
+        return
+    line, markup = _file_line(file_path, stats)
+    terminal_reporter.write_line(line, **markup)
+
+
+def pytest_collection_finish(session):
+    """Collection gives us every test file up front, which lets us pick
+    one fixed column width now — so each file's line, printed live as it
+    finishes (see pytest_runtest_logreport), still lines up with the
+    others instead of only aligning correctly in an all-at-once dump."""
+    global _name_width
+    file_paths = {item.nodeid.split("::", 1)[0] for item in session.items}
+    if file_paths:
+        _name_width = max(len(p) for p in file_paths) + 2
+
+
+def pytest_runtest_logreport(report):
+    """Roll each test's outcome into its file's running totals, printing
+    the previous file's line as soon as we move on to the next file."""
+    global _current_file
+
+    if report.when == "call":
+        outcome = report.outcome  # "passed" / "failed"
+    elif report.outcome == "failed":
+        # A setup or teardown failure - the test never got a "call" report.
+        outcome = "error"
+    else:
+        return  # setup/teardown that passed - nothing to record
+
+    file_path = report.nodeid.split("::", 1)[0]
+    if _current_file is not None and file_path != _current_file:
+        _flush_file(_current_file)
+    _current_file = file_path
+
+    stats = _file_stats.setdefault(file_path, _FileStats())
+    stats.total += 1
+    stats.duration += report.duration
+    if outcome == "passed":
+        stats.passed += 1
+    elif outcome == "failed":
+        stats.failed += 1
+        _failed_nodeids.append(report.nodeid)
+    else:
+        stats.errors += 1
+        _failed_nodeids.append(report.nodeid)
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """Flush the last file's line, then print the boxed totals summary.
+
+    Deliberately a `pytest_terminal_summary` hookimpl rather than
+    `pytest_sessionfinish`: `TerminalReporter`'s own `pytest_terminal_summary`
+    is a hookwrapper that calls `summary_failures()`/`summary_errors()`
+    (the traceback sections) *before* yielding to hookimpls like this one,
+    so our report reliably prints after those tracebacks instead of above
+    them.
+    """
+    if not _file_stats:
+        return
+
+    if _current_file is not None:
+        _flush_file(_current_file)
+
+    write = terminalreporter.write_line
+    total = sum(s.total for s in _file_stats.values())
+    passed = sum(s.passed for s in _file_stats.values())
+    failed = sum(s.failed for s in _file_stats.values())
+    errors = sum(s.errors for s in _file_stats.values())
+    elapsed = _time.perf_counter() - _session_start
+    pass_rate = (passed / total * 100) if total else 0.0
+    all_ok = failed == 0 and errors == 0
+    color = {"bold": True, "green": True} if all_ok else {"bold": True, "red": True}
+
+    stats_line = (
+        f"Total: {total}   Passed: {passed}   Failed: {failed + errors}   "
+        f"Time: {elapsed:.2f}s"
+    )
+    rate_line = f"Pass rate: {pass_rate:.1f}%"
+    inner_width = max(len(stats_line), len(rate_line)) + 4
+    border = "+" + "=" * inner_width + "+"
+
+    write("")
+    write(border, **color)
+    write(f"|  {stats_line:<{inner_width - 2}}|", **color)
+    write(f"|  {rate_line:<{inner_width - 2}}|", **color)
+    write(border, **color)
+
+    if _failed_nodeids:
+        write("")
+        write("FAILED:", bold=True, red=True)
+        for nodeid in _failed_nodeids:
+            write(f"  - {nodeid}", red=True)
