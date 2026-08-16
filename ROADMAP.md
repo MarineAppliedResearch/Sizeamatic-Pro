@@ -733,7 +733,104 @@ spacing issues sight-unseen.
       there's been more hands-on time with the ported app to see what
       still looks off.
 
-## Phase 12 — MARE API integration (future, not yet scoped) `[ ]`
+## Phase 12 — Object-space stereo ray residual (`StereoRayResidual(mm)`) `[x]`
+
+Add an EventMeasure-comparable object-space diagnostic alongside the existing
+pixel-space `ReprojRMS(px)`, so match/calibration quality can be judged in
+physical units too. Motivated by a comparison of Sizeamatic Pro's stereo
+measurement math against SeaGIS EventMeasure/CAL: EventMeasure's published
+"RMS" is the shortest distance between the two original observation rays in
+object-space millimeters, a genuinely different quantity from Sizeamatic's
+pixel-space reprojection RMS, even though both are residual/quality metrics.
+Purely additive — doesn't change triangulation or any existing output.
+
+- [x] Derive each pane's camera center and ray direction directly from the
+      calibration's existing rectified `PL`/`PR` (no new calibration fields)
+      — `stereo_matching.py`'s `camera_center_and_ray_direction`. First
+      implementation used P's homogeneous null space (SVD) for the camera
+      center and a pseudoinverse solution for a ray point; caught by its
+      own test before merge that this degenerates to a point at infinity
+      whenever a camera sits exactly at the world origin — the normal
+      case for a rectified left/reference camera, including this
+      project's own synthetic test rig. Replaced with the standard
+      `M`/`p4` split of `P = [M | p4]` (`center = -M^-1 @ p4`, `direction
+      = M^-1 @ [x, y, 1]`), which has no such degeneracy for any real
+      finite camera.
+- [x] Implement closest-approach-distance-between-two-skew-rays as a new
+      `stereo_matching.py` function (`ray_residual_mm`, plus an
+      app-state wrapper `stereo_ray_residual_mm` matching
+      `reprojection_rms_px`'s validation pattern)
+- [x] Unit tests against `synthetic_cal`/`known_point_pixels` with a
+      hand-computed expected residual (7 new tests in
+      `tests/test_stereo_matching.py`)
+- [x] Surface the new metric in the Measurement window's Log/results table
+      next to `ReprojRMS(px)`, clearly labeled in mm and visually distinct
+      from it — new `ray_residual_mm` column in `measurement_window.py`'s
+      `RESULT_COLUMNS`/`RESULT_HEADERS`, populated in `main.py`'s
+      `_update_measurement_status_stub`
+- [x] Update `ARCHITECTURE.md`
+- [x] Manual proof test with project owner — confirmed working
+
+## Phase 13 — Jacobian/covariance uncertainty propagation `[ ]`
+
+Replace the current 8-perturbation sample-standard-deviation uncertainty
+estimate with a proper finite-difference Jacobian / propagated-variance
+estimate, reusing the same clicked-point perturbations already computed —
+putting `SigmaZ`/`SigmaRange`/segment `sigma_L` on formal statistical
+footing instead of a sensitivity indicator. Also motivated by the
+EventMeasure/CAL comparison: SeaGIS derives precision via analytical
+variance propagation, and while Sizeamatic's numerical approach can retain
+its advantage of using the *complete* calibrated stereo geometry rather than
+a simplified analytical model, it should compute a real propagated variance
+rather than just the spread of ad hoc perturbations.
+
+- [ ] **Decision needed up front:** this changes the numeric values shown
+      for every existing measurement (including ones already recorded in
+      saved project files/exported logs) — confirm with project owner
+      whether that's acceptable as a straight replacement, or whether
+      old/new should be shown side-by-side for a transition period
+- [ ] Implement Jacobian-based sigma calculation reusing `endpoint_perturbs`
+- [ ] Update `estimate_point_sigma_mm`/`estimate_segment_sigma_len_mm`
+- [ ] Update existing tests that currently assert against the `ddof=1`
+      std-based values
+- [ ] Manual proof test comparing old vs. new numbers on a real measurement
+
+## Phase 14 — Investigate 3D bundle-adjustment calibration (research spike) `[ ]`
+
+Investigate — without committing to implement — a photogrammetric
+bundle-adjustment calibration mode using a 3-D calibration target, to see
+how much of the SeaGIS CAL calibration-philosophy gap is realistically
+closeable. This is the biggest and least software-only item to come out of
+the EventMeasure/CAL comparison: CAL uses an internally constrained bundle
+adjustment across a whole photogrammetric network (camera parameters,
+poses, and 3-D target coordinates solved simultaneously), typically driven
+by a 3-D calibration cube rather than a planar checkerboard/ChArUco board.
+Sizeamatic's current pipeline (independent per-camera `cv2.calibrateCamera`
+→ `cv2.stereoCalibrate` with `CALIB_FIX_INTRINSIC` → `cv2.stereoRectify`) is
+a normal, defensible CV stereo calibration approach, but a materially
+different (and less rigorous) one. A genuine bundle adjustment needs a
+custom per-view initial pose plus a hand-built sparse least-squares solve —
+`cv2.calibrateCamera`'s Zhang-method initial guess assumes a planar target
+per view, so it can't just be handed 3-D object points as-is.
+
+- [ ] Investigate 3-D target options (ArUco-faced cube vs.
+      precisely-surveyed discrete targets) and what's fabricable/measurable
+      in-house
+- [ ] Investigate `scipy` (not currently a dependency) as a new dependency
+      vs. a hand-rolled least-squares solve
+- [ ] Prototype a minimal bundle-adjustment solve against **synthetic**
+      data only, to validate the math before investing in physical target
+      fabrication
+- [ ] Investigate known-distance scale-bar validation as a standing
+      calibration QA step (useful regardless of which calibration mode
+      produced the calibration)
+- [ ] Close with a decision: pursue full implementation as its own future
+      phase, adopt partial pieces only (e.g. scale-bar validation without
+      full bundle adjustment), or defer entirely
+- [ ] No changes to the existing checkerboard/ChArUco calibration path in
+      this phase
+
+## Phase 15 — MARE API integration (future, not yet scoped) `[ ]`
 
 Interface with the overall MARE API to record measurement data, etc. Noted
 here so it isn't forgotten, but not to be planned in detail until we reach it.

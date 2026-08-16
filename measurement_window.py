@@ -28,10 +28,22 @@ Design notes:
     output item) — the project owner wanted the *same* rows a user
     records over a session to land in one continuous, filterable block
     once pasted into a spreadsheet, rather than two separate shapes to
-    juggle. Point-only columns (Disp/dY/ReprojRMS) and segment-only
-    columns are simply blank on rows they don't apply to; "val_a"
-    through "val_d" are intentionally generic (X/dX, Y/dY, Z/dZ,
+    juggle. Point-only columns (Disp/dY/ReprojRMS/RayResidual) and
+    segment-only columns are simply blank on rows they don't apply to;
+    "val_a" through "val_d" are intentionally generic (X/dX, Y/dY, Z/dZ,
     Range/Len) rather than named per row type, for the same reason.
+
+    `reproj_rms` (pixels) and `ray_residual_mm` (millimeters) are both
+    point-quality diagnostics but deliberately distinct quantities, not
+    two views of the same number: `reproj_rms` measures how far the
+    triangulated (Y-averaged) 3D point reprojects from the original
+    clicked pixels, in pixel units; `ray_residual_mm` measures the
+    closest-approach distance between the two original, un-averaged
+    left/right viewing rays, in the calibration's real-world units
+    (normally millimeters) - see `stereo_matching.py`'s `ray_residual_mm`
+    docstring. Keeping both, with distinct labeled units, avoids
+    conflating them with SeaGIS EventMeasure's "RMS" (an object-space, mm
+    quantity resembling `ray_residual_mm`, not `reproj_rms`).
 
     The chain "Total" row's sigma is the quadrature sum of each segment's
     independently-estimated sigma (`sqrt(sum(sigma_i**2))`) — the
@@ -91,6 +103,7 @@ RESULT_COLUMNS = (
     "disp",
     "dy_px",
     "reproj_rms",
+    "ray_residual_mm",
     "sigma1",
     "sigma2",
 )
@@ -128,6 +141,7 @@ RESULT_HEADERS = {
     "disp": "Disp (px)",
     "dy_px": "dY (px)",
     "reproj_rms": "Reproj RMS (px)",
+    "ray_residual_mm": "Ray Residual (mm)",
     "sigma1": "σZ / σLen (mm)",
     "sigma2": "σRange (mm)",
 }

@@ -1431,9 +1431,17 @@ class SizeamaticProApp(QMainWindow):
         for i, (X, Y, Z) in enumerate(pts3d):
             R = (X * X + Y * Y + Z * Z) ** 0.5
 
-            # Assumption-free quality metric.
+            # Assumption-free quality metric (pixel-space reprojection
+            # consistency, using the Y-averaged triangulated point).
             erms = stereo_matching.reprojection_rms_px(self, i)
             erms_str = f"{erms:.2f}" if erms is not None else ""
+
+            # Assumption-free quality metric (object-space distance between
+            # the two original, un-averaged left/right viewing rays) - a
+            # different quantity from erms above, not a duplicate; see
+            # stereo_matching.ray_residual_mm's docstring.
+            ray_residual = stereo_matching.stereo_ray_residual_mm(self, i)
+            ray_residual_str = f"{ray_residual:.2f}" if ray_residual is not None else ""
 
             # Assumption-based uncertainty in mm.
             sig = stereo_matching.estimate_point_sigma_mm(self, i, sigma_px)
@@ -1459,7 +1467,7 @@ class SizeamaticProApp(QMainWindow):
                 video_col, frame_col, time_col, actual_time_col, "",
                 "Point", str(i),
                 f"{X:.1f}", f"{Y:.1f}", f"{Z:.1f}", f"{R:.1f}",
-                f"{disp:.2f}", f"{dy:.2f}", erms_str, sZ_str, sR_str,
+                f"{disp:.2f}", f"{dy:.2f}", erms_str, ray_residual_str, sZ_str, sR_str,
             ))
 
         # Build one "Segment" row per consecutive point pair (the chain is a
@@ -1495,7 +1503,7 @@ class SizeamaticProApp(QMainWindow):
                     video_col, frame_col, time_col, actual_time_col, "",
                     "Segment", f"{i-1}-{i}",
                     f"{dX:.1f}", f"{dY:.1f}", f"{dZ:.1f}", f"{L:.1f}",
-                    "", "", "", sL_str, "",
+                    "", "", "", "", sL_str, "",
                 ))
 
             # Total: sum of the connected chain's segment lengths. Segment
@@ -1507,7 +1515,7 @@ class SizeamaticProApp(QMainWindow):
                 video_col, frame_col, time_col, actual_time_col, "",
                 "Total", "",
                 "", "", "", f"{total_len_mm:.1f}",
-                "", "", "", total_sigma_str, "",
+                "", "", "", "", total_sigma_str, "",
             ))
 
             self._set_status_right(

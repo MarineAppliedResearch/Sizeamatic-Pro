@@ -10,6 +10,7 @@ Contents:
     - Triangulation from matched left and right image coordinates.
     - Projection of reconstructed 3D points back into image coordinates.
     - Reprojection RMS error calculations.
+    - Object-space stereo ray residual calculations.
     - Point depth and range uncertainty estimates.
     - Segment length and segment uncertainty estimates.
 
@@ -436,6 +437,183 @@ def reprojection_rms_px(app, index):
 
     # Return the reprojection consistency error as a plain float.
     return float(erms)
+
+
+def camera_center_and_ray_direction(P, x, y):
+    """Recover one camera's optical center and viewing-ray direction for a
+    clicked image pixel, directly from its 3x4 projection matrix.
+
+    Splits P into its leading 3x3 submatrix M and its last column p4
+    (P = [M | p4], so for a real calibrated camera P = K[R|t], M = KR and
+    p4 = Kt). For a finite camera M is invertible, which gives both
+    quantities directly with no special-case analytical camera model
+    needed - the same "use the calibrated projection matrices directly"
+    approach `triangulate_from_pixels` already uses for triangulation:
+
+    - Camera center (world coordinates): `C = -M^-1 @ p4`, since the
+      center is the point P projects to zero (`M @ C + p4 == 0`).
+    - Viewing-ray direction for pixel (x, y): `M^-1 @ [x, y, 1]` (up to
+      scale) - the standard back-projection formula, equivalent to
+      `R^-1 @ K^-1 @ [x, y, 1]` without decomposing M into R and K
+      separately.
+
+    An earlier version of this function instead used P's homogeneous
+    null space (via SVD) for the camera center and a pseudoinverse
+    solution for a point on the ray - mathematically valid in general,
+    but the pseudoinverse's minimum-norm solution lands exactly at a
+    point at infinity whenever a camera sits exactly at the world origin
+    (`p4` all zero), which is the common case for a rectified left
+    camera used as the reference frame. That's not a rare edge case for
+    this codebase's actual rectified calibrations, so this M/p4 form is
+    used instead - it has no such degeneracy for any real finite camera.
+
+    Args:
+        P (numpy.ndarray): A 3x4 camera projection matrix (PL or PR).
+        x (float): Clicked image X pixel coordinate.
+        y (float): Clicked image Y pixel coordinate.
+
+    Returns:
+        tuple[numpy.ndarray, numpy.ndarray] | None: `(center, direction)`,
+        each a length-3 float64 array in the calibration's 3D coordinate
+        system, with `direction` normalized to unit length - or None if
+        P's leading 3x3 submatrix isn't invertible (a degenerate,
+        non-finite camera, not expected for a real calibrated projection
+        matrix).
+    """
+
+    M = P[:, :3]
+    p4 = P[:, 3]
+
+    # A real calibrated finite camera's M (= K @ R) is always invertible;
+    # reject a degenerate/affine projection matrix rather than raising.
+    try:
+        M_inv = np.linalg.inv(M)
+    except np.linalg.LinAlgError:
+        return None
+
+    center = -M_inv @ p4
+
+    # Ray direction is only defined up to scale, so normalize it to unit
+    # length here rather than downstream.
+    direction = M_inv @ np.array([x, y, 1.0], dtype=np.float64)
+    norm = float(np.linalg.norm(direction))
+    if norm < 1e-9:
+        return None
+    return center, direction / norm
+
+
+def ray_residual_mm(PL, PR, xL, yL, xR, yR):
+    """Compute the closest-approach distance between two stereo viewing rays.
+
+    This is the object-space counterpart to `reprojection_rms_px`'s
+    pixel-space consistency check, and the quantity SeaGIS's EventMeasure
+    documentation calls "RMS": the shortest 3D distance separating the
+    left and right camera's original viewing rays for one clicked point,
+    in the calibration's real-world units (normally millimeters). Unlike
+    `triangulate_from_pixels`, this does not average the left/right Y
+    pixel coordinates first - it uses each clicked point exactly as
+    given, so a vertical click mismatch between the two images shows up
+    directly here even though `triangulate_from_pixels` folds it away by
+    design. `ReprojRMS(px)` and this value are not the same quantity and
+    are not on the same scale (pixels vs. millimeters) - see
+    `stereo_matching.py`'s module docstring.
+
+    For two skew lines defined by point/direction pairs (C_L, d_L) and
+    (C_R, d_R), the shortest distance between them is:
+
+        |(C_R - C_L) . (d_L x d_R)| / |d_L x d_R|
+
+    which only degenerates (division by zero) when the two rays are
+    parallel - not expected for a real stereo rig with two distinct
+    camera centers, but guarded against below regardless.
+
+    Args:
+        PL (numpy.ndarray): Left camera's 3x4 rectified projection matrix.
+        PR (numpy.ndarray): Right camera's 3x4 rectified projection matrix.
+        xL (float): Left clicked image X pixel coordinate.
+        yL (float): Left clicked image Y pixel coordinate.
+        xR (float): Right clicked image X pixel coordinate.
+        yR (float): Right clicked image Y pixel coordinate.
+
+    Returns:
+        float | None: The shortest distance between the two viewing rays,
+        in calibration units (normally millimeters), or None if either
+        camera's center/ray cannot be recovered safely or the two rays
+        are (numerically) parallel.
+    """
+    left_ray = camera_center_and_ray_direction(PL, xL, yL)
+    right_ray = camera_center_and_ray_direction(PR, xR, yR)
+
+    if left_ray is None or right_ray is None:
+        return None
+
+    center_l, dir_l = left_ray
+    center_r, dir_r = right_ray
+
+    # The cross product of the two ray directions is perpendicular to
+    # both rays; its length is also the denominator of the
+    # closest-distance formula below.
+    cross = np.cross(dir_l, dir_r)
+    cross_norm = float(np.linalg.norm(cross))
+
+    # Parallel (or anti-parallel) rays have no unique closest-approach
+    # distance via this formula - not expected in practice for two
+    # distinct camera centers, but reject rather than divide by ~0.
+    if cross_norm < 1e-9:
+        return None
+
+    distance = abs(float(np.dot(center_r - center_l, cross))) / cross_norm
+    return distance
+
+
+def stereo_ray_residual_mm(app, index):
+    """Compute the object-space ray residual for one clicked point pair.
+
+    Thin app-state wrapper around `ray_residual_mm`, mirroring
+    `reprojection_rms_px`'s validation pattern: requires rectified view,
+    a loaded calibration with PL/PR, and a complete point pair at
+    `index`. See `ray_residual_mm`'s docstring for what this quantity
+    means and how it differs from `ReprojRMS(px)`.
+
+    Args:
+        app: The main application object, used to read the
+            rectified-view flag, loaded calibration, and clicked
+            left/right point lists (`app.ptsL`, `app.ptsR`).
+        index (int): Index of the clicked left/right point pair to
+            evaluate.
+
+    Returns:
+        float | None: The ray residual in calibration units (normally
+        millimeters), or None if the point pair isn't available, the
+        calibration is missing PL/PR, or the residual can't be computed
+        safely.
+    """
+
+    # Ray residuals are only meaningful in the same rectified pixel space
+    # PL/PR were calibrated against.
+    if not app.view_rectified.get():
+        return None
+
+    if app.cal is None:
+        return None
+
+    if "PL" not in app.cal or "PR" not in app.cal:
+        return None
+
+    if index < 0:
+        return None
+
+    if index >= len(app.ptsL) or index >= len(app.ptsR):
+        return None
+
+    # Read the matched left and right clicked points exactly as given -
+    # deliberately not the Y-averaged pixels `triangulate_from_pixels`
+    # uses, since the whole point of this metric is to see the vertical
+    # mismatch triangulation otherwise folds away.
+    xL, yL = app.ptsL[index]
+    xR, yR = app.ptsR[index]
+
+    return ray_residual_mm(app.cal["PL"], app.cal["PR"], xL, yL, xR, yR)
 
 
 def endpoint_perturbs(app, idx, sigma_px):
