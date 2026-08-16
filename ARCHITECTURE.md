@@ -78,7 +78,15 @@ including two distinct point-quality diagnostics: `reprojection_rms_px`,
 a pixel-space check on the Y-averaged triangulated point, and (ROADMAP.md
 Phase 12) `stereo_ray_residual_mm`, an object-space check on the two
 original un-averaged left/right viewing rays — see the latter's
-docstring for why these are deliberately not the same quantity),
+docstring for why these are deliberately not the same quantity; also
+(ROADMAP.md Phase 13) two uncertainty estimators shown side by side per
+the project owner's request during that phase: the original sample-
+standard-deviation-of-perturbations `estimate_point_sigma_mm`/
+`estimate_segment_sigma_len_mm`, and a Jacobian/covariance-propagation
+alternative, `estimate_point_sigma_mm_jacobian`/
+`estimate_segment_sigma_len_mm_jacobian`, reusing the same perturbed
+coordinates but combining them as an explicit propagated variance
+instead of a sample statistic),
 `calibration_io.py` (calibration NPZ loading/validation, pulled out of
 `main.py`'s `on_load_calibration_folder`), and the Phase 7 addition
 `project_io.py` (saves/loads a small JSON manifest of video paths,

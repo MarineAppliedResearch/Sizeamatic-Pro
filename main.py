@@ -1443,7 +1443,10 @@ class SizeamaticProApp(QMainWindow):
             ray_residual = stereo_matching.stereo_ray_residual_mm(self, i)
             ray_residual_str = f"{ray_residual:.2f}" if ray_residual is not None else ""
 
-            # Assumption-based uncertainty in mm.
+            # Assumption-based uncertainty in mm (sample-standard-deviation
+            # estimate, shown side by side with the Jacobian estimate below -
+            # ROADMAP.md Phase 13, a project owner decision not to replace
+            # this pair outright).
             sig = stereo_matching.estimate_point_sigma_mm(self, i, sigma_px)
             if sig is None:
                 sZ_str = ""
@@ -1452,6 +1455,18 @@ class SizeamaticProApp(QMainWindow):
                 sZ, sR = sig
                 sZ_str = f"{sZ:.1f}"
                 sR_str = f"{sR:.1f}"
+
+            # Assumption-based uncertainty in mm (Jacobian/covariance-
+            # propagation estimate - see stereo_matching's docstring for how
+            # this differs from the sample-standard-deviation estimate above).
+            sig_jac = stereo_matching.estimate_point_sigma_mm_jacobian(self, i, sigma_px)
+            if sig_jac is None:
+                sZ_jac_str = ""
+                sR_jac_str = ""
+            else:
+                sZ_jac, sR_jac = sig_jac
+                sZ_jac_str = f"{sZ_jac:.1f}"
+                sR_jac_str = f"{sR_jac:.1f}"
 
             # Read the clicked left and right pixels for this point.
             xL, yL = self.ptsL[i]
@@ -1468,6 +1483,7 @@ class SizeamaticProApp(QMainWindow):
                 "Point", str(i),
                 f"{X:.1f}", f"{Y:.1f}", f"{Z:.1f}", f"{R:.1f}",
                 f"{disp:.2f}", f"{dy:.2f}", erms_str, ray_residual_str, sZ_str, sR_str,
+                sZ_jac_str, sR_jac_str,
             ))
 
         # Build one "Segment" row per consecutive point pair (the chain is a
@@ -1476,6 +1492,8 @@ class SizeamaticProApp(QMainWindow):
         total_len_mm = 0.0
         total_var_mm2 = 0.0
         have_total_sigma = True
+        total_var_jac_mm2 = 0.0
+        have_total_sigma_jac = True
 
         if len(pts3d) >= 2:
             for i in range(1, len(pts3d)):
@@ -1487,7 +1505,7 @@ class SizeamaticProApp(QMainWindow):
                 L = (dX * dX + dY * dY + dZ * dZ) ** 0.5
                 total_len_mm += L
 
-                # Segment sigma length estimate.
+                # Segment sigma length estimate (sample-standard-deviation).
                 seg_est = stereo_matching.estimate_segment_sigma_len_mm(self, i - 1, i, sigma_px)
                 if seg_est is None:
                     sL_str = ""
@@ -1499,23 +1517,37 @@ class SizeamaticProApp(QMainWindow):
                     sL_str = f"{sL:.1f}"
                     total_var_mm2 += sL * sL
 
+                # Segment sigma length estimate (Jacobian/covariance
+                # propagation - ROADMAP.md Phase 13, shown side by side with
+                # the sample-standard-deviation estimate above).
+                seg_est_jac = stereo_matching.estimate_segment_sigma_len_mm_jacobian(self, i - 1, i, sigma_px)
+                if seg_est_jac is None:
+                    sL_jac_str = ""
+                    have_total_sigma_jac = False
+                else:
+                    _L0_jac, sL_jac = seg_est_jac
+                    sL_jac_str = f"{sL_jac:.1f}"
+                    total_var_jac_mm2 += sL_jac * sL_jac
+
                 rows.append((
                     video_col, frame_col, time_col, actual_time_col, "",
                     "Segment", f"{i-1}-{i}",
                     f"{dX:.1f}", f"{dY:.1f}", f"{dZ:.1f}", f"{L:.1f}",
-                    "", "", "", "", sL_str, "",
+                    "", "", "", "", sL_str, "", sL_jac_str, "",
                 ))
 
             # Total: sum of the connected chain's segment lengths. Segment
             # sigmas are each estimated independently, so a sum of
             # independent errors adds in quadrature:
-            # sigma_total = sqrt(sum(sigma_i^2)).
+            # sigma_total = sqrt(sum(sigma_i^2)). Done separately for each
+            # of the two sigma estimators.
             total_sigma_str = f"{total_var_mm2 ** 0.5:.1f}" if have_total_sigma else ""
+            total_sigma_jac_str = f"{total_var_jac_mm2 ** 0.5:.1f}" if have_total_sigma_jac else ""
             rows.append((
                 video_col, frame_col, time_col, actual_time_col, "",
                 "Total", "",
                 "", "", "", f"{total_len_mm:.1f}",
-                "", "", "", "", total_sigma_str, "",
+                "", "", "", "", total_sigma_str, "", total_sigma_jac_str, "",
             ))
 
             self._set_status_right(

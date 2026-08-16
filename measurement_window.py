@@ -45,11 +45,27 @@ Design notes:
     conflating them with SeaGIS EventMeasure's "RMS" (an object-space, mm
     quantity resembling `ray_residual_mm`, not `reproj_rms`).
 
+    `sigma1_jac`/`sigma2_jac` (ROADMAP.md Phase 13) are a second,
+    statistically more formal uncertainty estimate shown deliberately
+    side by side with the original `sigma1`/`sigma2` (a project owner
+    decision made when this phase started) rather than replacing them
+    outright: `sigma1`/`sigma2` are the sample standard deviation of
+    eight perturbed retriangulations, while `sigma1_jac`/`sigma2_jac`
+    combine the same perturbations as an explicit propagated variance
+    (a numerical Jacobian) - see
+    `stereo_matching.estimate_point_sigma_mm_jacobian`'s docstring. Once
+    the project owner has compared the two side by side for a while, a
+    later change may drop the older pair; until then both stay so a
+    returning user doesn't see today's numbers silently disagree with an
+    old saved measurement's.
+
     The chain "Total" row's sigma is the quadrature sum of each segment's
     independently-estimated sigma (`sqrt(sum(sigma_i**2))`) — the
     standard way to propagate uncertainty across a sum of independent
     measurements — computed in `main.py` alongside the rest of the
-    measurement math, not in this display-only module.
+    measurement math, not in this display-only module. This is done
+    separately for `sigma1`/`sigma1_jac`, since they're two independent
+    estimators, not two inputs to the same total.
 
     The Log is a plain, always-editable `QPlainTextEdit`, not a
     read-only display — the project owner wanted to be able to fix or
@@ -106,6 +122,8 @@ RESULT_COLUMNS = (
     "ray_residual_mm",
     "sigma1",
     "sigma2",
+    "sigma1_jac",
+    "sigma2_jac",
 )
 """Shared column order for the results table, the copy block, and the
 log. Every row tuple passed into `MeasurementWindow.update_window` must
@@ -144,6 +162,8 @@ RESULT_HEADERS = {
     "ray_residual_mm": "Ray Residual (mm)",
     "sigma1": "σZ / σLen (mm)",
     "sigma2": "σRange (mm)",
+    "sigma1_jac": "σZ / σLen (Jacobian, mm)",
+    "sigma2_jac": "σRange (Jacobian, mm)",
 }
 """Human-readable header text for each `RESULT_COLUMNS` entry, used for
 both the table column headings and the tab-separated header line in the
