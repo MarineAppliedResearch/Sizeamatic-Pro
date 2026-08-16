@@ -813,7 +813,7 @@ perturbations.
 - [x] Manual proof test comparing old vs. new numbers on a real measurement
       — confirmed working
 
-## Phase 14 — Investigate 3D bundle-adjustment calibration (research spike) `[ ]`
+## Phase 14 — Investigate 3D bundle-adjustment calibration (research spike) `[x]`
 
 Investigate — without committing to implement — a photogrammetric
 bundle-adjustment calibration mode using a 3-D calibration target, to see
@@ -831,36 +831,224 @@ custom per-view initial pose plus a hand-built sparse least-squares solve —
 `cv2.calibrateCamera`'s Zhang-method initial guess assumes a planar target
 per view, so it can't just be handed 3-D object points as-is.
 
-- [ ] Investigate 3-D target options (ArUco-faced cube vs.
-      precisely-surveyed discrete targets) and what's fabricable/measurable
-      in-house
-- [ ] Investigate `scipy` (not currently a dependency) as a new dependency
-      vs. a hand-rolled least-squares solve
-- [ ] Prototype a minimal bundle-adjustment solve against **synthetic**
-      data only, to validate the math before investing in physical target
-      fabrication
-- [ ] Investigate known-distance scale-bar validation as a standing
-      calibration QA step (useful regardless of which calibration mode
-      produced the calibration)
-- [ ] Close with a decision: pursue full implementation as its own future
-      phase, adopt partial pieces only (e.g. scale-bar validation without
-      full bundle adjustment), or defer entirely
-- [ ] No changes to the existing checkerboard/ChArUco calibration path in
-      this phase
+**Important framing, confirmed with the project owner:** this would be an
+**additional, optional** calibration mode alongside the existing
+checkerboard/ChArUco workflow (matching `perform_calibration.py`'s
+existing board-type-choice pattern) — not a replacement for it. Nothing
+here proposes removing or changing today's default calibration path.
 
-## Phase 15 — MARE API integration (future, not yet scoped) `[ ]`
+- [x] Investigate 3-D target options (ArUco-faced cube vs.
+      precisely-surveyed discrete targets) and what's fabricable/measurable
+      in-house — project owner confirmed the realistic fabrication path is
+      **3D printing + manual measurement** (calipers or similar), not
+      professional machining/surveying. Given that, an **ArUco-faced cube**
+      is the clear choice over discrete surveyed targets: it reuses this
+      app's existing ChArUco/ArUco detection code
+      (`perform_calibration.py`'s `build_charuco_detector`/
+      `detect_charuco_points`) almost entirely unchanged (just detecting
+      each face as its own small ChArUco board, tagged by which cube face
+      it is), and per-marker ID-based correspondence removes the need for
+      manual point-matching across views. A discrete-surveyed-point target
+      (e.g. a frame with a few widely-spaced precisely-known points) would
+      need either a different detection method entirely or manual point
+      clicking per calibration view, and gains little given 3D-printing
+      accuracy is already the tolerance ceiling, not detection accuracy.
+- [x] Investigate `scipy` (not currently a dependency) as a new dependency
+      vs. a hand-rolled least-squares solve — confirmed `scipy` (1.18.0)
+      installs cleanly against this project's actual Python version
+      (3.14.0) in an isolated check venv, and `scipy.optimize.least_squares`
+      with `method="lm"` solved the prototype below (20 views × 8 points ×
+      2 cameras = 320 point observations, ~140 free parameters) without
+      needing a custom sparse Jacobian or bounds. **Recommendation: use
+      `scipy`, don't hand-roll.** A hand-rolled Levenberg-Marquardt/Gauss-
+      Newton solver would just be reimplementing well-tested, actively
+      maintained code for no real benefit at this problem size; `scipy` is
+      a mainstream, permissively-licensed (BSD) dependency already common
+      in the scientific Python ecosystem this project's other dependencies
+      (`numpy`, `opencv-python`, `matplotlib`) come from. Added as a
+      **dev-only** dependency for now (`uv add --dev scipy`) since it's
+      backing an investigation prototype, not shipped app code yet; would
+      need promoting to a real runtime dependency if a future phase
+      actually builds this into the app.
+- [x] Prototype a minimal bundle-adjustment solve against **synthetic**
+      data only, to validate the math before investing in physical target
+      fabrication — `misc/bundle_adjustment_prototype.py` (not wired into
+      the app; synthetic data only, per this phase's scope). Simulates a
+      fixed stereo rig observing an 8-corner cube (with small simulated
+      3D-printing error vs. its nominal/as-designed geometry) across 20
+      random views with realistic pixel noise, then jointly refines the
+      stereo extrinsics, every view's pose, and the cube's own point
+      geometry via `scipy.optimize.least_squares`.
+      **Result: reprojection RMS dropped from 3.5px to ~0.27px and the
+      recovered stereo baseline error dropped from ~3.9mm to ~0.2-0.4mm**
+      — the core approach works.
+      **Important finding along the way, not a bug:** an unconstrained
+      "release object" bundle adjustment (letting the solver freely adjust
+      every object point's XYZ) has a **gauge/datum ambiguity** — nothing
+      in the reprojection residuals alone pins down the object-space
+      point cloud's absolute scale/position/orientation jointly with the
+      stereo extrinsics, so a naive first attempt's recovered cube
+      geometry drifted **55mm** from the true manufactured geometry
+      despite near-perfect reprojection error and a well-recovered stereo
+      baseline. **Fix:** add a soft "anchor" residual pulling solved
+      object points back toward the nominal/as-designed geometry, weighted
+      by the expected manufacturing tolerance (`1 / tolerance_mm`) rather
+      than treating the nominal geometry as exact. With that anchor added,
+      the same run recovered the cube geometry to ~0.24mm RMS (an actual
+      improvement over the 0.3mm nominal-vs-true error, not just a
+      no-op) while reprojection RMS and baseline recovery stayed just as
+      good. This directly validates the earlier EventMeasure/CAL write-up's
+      mention of CAL using "network/datum/stereo constraints" — a real
+      implementation would need this same kind of explicit constraint,
+      not just a naive joint least-squares solve.
+- [x] Investigate known-distance scale-bar validation as a standing
+      calibration QA step (useful regardless of which calibration mode
+      produced the calibration) — this needs no new math or dependency:
+      it's the app's *existing* triangulation/length pipeline
+      (`stereo_matching.triangulate_from_pixels` + Euclidean distance),
+      just pointed at an object of precisely known real-world length
+      instead of an animal. **Recommendation:** add this as a lightweight
+      calibration-report step (`generate_calibration_report.py`/the
+      Calibration Report window) — after any calibration (checkerboard,
+      ChArUco, or a future bundle-adjustment mode), let the user click a
+      known-length object's two ends in both rectified views and report
+      measured-vs-known length as a pass/fail-style QA line. This is cheap,
+      useful today with zero dependency on the rest of this phase, and
+      isn't gated on the bundle-adjustment work below — worth scoping as
+      its own small future phase rather than only-if-bundle-adjustment
+      ships.
+- [x] Close with a decision: pursue full implementation as its own future
+      phase, adopt partial pieces only (e.g. scale-bar validation without
+      full bundle adjustment), or defer entirely — **decision: adopt
+      partial pieces now, defer the rest.** Known-distance scale-bar
+      validation is worth its own near-term phase regardless of what
+      happens with bundle adjustment. Full bundle-adjustment calibration
+      (as an **additional, optional** mode, never a replacement for
+      checkerboard/ChArUco — see framing note above) is real and
+      achievable given this phase's findings, but is a substantially
+      bigger lift than Phases 12-13: physical cube fabrication +
+      measurement, a new in-app calibration-mode UI path (ArUco-cube
+      capture, multi-view management), the anchor-weight/tolerance
+      tuning this phase's prototype surfaced as necessary, and real
+      validation against physically captured footage (not just synthetic
+      data) before it could be trusted. Recommend scoping that as its own
+      dedicated future phase, planned in detail the way Phase 5/9/10 were,
+      once there's appetite to commit the physical-fabrication effort -
+      not opened as open-ended work off the back of this research spike.
+- [x] No changes to the existing checkerboard/ChArUco calibration path in
+      this phase — confirmed: `perform_calibration.py` untouched;
+      `misc/bundle_adjustment_prototype.py` is a new, standalone,
+      synthetic-data-only file with no import/call path from the app.
+
+## Phase 15 — 3D bundle-adjustment calibration (build) `[ ]`
+
+Build the photogrammetric bundle-adjustment calibration mode investigated
+in Phase 14, now that its math and dependency choice (`scipy`) are
+validated against synthetic data. Driven by scientific rigor / closing the
+methodology gap with SeaGIS EventMeasure/CAL — **not** a response to an
+observed field accuracy problem with the existing pipeline (confirmed with
+the project owner when this phase was planned), so this is built and
+validated carefully rather than rushed, and treated as genuinely optional
+the whole way through.
+
+**Framing, carried over from Phase 14 and non-negotiable for this phase:**
+this is an **additional, optional** calibration mode alongside the
+existing checkerboard/ChArUco workflow — never a replacement for it. The
+existing pipeline (`perform_calibration.py`, `calibration_io.py`,
+`stereo_matching.py`) stays the default and stays untouched in its
+behavior; this phase only adds a new, separately-chosen path that ends in
+the same `PL`/`PR` NPZ format everything downstream already expects.
+
+Numbered steps (Phase-10-style, since this has a real physical-fabrication
+dependency, not just software):
+
+- [ ] **Step 0 — Design and fabricate the 3D calibration target.** Decide
+      cube size (should span the real working range this app is used at),
+      design distinct ArUco marker IDs per face so cross-face
+      correspondence is unambiguous, 3D print it, then manually measure
+      it with calipers to build the "nominal" object-point geometry the
+      solver anchors to (Phase 14's finding: this anchor is load-bearing,
+      not optional). Open question to resolve during this step: how many
+      cube faces are typically visible per view, and whether a
+      single-/two-face view (fewer detected points than the full 8-corner
+      set the Phase 14 prototype assumed) still gives a robust per-view
+      pose.
+- [ ] **Step 1 — Per-face detection + multi-face correspondence.** Extend
+      `perform_calibration.py`'s existing `build_charuco_detector` pattern
+      into a "cube board" detector: detect each visible face
+      independently, tag points by `(face_id, corner_id)`, and combine
+      multiple simultaneously-visible faces into one set of
+      image-point/object-point correspondences per captured image.
+- [ ] **Step 2 — Multi-view capture flow.** New capture UI built on top of
+      the existing frame-pair capture pattern, but designed for many
+      diverse cube poses/rolls (not the flat sweeps a planar checkerboard
+      capture session uses) — likely with on-screen "rotate the cube and
+      capture again" guidance, since view diversity is what actually
+      decorrelates the solved parameters. Open question: how many views
+      is "enough" for a given real rig - Phase 14's synthetic prototype
+      used 20; validate a real target count against reprojection RMS and
+      parameter-recovery stability rather than assuming that number
+      transfers directly to real data.
+- [ ] **Step 3 — Per-view initial pose estimation.** `cv2.solvePnP` per
+      view against the nominal cube geometry and that view's detected
+      left-image points, same approach as the Phase 14 prototype. Needs a
+      minimum-detected-points-per-view threshold for views with poor cube
+      visibility, mirroring `run_stereo_calibration`'s existing "at least
+      3 valid pairs" pattern.
+- [ ] **Step 4 — Production bundle-adjustment solver.** Port the Phase 14
+      prototype's math (`misc/bundle_adjustment_prototype.py`) into a real
+      module; promote `scipy` from a dev-only dependency to a full runtime
+      one. Implement the soft anchor-to-nominal-geometry constraint with a
+      configurable tolerance (matching whatever manufacturing tolerance
+      Step 0's calipers actually measured, not a hardcoded guess). Open
+      decision, worth a deliberate ablation rather than guessing: refine
+      camera intrinsics jointly within the bundle adjustment, or keep them
+      fixed from a preliminary per-camera `cv2.calibrateCamera` pass (the
+      prototype fixed them). Output must exactly match the existing
+      `PL`/`PR` NPZ shape `calibration_io.py` already loads, so nothing
+      downstream needs to change.
+- [ ] **Step 5 — New calibration-mode UI.** Add a new option alongside
+      Checkerboard/ChArUco in `perform_calibration.py`'s board-type choice
+      (e.g. "3D Cube (Advanced)"). Open UX decision to make during this
+      step: how the user enters/manages the cube's as-measured geometry
+      from Step 0 (a small config file, manual per-corner entry, or
+      something else).
+- [ ] **Step 6 — Validate against real footage.** Requires Step 0's
+      physical cube to exist. Capture real stereo footage of it across
+      many views, run both the existing pipeline and this new one against
+      comparable data, and validate using the known-distance scale-bar
+      check (a separately-scoped, near-term phase per Phase 14's
+      findings — build/borrow it before this step, not from scratch here)
+      plus Phase 12's `ReprojRMS`/`RayResidual` diagnostics as consistency
+      checks. **This step is a hard gate, not a formality:** if real-world
+      results don't show a meaningful improvement at the ranges this app
+      is actually used at, that is a legitimate, fully documented
+      "investigated, not worth the added complexity for our use case"
+      outcome — not a reason to push the new mode into default use anyway,
+      given this phase's own driving motivation was rigor, not a known
+      problem to fix.
+- [ ] **Step 7 — Decide presentation.** Given the existing pipeline stays
+      the default calibration path regardless of this step's outcome,
+      decide how the new mode is labeled/surfaced in the UI (clearly
+      marked advanced/experimental rather than presented as a plain
+      alternative), and how Step 6's real-footage validation results feed
+      the Phase 17 white paper update below.
+
+## Phase 16 — MARE API integration (future, not yet scoped) `[ ]`
 
 Interface with the overall MARE API to record measurement data, etc. Noted
 here so it isn't forgotten, but not to be planned in detail until we reach it.
 
-## Phase 16 — Update the measurement white paper (future, not yet scoped) `[ ]`
+## Phase 17 — Update the measurement white paper (future, not yet scoped) `[ ]`
 
 Update `docs/Sizeamatic_Pro_Stereo_Length_Measurement_Method.docx (1).pdf`
 (the scientific write-up of Sizeamatic Pro's stereo length measurement
-method) to document the new calculations added in Phases 12-14 — the
-object-space `StereoRayResidual(mm)` metric, the Jacobian/covariance
-uncertainty propagation, and whatever comes out of the 3D
-bundle-adjustment calibration investigation. Noted here so it isn't
-forgotten, but not to be planned in detail (including how a `.docx`/PDF
-source gets edited, given the rest of this project's tooling is
-plain-text/git-based) until we reach it.
+method) to document the new calculations added in Phases 12-13 — the
+object-space `StereoRayResidual(mm)` metric and the Jacobian/covariance
+uncertainty propagation — plus, if Phase 15 is completed, the 3D
+bundle-adjustment calibration mode and its Step 6 real-footage validation
+results (including an honest account if that step concluded it wasn't
+worth adopting for this project's actual use case). Noted here so it
+isn't forgotten, but not to be planned in detail (including how a
+`.docx`/PDF source gets edited, given the rest of this project's tooling
+is plain-text/git-based) until we reach it.
