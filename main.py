@@ -264,14 +264,14 @@ QToolBar { background-color: #121a2b; border: none; spacing: 10px; padding: 8px;
 QPushButton { background-color: #1a2438; color: #e8eefc; border: 1px solid #263351; border-radius: 5px; padding: 8px 16px; }
 QPushButton:hover { background-color: #22304d; }
 QPushButton:checked { background-color: #2f6fed; }
-QComboBox, QCheckBox, QSpinBox { color: #e8eefc; }
-QComboBox, QSpinBox { background-color: #1a2438; border: 1px solid #263351; border-radius: 5px; padding: 6px 10px; }
+QComboBox, QCheckBox, QSpinBox, QLineEdit { color: #e8eefc; background-color: transparent; }
+QComboBox, QSpinBox, QLineEdit { border: 1px solid #263351; border-radius: 5px; padding: 6px 10px; }
 QCheckBox { padding: 4px 8px; spacing: 8px; }
 QCheckBox::indicator { width: 16px; height: 16px; }
 QSlider::groove:horizontal { background: #1a2438; height: 4px; border-radius: 2px; margin: 0 4px; }
 QSlider::handle:horizontal { background: #2f6fed; width: 14px; margin: -6px 0; border-radius: 7px; }
 QStatusBar { color: #8ea2c6; padding: 4px 10px; }
-QLabel { padding: 2px 4px; }
+QLabel { background-color: transparent; padding: 2px 4px; }
 QLabel#rectifiedIndicator[state="rectified"] { color: #2fbf71; }
 QLabel#rectifiedIndicator[state="not_rectified"] { color: #ef5350; }
 """
@@ -665,7 +665,12 @@ class SizeamaticProApp(QMainWindow):
         for i, (attr_name, max_len, placeholder) in enumerate(box_specs):
             entry = QLineEdit()
             entry.setPlaceholderText(placeholder)
-            entry.setFixedWidth(14 * (max_len + 1))
+            # Wide enough for the placeholder text plus this QLineEdit's
+            # QSS padding/border (~22px of non-text chrome) with a little
+            # slack - too tight and Qt silently elides the placeholder to
+            # "..." for wider letter combinations (e.g. "MM"/"DD"/"HH")
+            # while narrower ones (e.g. "SS") happen to still fit.
+            entry.setFixedWidth(85 if max_len == 4 else 62)
             entry.setMaxLength(max_len)
             setattr(self, attr_name, entry)
             self.real_time_entries.append(entry)
@@ -2176,6 +2181,15 @@ class SizeamaticProApp(QMainWindow):
         )
         if self.real_time_anchor_dt is not None:
             self.time_sync_indicator.setText("✓ Synced")
+
+        # The videos were already loaded (and _update_frame_labels already
+        # ran as a side effect) above, before the anchor was restored just
+        # now - so the readout row and the six entry boxes rendered with
+        # no anchor in effect yet and never got refreshed afterward,
+        # leaving them showing "(not set)"/blank until something else
+        # (e.g. pressing Play) happened to trigger a redraw. Refresh now
+        # so a restored anchor is visible immediately.
+        self._update_frame_labels()
 
         self.measurement_window.restore_log_text(project["measurement_log_text"])
 

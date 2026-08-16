@@ -133,6 +133,14 @@ class CalibrationSummaryWindow:
         table.setHorizontalHeaderLabels(["Item", "Value"])
         table.verticalHeader().setVisible(False)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        # Qt's default column width (sized off the header text alone,
+        # e.g. "Item"/"Value") is much too narrow for this table's actual
+        # content (labels like "Relative rotation angle (deg)", values
+        # like "fx 800.00  fy 800.00  cx 320.00  cy 240.00") - still
+        # user-resizable (Interactive, above), just starting at a
+        # reasonable width instead of needing a manual drag first.
+        table.setColumnWidth(0, 280)
+        table.setColumnWidth(1, 380)
         outer.addWidget(table, stretch=1)
 
         copy_label = QLabel("Copy")
