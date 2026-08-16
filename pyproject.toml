@@ -1,0 +1,34 @@
+[project]
+name = "sizeamatic-pro"
+version = "1.0.0"
+requires-python = ">=3.14"
+license = "Apache-2.0"
+authors = [
+    { name = "Marine Applied Research & Exploration", email = "isaac@maregroup.org" },
+]
+dependencies = [
+    "customtkinter>=6.0.0",
+    "matplotlib>=3.11.1",
+    "numpy>=2.5.1",
+    "opencv-python>=5.0.0.93",
+    "pillow>=12.3.0",
+    "pyside6>=6.11.1",
+    "qtawesome>=1.4.2",
+    "reportlab>=5.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "mkdocs>=1.6.1",
+    "mkdocstrings[python]>=1.0.6",
+    "pyinstaller>=6.22.0",
+    "pytest>=9.1.1",
+    "scipy>=1.18.0",
+]
+
+[tool.pytest.ini_options]
+# The app's modules (main.py, stereo_matching.py, etc.) live flat at the repo
+# root rather than in an installable package, so pytest needs an explicit
+# pythonpath entry to import them from tests/.
+pythonpath = ["."]
+testpaths = ["tests"]

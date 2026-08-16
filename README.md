@@ -79,3 +79,17 @@ If you encounter a calibration mismatch, decode issue, or measurement instabilit
 - a screenshot of the Sizeamatic Pro window showing the issue
 
 and include them in your support request.
+
+---
+
+## Contributing
+
+Contributions are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the
+branching model, commit conventions, and code style this project follows,
+and [`AGENTS.md`](AGENTS.md) for the full development conventions. Please
+open an issue before starting non-trivial work. This project follows the
+[Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md).
+
+## License
+
+Sizeamatic Pro is licensed under the [Apache License 2.0](LICENSE).

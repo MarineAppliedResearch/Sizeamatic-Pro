@@ -1,890 +1,1384 @@
-# Sizeamatic Pro - 
-#
+"""Sizeamatic Pro main application module (PySide6).
 
+Sizeamatic Pro is a desktop tool for measuring real world distances from
+stereo video. This module defines `SizeamaticProApp`, the Qt GUI
+container that owns window/menu construction, video playback and
+timeline state, calibration loading, and the top-level event wiring
+that ties together the supporting feature modules (`stereo_matching`,
+`calibration_io`, `video_overlay`).
 
+This is a PySide6 port of the original Tkinter app (ROADMAP.md Phase
+11) - the project owner decided Tkinter/ttk couldn't reach the
+polish/consistency bar this app needs (its native menu bar can't be
+dark-themed at all, and a hand-built ttk replacement menu system was
+tried and rejected as too much reimplemented-from-scratch risk for
+something used constantly). PySide6's QSS stylesheets style
+everything, including menus, without fighting the OS. The underlying
+measurement/calibration math (`stereo_matching.py`, `calibration_io.py`,
+`project_io.py`) is completely framework-independent and needed zero
+changes for this port.
+
+Every screen from the original Tkinter app is now ported: video
+loading/playback/sync, pan/zoom, and point placement/dragging/
+refinement (see `video_overlay.py`); the measurement pipeline, results
+window (`measurement_window.py`), and real-time sync; calibration
+summary (`calibration_summary.py`); frame-pair capture and running a
+new calibration (`perform_calibration.py`); printable calibration
+target generation (`generate_calibration_target.py`); the anaglyph 3D
+preview (`anaglyph_preview.py`); and project save/load/recent projects.
+Small shared Qt-only helpers (PIL-to-`QPixmap` conversion, a
+close-callback `QDialog` base) live in `qt_helpers.py` so the four
+sub-window modules can use them without importing back from this file.
+
+See `ARCHITECTURE.md` for how responsibilities are currently split
+across files, and `README.md` for the user-facing description of the
+app.
+"""
+
+import ctypes
+import datetime
 import os
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+import signal
+import sys
+import time
+import tomllib
 
 import cv2
-import base64
+import qtawesome as qta
+from PIL import Image
 
-import numpy as np
-import math
+from PySide6.QtCore import QSize, QTimer, Qt
+from PySide6.QtGui import QAction, QCursor, QIcon, QImage, QPixmap
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QSizePolicy,
+    QSlider,
+    QSpinBox,
+    QSplashScreen,
+    QSplitter,
+    QStatusBar,
+    QToolBar,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+import anaglyph_preview
+import calibration_io
+import calibration_summary
+import generate_calibration_target
+import measurement_window
+import perform_calibration
+import prepare_splash_image
+import project_io
+import recent_projects
+import stereo_matching
+import video_overlay
+from qt_helpers import enable_dark_title_bar, pil_image_to_qpixmap
 
 
-class SizeamaticProApp:
+def resource_path(relative_path):
+    """Get the correct path to a bundled resource file.
+
+    When running normally, this returns a path relative to the source
+    folder. When running from PyInstaller, this returns a path inside
+    the bundled app. Unchanged from the original Tkinter app - no
+    framework dependency to begin with.
+
+    Args:
+        relative_path (str): The file path relative to the project root.
+
+    Returns:
+        str: The absolute path to the requested resource.
     """
-    Main GUI container for Sizeamatic Pro.
+    if hasattr(sys, "_MEIPASS"):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.abspath("."), relative_path)
+
+
+def get_app_version():
+    """Read this app's version string from `pyproject.toml`.
+
+    Unchanged from the original - reads via `resource_path` rather than
+    a path relative to `__file__`, since a packaged build's `__file__`
+    resolves inside PyInstaller's temporary extraction folder.
+
+    Returns:
+        str: The version string (e.g. "0.1.0"), or "unknown" if
+        `pyproject.toml` can't be found or parsed for any reason.
+    """
+    try:
+        with open(resource_path("pyproject.toml"), "rb") as f:
+            data = tomllib.load(f)
+        return str(data["project"]["version"])
+    except Exception:
+        return "unknown"
+
+
+STARTUP_SPLASH_MIN_SECONDS = 2.0
+"""Minimum time the startup splash (`_show_startup_splash`) stays on
+screen, even if building the app finishes faster than that - so it's
+actually readable rather than a barely-visible flash on a fast machine
+or a source run. Unchanged from the original."""
+
+STARTUP_SPLASH_MAX_WIDTH_PX = 720
+"""Cap the splash's on-screen width, scaling the source art down
+proportionally if it's larger. Unchanged from the original."""
+
+
+def _show_startup_splash():
+    """Show a splash screen while the rest of the app builds.
+
+    Uses Qt's own `QSplashScreen` rather than a hand-rolled borderless
+    window (the original Tkinter app had no built-in splash widget, so
+    it had to build one from a plain `Toplevel`) - reuses
+    `prepare_splash_image.py`'s existing flatten/version-text pipeline
+    unchanged, since that module never depended on Tkinter to begin
+    with.
+
+    Best-effort: returns None (skipping the splash entirely) if the
+    splash image can't be prepared for any reason, rather than blocking
+    startup over a missing/corrupt art asset.
+
+    Returns:
+        QSplashScreen | None: The already-shown splash screen, with a
+        `.progress_bar` attribute (a `QProgressBar` child widget near
+        the bottom, next to the version text) the caller should drive
+        from 0 to 100 over the splash's on-screen duration - or None.
+    """
+    try:
+        img = prepare_splash_image.flatten_splash_image(resource_path("assets/splash-pro.png"))
+        img = prepare_splash_image.add_version_text(img, f"v{get_app_version()}")
+
+        if img.width > STARTUP_SPLASH_MAX_WIDTH_PX:
+            scale = STARTUP_SPLASH_MAX_WIDTH_PX / img.width
+            img = img.resize((STARTUP_SPLASH_MAX_WIDTH_PX, round(img.height * scale)), Image.LANCZOS)
+
+        pixmap = pil_image_to_qpixmap(img)
+    except Exception:
+        return None
+
+    splash = QSplashScreen(pixmap)
+
+    # Center on whichever screen the cursor is actually on, not Qt's
+    # "primary" screen - on a multi-monitor setup those aren't always
+    # the same one, and a new top-level window generally ends up on
+    # whichever screen the user's actually working on/looking at, not
+    # necessarily the one Qt considers primary.
+    screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+    if screen is not None:
+        available = screen.availableGeometry()
+        x = available.x() + (available.width() - pixmap.width()) // 2
+        y = available.y() + (available.height() - pixmap.height()) // 2
+        splash.move(x, y)
+
+    # A thin progress bar near the bottom, on its own row *above* the
+    # version text's own bottom-margin row (not sharing it) - driven by
+    # the caller (main()) from 0 to 100 across the splash's minimum
+    # on-screen duration, so there's a visible sign of progress rather
+    # than a static image.
+    bar_height = 4
+    margin = max(12, pixmap.width() // 40)
+    # add_version_text sizes its font as roughly height/22 (before this
+    # image was scaled down to fit STARTUP_SPLASH_MAX_WIDTH_PX, but that
+    # scale-down preserves aspect ratio, so the ratio of text height to
+    # image height carries over) - used here purely to clear that text
+    # row, not to match it exactly.
+    version_text_row_estimate = max(12, pixmap.height() // 22)
+    bar_y = pixmap.height() - margin - version_text_row_estimate - 8 - bar_height
+    progress_bar = QProgressBar(splash)
+    progress_bar.setRange(0, 100)
+    progress_bar.setValue(0)
+    progress_bar.setTextVisible(False)
+    progress_bar.setGeometry(margin, bar_y, pixmap.width() - margin * 2, bar_height)
+    progress_bar.setStyleSheet(
+        "QProgressBar { background-color: rgba(255, 255, 255, 40); border: none; border-radius: 2px; }"
+        "QProgressBar::chunk { background-color: #2f6fed; border-radius: 2px; }"
+    )
+    progress_bar.show()
+    splash.progress_bar = progress_bar
+
+    splash.show()
+    return splash
+
+
+ICON_COLOR = "#e8eefc"
+"""Toolbar icon color - matches DARK_QSS's primary text color, so
+qtawesome-rendered Font Awesome icons (`qta.icon(name, color=ICON_COLOR)`)
+read consistently with the surrounding button/label text."""
+
+ZOOM_MIN = 1.0
+ZOOM_MAX = 10.0
+ZOOM_STEP = 1.10
+"""Per-wheel-notch zoom multiplier and bounds - see
+`video_overlay.VideoPane.wheelEvent`."""
+
+HANDLE_RADIUS_PX = 8
+"""On-screen radius, in pixels, of each drawn point handle ring."""
+
+MAX_POINTS_PER_PANE = 20
+"""Hard cap on how many measurement points one pane can hold."""
+
+DEFAULT_VIDEO_ASPECT_RATIO = 1280 / 800
+"""Width/height ratio of the stereo rigs' actual footage - used to size
+the main window's default height so the video panes end up close to
+this ratio instead of leaving letterbox bars, whatever screen the app
+opens on. Individual videos can still be a different ratio - the panes
+just letterbox/pillarbox as usual in that case."""
+
+WINDOW_SCREEN_FRACTION = 0.9
+"""Fraction of the target screen's available width/height the main
+window sizes itself to on startup - see `_size_window_to_screen`."""
+
+SPEED_TABLE = {
+    "0.25x": 0.25,
+    "0.5x": 0.5,
+    "1x": 1.0,
+    "2x": 2.0,
+    "4x": 4.0,
+}
+"""Playback speed label -> speed multiplier. "1x" means the video's own
+real fps, not a fixed assumption - `_compute_playback_timing` turns a
+multiplier and the loaded video's actual fps into a concrete
+`(frame_step, tick_delay_ms)` pair. Previously this table hardcoded
+`(step, delay_ms)` pairs derived from an assumed ~25fps, so footage at
+any other fps played at the wrong rate even at "1x" - see FINDINGS.md
+#10 and ROADMAP.md Phase 7's deferred playback-speed item."""
+
+MAX_SEQUENTIAL_SKIP_FRAMES = 10
+"""Largest forward frame-index gap `_read_frame_at` will close by
+decoding-and-discarding rather than seeking. Comfortably covers every
+`SPEED_TABLE` step (currently up to 4, for "4x") with headroom for a
+faster speed being added later, while staying well under the point
+where decode-and-discard's linear per-frame cost would outgrow a
+seek's flat cost."""
+
+DEFAULT_PLAYBACK_FPS = 25.0
+"""Fallback fps for `_compute_playback_timing` if a loaded video
+somehow reports a nonsensical fps (e.g. 0, from corrupt metadata) -
+`_open_video_capture` doesn't currently validate fps the way it
+validates width/height/frame_count are positive."""
+
+
+def _compute_playback_timing(fps, speed_label):
+    """Turn a video's real fps and a `SPEED_TABLE` speed label into a
+    concrete `(frame_step, tick_delay_ms)` pair for `_playback_tick`.
+
+    "1x" ticks once every `1000/fps` ms (the video's actual native
+    rate), advancing one frame per tick. Slower-than-1x speeds keep
+    that one-frame step but stretch the tick interval; faster-than-1x
+    speeds keep the native tick interval but skip more frames per
+    tick - same tradeoff the old hardcoded `SPEED_TABLE` used, just
+    parameterized by the real fps instead of assuming ~25fps.
+
+    Args:
+        fps (float): The loaded video's actual frames per second.
+            Falls back to `DEFAULT_PLAYBACK_FPS` if not positive.
+        speed_label (str): One of `SPEED_TABLE`'s keys (e.g. "1x").
+            Falls back to a 1.0 multiplier if not a recognized label.
+
+    Returns:
+        tuple[int, int]: `(frame_step, tick_delay_ms)`, both at least 1.
+    """
+    if not fps or fps <= 0:
+        fps = DEFAULT_PLAYBACK_FPS
+
+    multiplier = SPEED_TABLE.get(speed_label, 1.0)
+    native_delay_ms = 1000.0 / fps
+
+    if multiplier >= 1.0:
+        step = max(1, round(multiplier))
+        delay_ms = round(native_delay_ms)
+    else:
+        step = 1
+        delay_ms = round(native_delay_ms / multiplier)
+
+    return step, max(1, delay_ms)
+
+DARK_QSS = """
+QMainWindow, QWidget { background-color: #0a0f1a; color: #e8eefc; font-family: "Segoe UI"; font-weight: bold; font-size: 11pt; }
+QMenuBar { background-color: #121a2b; color: #e8eefc; padding: 4px 6px; }
+QMenuBar::item { padding: 6px 14px; border-radius: 4px; }
+QMenuBar::item:selected { background-color: #2f6fed; }
+QMenu { background-color: #121a2b; color: #e8eefc; border: 1px solid #263351; padding: 6px; }
+QMenu::item { padding: 8px 28px 8px 16px; border-radius: 4px; }
+QMenu::item:selected { background-color: #2f6fed; }
+QMenu::separator { height: 1px; background: #263351; margin: 6px 10px; }
+QToolBar { background-color: #121a2b; border: none; spacing: 10px; padding: 8px; }
+QToolButton#qt_toolbar_ext_button { background-color: #1a2438; border: 1px solid #263351; border-radius: 5px; }
+QToolButton#qt_toolbar_ext_button:hover { background-color: #22304d; }
+QPushButton { background-color: #1a2438; color: #e8eefc; border: 1px solid #263351; border-radius: 5px; padding: 8px 16px; }
+QPushButton:hover { background-color: #22304d; }
+QPushButton:checked { background-color: #2f6fed; }
+QComboBox, QCheckBox, QSpinBox, QLineEdit { color: #e8eefc; background-color: transparent; }
+QComboBox, QSpinBox, QLineEdit { border: 1px solid #263351; border-radius: 5px; }
+QComboBox, QSpinBox { padding: 6px 10px; }
+QLineEdit { padding: 4px 6px; }
+QCheckBox { padding: 4px 8px; spacing: 8px; }
+QCheckBox::indicator { width: 16px; height: 16px; }
+QSlider::groove:horizontal { background: #1a2438; height: 4px; border-radius: 2px; margin: 0 4px; }
+QSlider::handle:horizontal { background: #2f6fed; width: 14px; margin: -6px 0; border-radius: 7px; }
+QStatusBar { color: #8ea2c6; padding: 4px 10px; }
+QLabel { background-color: transparent; padding: 2px 4px; }
+QLabel#rectifiedIndicator[state="rectified"] { color: #2fbf71; }
+QLabel#rectifiedIndicator[state="not_rectified"] { color: #ef5350; }
+"""
+
+
+class Var:
+    """Minimal `.get()`/`.set()` box, used only where a ported pure-
+    logic module (`stereo_matching.py`) expects Tk-Variable-style
+    access (`app.view_rectified.get()`). Everywhere else in this Qt
+    app, plain attributes are used directly - this shim exists purely
+    for that one cross-module contract, not as a general pattern.
     """
 
-    def __init__(self, root):
-        self.root = root
+    def __init__(self, value):
+        """Store the initial value.
 
-        # Tkinter is Python, but we still use // per your inline comment rule preference.
-        # However: Python does not support // comments as syntax.
-        # So in Python we must use # for comments.
-        #
-        # I will keep comments compact and frequent using #.
+        Args:
+            value: The initial value `.get()` should return.
 
-        # ---- Window setup ----
-        self.root.title("Sizeamatic Pro")
-        self.root.minsize(1100, 700)
+        Returns:
+            None
+        """
+        self._value = value
 
-        # ---- State flags (UI only for now) ----
-        self.view_rectified = tk.BooleanVar(value=False)
-        self.fit_to_window = tk.BooleanVar(value=True)
-        self.show_overlays = tk.BooleanVar(value=True)
-        self.show_epipolar = tk.BooleanVar(value=False)
-        self.lock_lr = tk.BooleanVar(value=True)
+    def get(self):
+        """Return the current value.
 
-         # ---- File state ----
-        self.left_video_path = None
-        self.right_video_path = None
-        self.calibration_folder = None
+        Returns:
+            The stored value.
+        """
+        return self._value
 
-        # ---- OpenCV video captures ----
-        # These remain open for the lifetime of the app, so seeking is fast.
+    def set(self, value):
+        """Store a new value.
+
+        Args:
+            value: The new value to store.
+
+        Returns:
+            None
+        """
+        self._value = value
+
+
+class SizeamaticProApp(QMainWindow):
+    """Owns the main window, video state, and top-level event wiring.
+
+    One instance is the whole app - built and shown by `main()`.
+    """
+
+    def __init__(self):
+        """Initialize all app state and build the window.
+
+        Returns:
+            None
+        """
+        super().__init__()
+        self.setWindowTitle("Sizeamatic Pro")
+        # Fallback default size, used if `main()` can't detect a screen to
+        # size against (see `_size_window_to_screen`) - height still tuned
+        # to DEFAULT_VIDEO_ASPECT_RATIO so the panes don't letterbox by
+        # default even in that fallback case.
+        self.resize(1400, round(1400 / 2 / DEFAULT_VIDEO_ASPECT_RATIO) + 170)
+
+        # assets/icon.ico is regenerated from assets/default-icon.png on
+        # every build (create_app_icon.py); stays best-effort so a missing/
+        # invalid icon file doesn't crash startup.
+        icon_path = resource_path("assets/icon.ico")
+        if os.path.isfile(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+
+        # ---- Video capture/metadata state ----
         self.capL = None
         self.capR = None
-
-        # ---- Video metadata ----
-        # Each meta dict contains: fps, width, height, frame_count
         self.metaL = None
         self.metaR = None
+        self.left_video_path = None
+        self.right_video_path = None
 
-        # ---- Timeline state ----
-        # Frame indices are the master timeline values.
-        self.left_frame_index = tk.IntVar(value=0)
-        self.right_frame_index = tk.IntVar(value=0)
-
-        # Max frame index inclusive for each stream.
-        # These are updated after loading video and when lock mode changes.
+        # ---- Frame index/range state ----
+        self.left_frame_index = 0
+        self.right_frame_index = 0
         self.left_frame_max = 0
         self.right_frame_max = 0
 
-        # ---- Playback loop state ----
-        self.is_playing = False
-        self.play_after_id = None
+        # ---- Cached currently-displayed frames (post-rectification, if
+        # rectified view is on) - read by the scanline matcher. ----
+        self.current_frameL = None
+        self.current_frameR = None
 
-        # ---- Tk image handles ----
-        # Tk will garbage collect images unless we keep a reference.
-        self.tkimg_left = None
-        self.tkimg_right = None
-
-        # Prevents recursive slider callbacks when we update slider positions in code.
-        self._suppress_slider_callbacks = False
-
-        # ---- Root layout ----
-        # Row 0: menu (handled by root.config(menu=...))
-        # Row 1: toolbar
-        # Row 2: main panes
-        # Row 3: status bar
-        self.root.grid_rowconfigure(2, weight=1)
-        self.root.grid_columnconfigure(0, weight=1)
-
-        # ---- Build UI ----
-        self._build_menu()
-        self._build_toolbar()
-        self._build_viewers()
-        self._build_statusbar()
-
-        # ---- Initial UI refresh ----
-        self._refresh_status_left()
-        self._refresh_placeholder_canvases()
-
-        # When locked, the videos stay aligned by a fixed frame offset.
-        # Definition: offset = right_index - left_index.
-        # Example: if right is 12 frames ahead of left, offset = +12.
+        # ---- View/sync state ----
+        self.lock_lr = True
         self.lock_offset_frames = 0
+        """`right_index - left_index` while locked."""
 
-        # Debounce handle for resize redraw.
-        # Resize events can fire dozens of times per second while dragging the window.
-        self._resize_after_id = None
+        self.view_rectified = Var(False)
+        """Wrapped in `Var` - `stereo_matching.py` expects
+        `app.view_rectified.get()`."""
 
-        # Per pane point lists stored in IMAGE PIXEL coordinates.
-        # These are the authoritative coordinates for measurement.
+        self.cal = None
+        """Loaded calibration dict (`calibration_io.load_calibration_bundle`'s
+        result), or None."""
+
+        self.calibration_folder = None
+        """The folder `self.cal` was loaded from, or None - separate
+        from `self.cal` itself since project files save/restore the
+        folder path, not the loaded arrays."""
+
+        # ---- Measurement point state ----
         self.ptsL = []
         self.ptsR = []
 
-        # Current cap for points per pane.
-        # We start with 2 for a line, but later we can raise this for curves.
-        self.max_points_per_pane = 2
+        self.click_sigma_px = 3.0
+        """Assumed user click-placement uncertainty, in image pixels. An
+        explicit modeling assumption (not a measured value) fed into
+        `stereo_matching.py`'s perturbation-based uncertainty estimates
+        (`estimate_point_sigma_mm`, `estimate_segment_sigma_len_mm`) to
+        translate pixel-level click imprecision into millimeter-level
+        depth/length uncertainty estimates."""
 
-        # Handle radius in SCREEN pixels (after scaling).
-        # Handles are large so you can click them directly without hit test math.
-        self.handle_radius_px = 8
+        # ---- Project save/load state ----
+        self.current_project_name = None
+        self.last_recorded_snapshot = None
 
-        # Drag state for moving an existing handle.
-        # drag_index is the point index we are moving (0, 1, ...).
-        self.drag_active = False
-        self.drag_which = None
-        self.drag_index = None
+        self.real_time_anchor_frame = None
+        """The left-timeline frame index the user was on when they last
+        set the real-world time anchor (`on_real_time_entered`), or None
+        if no anchor has been set."""
 
-        # Per pane view state for zoom and pan.
-        # zoom is unitless scale multiplier applied on top of fit-to-window scaling.
-        # off_x/off_y are screen-pixel offsets applied after scaling.
-        self.viewL = {"zoom": 1.0, "off_x": 0.0, "off_y": 0.0}
-        self.viewR = {"zoom": 1.0, "off_x": 0.0, "off_y": 0.0}
+        self.real_time_anchor_iso = None
+        """The persisted (project-file-friendly) ISO-8601 form of the
+        real-time anchor, or None. `self.real_time_anchor_dt` below is
+        the live `datetime.datetime` parsed from this - kept as a
+        separate attribute rather than parsing on every read, and kept
+        as an ISO string here (rather than storing the `datetime`
+        directly) since that's the format `project_io.py` round-trips
+        through JSON."""
 
-        # Zoom limits.
-        self.zoom_min = 1.0
-        self.zoom_max = 10.0
+        self.real_time_anchor_dt = None
+        """The `datetime.datetime` parsed from `self.real_time_anchor_iso`,
+        read off whatever real-world clock is burned into the video at
+        `self.real_time_anchor_frame`. Together with the left video's
+        fps, this is what `_format_actual_time` uses to project the
+        real-world time at any other frame."""
 
-        # Zoom factor per mouse wheel notch.
-        self.zoom_step = 1.10
+        # ---- Shared pan/zoom/interaction constants (read by VideoPane) ----
+        self.zoom_min = ZOOM_MIN
+        self.zoom_max = ZOOM_MAX
+        self.zoom_step = ZOOM_STEP
+        self.handle_radius_px = HANDLE_RADIUS_PX
+        self.max_points_per_pane = MAX_POINTS_PER_PANE
 
-        # Calibration bundle loaded from NPZ files.
-        # None means not loaded or invalid.
-        self.cal = None
+        # ---- Playback state ----
+        self.is_playing = False
+        self.playback_timer = QTimer(self)
+        self.playback_timer.setSingleShot(True)
+        # Qt's default QTimer uses a "coarse" timer type - intentionally
+        # imprecise (Qt reserves the right to fire up to ~5% or so late)
+        # so the OS can batch wakeups for power efficiency. That slack
+        # was the dominant cost in real playback throughput: profiling
+        # showed decode+render alone takes under 1ms/frame, yet the real
+        # self-rescheduling timer loop averaged ~51ms between ticks
+        # against a 40ms request. PreciseTimer asks the OS for its most
+        # accurate timer facility instead.
+        self.playback_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self.playback_timer.timeout.connect(self._playback_tick)
 
-        # Measurement window state.
-        # Created lazily the first time we have a valid measurement.
-        self.meas_win = None
-        self.meas_vars = {}
-        self.meas_copy_text = None
+        self._suppress_slider_callbacks = False
 
-        # Assumed user click uncertainty in pixels for uncertainty estimation.
-        # This is an explicit assumption used to estimate sigma values in millimeters.
-        self.click_sigma_px = 1.0
+        self.measurement_window = measurement_window.MeasurementWindow(self)
+        """Owns the measurement results dialog and its widgets. See
+        `measurement_window.MeasurementWindow`."""
 
-        # Calibration summary window state (created on demand).
-        self.cal_win = None
-        self.cal_tree = None
-        self.cal_copy_text = None
+        self.cal_summary_window = calibration_summary.CalibrationSummaryWindow(self)
+        """Owns the calibration summary dialog and its widgets. See
+        `calibration_summary.CalibrationSummaryWindow`."""
 
-        # Anaglyph preview state (OpenCV window, independent playback).
-        self.anaglyph_active = False
-        self.anaglyph_playing = False
-        self.anaglyph_after_id = None
-        self.anaglyph_index = 0
-        self.anaglyph_window_name = "Sizeamatic Pro - Anaglyph 3D"
+        self.anaglyph_preview = anaglyph_preview.AnaglyphPreview(self)
+        """Owns the anaglyph preview's OpenCV window and playback state.
+        See `anaglyph_preview.AnaglyphPreview`."""
+        self.anaglyph_preview.window_name = "Sizeamatic Pro - Anaglyph 3D"
 
-    # Starts or stops the anaglyph preview window.
-    def on_toggle_anaglyph_preview(self):
-        # Require both videos loaded.
-        if not self._both_videos_loaded():
-            self._set_status_mid("Load both videos to use anaglyph preview")
-            return
+        self.perform_calibration_window = perform_calibration.PerformCalibrationWindow(self)
+        """Owns the Perform Calibration dialog and its widgets - capturing
+        calibration frame pairs from the currently loaded left/right
+        video and running the calibration computation on them. See
+        `perform_calibration.PerformCalibrationWindow`."""
 
-        # Toggle behavior.
-        if self.anaglyph_active:
-            self._stop_anaglyph_preview()
-            return
+        self.generate_calibration_target_window = generate_calibration_target.GenerateCalibrationTargetWindow(self)
+        """Owns the Generate Calibration Target dialog and its widgets -
+        printing a checkerboard/ChArUco calibration board. See
+        `generate_calibration_target.GenerateCalibrationTargetWindow`."""
 
-        self._start_anaglyph_preview()
+        self._build_menu()
+        self._build_toolbar()
+        self._build_central_widget()
+        self._build_statusbar()
 
+        self._update_slider_ranges()
+        self._refresh_window_title()
 
-    # Starts the anaglyph preview window and playback loop.
-    def _start_anaglyph_preview(self):
-        # Start at current left timeline index for convenience.
-        self.anaglyph_index = int(self.left_frame_index.get())
+    def closeEvent(self, event):
+        """Stop playback/preview loops and release video captures before closing.
 
-        # Start paused by default so the user can hit space to play.
-        self.anaglyph_active = True
-        self.anaglyph_playing = False
+        Direct port of the original's `on_app_close`. Also explicitly
+        closes the four sub-window dialogs if still open - they're
+        deliberately built with no Qt parent (see `qt_helpers.ClosableDialog`),
+        so Qt's default quit-on-last-window-closed can't be relied on to
+        clean them up as a side effect of the main window closing.
 
-        # Create a window now (first frame will appear on next tick).
-        cv2.namedWindow(self.anaglyph_window_name, cv2.WINDOW_NORMAL)
+        Args:
+            event (QCloseEvent): The close event.
 
-        self._set_status_mid("Anaglyph preview opened (Space: play/pause, A/D: step, Q: quit)")
-        self._anaglyph_tick()
+        Returns:
+            None
+        """
+        self.is_playing = False
+        self.playback_timer.stop()
 
+        if self.anaglyph_preview.active:
+            self.anaglyph_preview.stop()
 
-    # Stops the anaglyph preview and closes the OpenCV window.
-    def _stop_anaglyph_preview(self):
-        # Cancel any scheduled Tk after tick.
-        if self.anaglyph_after_id is not None:
-            self.root.after_cancel(self.anaglyph_after_id)
-            self.anaglyph_after_id = None
+        if self.capL:
+            self.capL.release()
+        if self.capR:
+            self.capR.release()
 
-        # Reset flags.
-        self.anaglyph_active = False
-        self.anaglyph_playing = False
+        for sub_window in (
+            self.measurement_window,
+            self.cal_summary_window,
+            self.perform_calibration_window,
+            self.generate_calibration_target_window,
+        ):
+            if sub_window.win is not None:
+                sub_window.win.close()
 
-        # Close OpenCV window.
-        try:
-            cv2.destroyWindow(self.anaglyph_window_name)
-        except Exception:
-            pass
+        super().closeEvent(event)
 
-        self._set_status_mid("Anaglyph preview closed")
+    def resizeEvent(self, event):
+        """Give the toolbar's overflow button an icon once it exists.
 
+        When the window gets too narrow for the toolbar's full content,
+        Qt creates a "..." overflow button on demand (internally named
+        "qt_toolbar_ext_button") that opens a menu of whatever no longer
+        fits - QSS styles its background/border/hover fine (see
+        DARK_QSS), but Qt gives it its own plain black "..." icon
+        *before* this ever runs, so a guard like "only set an icon if
+        it doesn't have one yet" never actually fires - that icon is
+        never null to begin with. Set unconditionally instead so this
+        app's `qtawesome` icon set always wins. `findChild` is cheap
+        and safe to call on every resize - the button doesn't exist at
+        all until the window is actually narrow enough to need one.
 
-    # One tick of the anaglyph preview loop.
-    def _anaglyph_tick(self):
-        # If preview was stopped, exit.
-        if not self.anaglyph_active:
-            return
+        Args:
+            event (QResizeEvent): The resize event.
 
-        # If window was closed by the user, stop.
-        try:
-            vis = cv2.getWindowProperty(self.anaglyph_window_name, cv2.WND_PROP_VISIBLE)
-            if vis < 1:
-                self._stop_anaglyph_preview()
-                return
-        except Exception:
-            # If OpenCV throws here, stop cleanly.
-            self._stop_anaglyph_preview()
-            return
+        Returns:
+            None
+        """
+        super().resizeEvent(event)
 
-        # Clamp index to the shorter stream.
-        max_i = int(min(self.left_frame_max, self.right_frame_max))
-        if self.anaglyph_index < 0:
-            self.anaglyph_index = 0
-        if self.anaglyph_index > max_i:
-            self.anaglyph_index = max_i
+        ext_button = self.findChild(QToolButton, "qt_toolbar_ext_button")
+        if ext_button is not None:
+            ext_button.setIcon(qta.icon("fa5s.chevron-down", color=ICON_COLOR))
+            ext_button.setText("")
+            ext_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
 
-        # Read frames at the anaglyph index.
-        frameL = self._read_frame_at(self.capL, self.anaglyph_index)
-        frameR = self._read_frame_at(self.capR, self.anaglyph_index)
+    # -------------------------------------------------------------------------
+    # Menu bar
+    # -------------------------------------------------------------------------
 
-        # If either frame fails, show a black frame and keep going.
-        if frameL is None or frameR is None:
-            blank = np.zeros((int(self.metaL["height"]), int(self.metaL["width"]), 3), dtype=np.uint8)
-            cv2.imshow(self.anaglyph_window_name, blank)
+    def _build_menu(self):
+        """Build the File/View/Calibration menus.
+
+        Returns:
+            None
+        """
+        menubar = self.menuBar()
+
+        file_menu = menubar.addMenu("File")
+        file_menu.addAction("Load Left Video…", self.on_load_left_video)
+        file_menu.addAction("Load Right Video…", self.on_load_right_video)
+        file_menu.addSeparator()
+        file_menu.addAction("Save Project…", self.on_save_project)
+        file_menu.addAction("Open Project…", self.on_open_project)
+
+        # Rebuilt fresh every time it's about to be shown (aboutToShow is
+        # Qt's equivalent of tk.Menu's postcommand), not once at startup -
+        # so a project moved/renamed/deleted since the last time this menu
+        # opened just quietly drops out of the list instead of showing an
+        # entry that would only error if clicked.
+        self.recent_projects_menu = file_menu.addMenu("Recent Projects")
+        self.recent_projects_menu.aboutToShow.connect(self._refresh_recent_projects_menu)
+
+        file_menu.addSeparator()
+        file_menu.addAction("Exit", self.close)
+
+        view_menu = menubar.addMenu("View")
+        self.action_show_rectified = QAction("Show Rectified", self, checkable=True)
+        self.action_show_rectified.toggled.connect(self.on_toggle_view_rectified)
+        view_menu.addAction(self.action_show_rectified)
+
+        view_menu.addAction("Anaglyph 3D Preview…", self.on_toggle_anaglyph_preview)
+        view_menu.addAction("Reset Pan/Zoom", self.on_reset_pan_zoom)
+        view_menu.addSeparator()
+        view_menu.addAction("Calibration Summary…", self.on_show_calibration_summary)
+
+        calibration_menu = menubar.addMenu("Calibration")
+        calibration_menu.addAction("Load Calibration…", self.on_load_calibration_folder)
+        calibration_menu.addSeparator()
+        calibration_menu.addAction("Perform Calibration…", self.on_perform_calibration)
+        calibration_menu.addAction("Generate Calibration Target…", self.on_generate_calibration_target)
+
+    # -------------------------------------------------------------------------
+    # Toolbar
+    # -------------------------------------------------------------------------
+
+    def _build_toolbar(self):
+        """Build the transport/speed/lock/offset/rectified-indicator toolbar.
+
+        Returns:
+            None
+        """
+        toolbar = QToolBar()
+        toolbar.setMovable(False)
+        self.addToolBar(toolbar)
+
+        icon_size = QSize(18, 18)
+
+        self.btn_to_start = QPushButton()
+        self.btn_to_start.setIcon(qta.icon("fa5s.fast-backward", color=ICON_COLOR))
+        self.btn_step_back = QPushButton()
+        self.btn_step_back.setIcon(qta.icon("fa5s.step-backward", color=ICON_COLOR))
+        self.btn_play_pause = QPushButton()
+        self.btn_step_forward = QPushButton()
+        self.btn_step_forward.setIcon(qta.icon("fa5s.step-forward", color=ICON_COLOR))
+        self.btn_to_end = QPushButton()
+        self.btn_to_end.setIcon(qta.icon("fa5s.fast-forward", color=ICON_COLOR))
+        for btn in (self.btn_to_start, self.btn_step_back, self.btn_play_pause, self.btn_step_forward, self.btn_to_end):
+            btn.setFixedWidth(36)
+            btn.setIconSize(icon_size)
+            toolbar.addWidget(btn)
+
+        self._update_play_pause_icon()
+
+        self.btn_to_start.clicked.connect(self.on_to_start)
+        self.btn_step_back.clicked.connect(self.on_step_back)
+        self.btn_play_pause.clicked.connect(self.on_play_pause)
+        self.btn_step_forward.clicked.connect(self.on_step_forward)
+        self.btn_to_end.clicked.connect(self.on_to_end)
+
+        toolbar.addWidget(QLabel("  Speed  "))
+        self.speed_combo = QComboBox()
+        self.speed_combo.addItems(list(SPEED_TABLE.keys()))
+        self.speed_combo.setCurrentText("1x")
+        toolbar.addWidget(self.speed_combo)
+
+        self.lock_checkbox = QCheckBox("  Lock L and R")
+        self.lock_checkbox.setChecked(True)
+        self.lock_checkbox.toggled.connect(self.on_toggle_lock)
+        toolbar.addWidget(self.lock_checkbox)
+
+        toolbar.addWidget(QLabel("  Offset:"))
+        self.offset_spin = QSpinBox()
+        self.offset_spin.setRange(-100000, 100000)
+        self.offset_spin.valueChanged.connect(self.on_offset_changed)
+        toolbar.addWidget(self.offset_spin)
+
+        self.btn_clear_points = QPushButton("  Clear Points")
+        self.btn_clear_points.setIcon(qta.icon("fa5s.trash", color=ICON_COLOR))
+        self.btn_clear_points.clicked.connect(self.on_clear_points)
+        toolbar.addWidget(self.btn_clear_points)
+
+        self.rectified_indicator = QLabel("  NOT RECTIFIED  ")
+        self.rectified_indicator.setObjectName("rectifiedIndicator")
+        self.rectified_indicator.setProperty("state", "not_rectified")
+        toolbar.addWidget(self.rectified_indicator)
+
+        self._build_real_time_sync_group(toolbar)
+
+    def _build_real_time_sync_group(self, toolbar):
+        """Build the real-world time anchor entry group.
+
+        Six separate plain text boxes (year/month/day/hour/minute/
+        second), not one free-text field to parse and not spinners -
+        the project owner specifically didn't want either. Starts
+        empty, not pre-filled with "now": the boxes exist to be typed
+        into, matching whatever's burned into the video, not edited
+        from a default that has nothing to do with the footage.
+        Nothing here is validated/applied until "Set Time Sync" is
+        pressed (`on_real_time_entered`) - direct port of the original's
+        toolbar section of the same name.
+
+        Args:
+            toolbar (QToolBar): The toolbar to add this group to.
+
+        Returns:
+            None
+        """
+        box_specs = [
+            ("real_time_year_edit", 4, "YYYY"),
+            ("real_time_month_edit", 2, "MM"),
+            ("real_time_day_edit", 2, "DD"),
+            ("real_time_hour_edit", 2, "HH"),
+            ("real_time_minute_edit", 2, "MM"),
+            ("real_time_second_edit", 2, "SS"),
+        ]
+        # Separator text drawn between consecutive boxes (index i sits
+        # between box i and box i+1) - one shorter than the number of boxes.
+        separators = ["-", "-", "  ", ":", ":"]
+
+        self.real_time_entries = []
+        """The six real-time-anchor `QLineEdit`s (year/month/day/hour/
+        minute/second, in that order) - kept so each box's auto-advance
+        handler can focus the *next* one, and so tests can drive them
+        uniformly without naming each one."""
+
+        # A single tight container for the boxes + separators, rather than
+        # adding each one straight to the toolbar - QToolBar's own QSS
+        # `spacing` applies between every item added to it, which otherwise
+        # stacks with the "-"/":" separator labels themselves and spreads
+        # "YYYY-MM-DD" out into visibly gapped characters instead of one
+        # tight date/time group.
+        box_group = QWidget()
+        # A plain QWidget otherwise inherits the app-wide QMainWindow/
+        # QWidget rule's background (#0a0f1a, the darker main-window
+        # color, not the toolbar's #121a2b) - since this one sits on top
+        # of the toolbar rather than the main window, that mismatch showed
+        # through as a visibly wrong-colored box behind the entries inside
+        # it (which are themselves transparent, so they show whatever's
+        # behind *them*: this container, not the toolbar).
+        box_group.setStyleSheet("background-color: transparent;")
+        box_layout = QHBoxLayout(box_group)
+        box_layout.setContentsMargins(0, 0, 0, 0)
+        box_layout.setSpacing(2)
+
+        for i, (attr_name, max_len, placeholder) in enumerate(box_specs):
+            entry = QLineEdit()
+            entry.setPlaceholderText(placeholder)
+            # Wide enough for the placeholder text plus this QLineEdit's
+            # QSS padding/border (~14px of non-text chrome) with a little
+            # slack - too tight and Qt silently elides the placeholder to
+            # "..." for wider letter combinations (e.g. "MM"/"DD"/"HH")
+            # while narrower ones (e.g. "SS") happen to still fit.
+            entry.setFixedWidth(70 if max_len == 4 else 48)
+            entry.setMaxLength(max_len)
+            setattr(self, attr_name, entry)
+            self.real_time_entries.append(entry)
+            box_layout.addWidget(entry)
+
+            if i < len(separators):
+                box_layout.addWidget(QLabel(separators[i]))
+
+        toolbar.addWidget(box_group)
+
+        # Auto-advance to the next box once this one looks full - purely a
+        # focus convenience, not validation (nothing is checked/applied here).
+        for i, entry in enumerate(self.real_time_entries):
+            max_len = box_specs[i][1]
+            next_entry = self.real_time_entries[i + 1] if i + 1 < len(self.real_time_entries) else None
+            entry.textChanged.connect(
+                lambda _text, e=entry, n=next_entry, m=max_len: self._advance_real_time_focus(e, n, m)
+            )
+
+        self.btn_set_time_sync = QPushButton("Set Time Sync")
+        self.btn_set_time_sync.clicked.connect(self.on_real_time_entered)
+        toolbar.addWidget(self.btn_set_time_sync)
+
+        # Synced indicator: a checkmark next to the button, shown by
+        # on_real_time_entered once an anchor is actually set; empty
+        # until then.
+        self.time_sync_indicator = QLabel("")
+        self.time_sync_indicator.setStyleSheet("color: #2fbf71;")
+        toolbar.addWidget(self.time_sync_indicator)
+
+    def _advance_real_time_focus(self, entry, next_entry, max_len):
+        """Move focus to the next real-time-anchor box once this one looks full.
+
+        Purely a typing convenience - does not validate or apply
+        anything; that only happens when "Set Time Sync" is pressed
+        (`on_real_time_entered`).
+
+        Args:
+            entry (QLineEdit): The box that was just typed into.
+            next_entry (QLineEdit | None): The box to focus next, or
+                None if this is the last one (seconds).
+            max_len (int): How many characters this box is expected to
+                hold (e.g. 4 for year, 2 for the rest) before advancing.
+
+        Returns:
+            None
+        """
+        if next_entry is not None and len(entry.text()) >= max_len:
+            next_entry.setFocus()
+            next_entry.selectAll()
+
+    # -------------------------------------------------------------------------
+    # Central widget: dual video panes + sliders
+    # -------------------------------------------------------------------------
+
+    def _build_central_widget(self):
+        """Build the dual video panes and their sliders/frame labels.
+
+        Returns:
+            None
+        """
+        central = QWidget()
+        self.setCentralWidget(central)
+        root_layout = QVBoxLayout(central)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        root_layout.addWidget(splitter, stretch=1)
+
+        self.pane_left, self.left_slider, self.left_frame_label = self._build_pane_column(splitter, "L")
+        self.pane_right, self.right_slider, self.right_frame_label = self._build_pane_column(splitter, "R")
+
+        # Shared Frame/Video Time/Actual Time readout, by the scrub bars
+        # (right below both panes) rather than up in the toolbar - one
+        # shared readout since it's a single anchor, not duplicated per pane.
+        self.time_readout_label = QLabel("")
+        self.time_readout_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        root_layout.addWidget(self.time_readout_label)
+
+    def _build_pane_column(self, parent, which):
+        """Build one side's video pane + slider + frame label column.
+
+        Args:
+            parent (QWidget): The splitter to add this column to.
+            which (str): `"L"` or `"R"`.
+
+        Returns:
+            tuple[video_overlay.VideoPane, QSlider, QLabel]: The pane,
+            its slider, and its frame-index label.
+        """
+        column = QWidget()
+        parent.addWidget(column)
+        layout = QVBoxLayout(column)
+
+        pane = video_overlay.VideoPane(self, which)
+        layout.addWidget(pane, stretch=1)
+
+        row = QHBoxLayout()
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(0, 0)
+        row.addWidget(slider, stretch=1)
+
+        frame_label = QLabel("Frame: 0/0")
+        row.addWidget(frame_label)
+        layout.addLayout(row)
+
+        if which == "L":
+            slider.valueChanged.connect(self.on_left_slider_changed)
         else:
-            # Prefer rectified view if enabled and calibration is loaded.
-            if self.view_rectified.get() and self.cal is not None:
-                frameL = cv2.remap(frameL, self.cal["mapLx"], self.cal["mapLy"], interpolation=cv2.INTER_LINEAR)
-                frameR = cv2.remap(frameR, self.cal["mapRx"], self.cal["mapRy"], interpolation=cv2.INTER_LINEAR)
+            slider.valueChanged.connect(self.on_right_slider_changed)
 
-            # Build anaglyph and show it.
-            ana = self._make_anaglyph_red_cyan(frameL, frameR)
-            cv2.imshow(self.anaglyph_window_name, ana)
+        return pane, slider, frame_label
 
-        # Handle key controls in the OpenCV window.
-        # Space toggles play/pause. A/D step. Q or ESC closes.
-        key = cv2.waitKey(1) & 0xFF
+    def _build_statusbar(self):
+        """Build the 3-section status bar (left/mid/right labels).
 
-        if key == ord("q") or key == 27:
-            self._stop_anaglyph_preview()
+        Direct port of the original's `_build_statusbar` - one QStatusBar
+        holding three QLabels instead of Tkinter's 3-column grid frame.
+        Left shows file/cal/view state, mid shows transient action
+        messages, right shows the live measurement summary.
+
+        Returns:
+            None
+        """
+        status_bar = QStatusBar()
+        self.setStatusBar(status_bar)
+
+        self.status_left = QLabel("")
+        self.status_right = QLabel("")
+
+        self.status_mid = QLabel("")
+        self.status_mid.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # A plain QLabel's minimumSizeHint equals its full unwrapped text
+        # width (it won't shrink/elide on its own) - status_left/
+        # status_right's content is bounded by design (`_short_path`'s
+        # truncation, small fixed-format numbers) so their natural width
+        # is fine left alone, but status_mid carries arbitrary transient
+        # messages (e.g. the anaglyph preview's ~65-character keyboard-
+        # controls tip) that would otherwise force this whole window
+        # wider to fit, growing every time a longer message came along.
+        # `Ignored` tells the layout to disregard its size hint for
+        # sizing purposes, so a long message clips instead of ever
+        # resizing the window - matching the original Tkinter status
+        # bar's fixed-character-width label, which had the same "just
+        # clip it" behavior. Relies on the stretch factor below to still
+        # give it real width to work with, since `Ignored` alone would
+        # otherwise let it collapse to zero.
+        self.status_mid.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+        status_bar.addWidget(self.status_left)
+        status_bar.addWidget(self.status_mid, 1)
+        status_bar.addWidget(self.status_right)
+
+        self._set_status_mid("Ready")
+
+    def _set_status_mid(self, text):
+        """Set the status bar's center (message/warning) text.
+
+        Args:
+            text (str): The text to display.
+
+        Returns:
+            None
+        """
+        self.status_mid.setText(text)
+
+    def _set_status_right(self, text):
+        """Set the status bar's right (measurement results) text.
+
+        Args:
+            text (str): The text to display.
+
+        Returns:
+            None
+        """
+        self.status_right.setText(text)
+
+    def _both_videos_loaded(self):
+        """Check whether both left and right video captures and metadata exist.
+
+        Returns:
+            bool: True only when both `capL`/`capR` and `metaL`/`metaR`
+            are set.
+        """
+        return self.capL is not None and self.capR is not None and self.metaL is not None and self.metaR is not None
+
+    def _refresh_status_left(self):
+        """Refresh the status bar's left section with file/view/lock state.
+
+        Returns:
+            None
+        """
+        l = self.left_video_path if self.left_video_path else "(none)"
+        r = self.right_video_path if self.right_video_path else "(none)"
+        c = self.calibration_folder if self.calibration_folder else "(none)"
+        view = "Rectified" if self.view_rectified.get() else "Raw"
+        lock = "Locked" if self.lock_lr else "Unlocked"
+
+        # Only show an offset when lock is enabled and both videos are loaded.
+        # This keeps the status line clean when you are still loading files.
+        offset_txt = ""
+        if self.lock_lr and self._both_videos_loaded():
+            offset_txt = f" | Offset: {self.lock_offset_frames:+d}f"
+
+        self.status_left.setText(
+            f"L: {self._short_path(l)} | R: {self._short_path(r)} | Cal: {self._short_path(c)} | View: {view} | {lock}{offset_txt}"
+        )
+
+    # -------------------------------------------------------------------------
+    # Video loading
+    # -------------------------------------------------------------------------
+
+    def _open_video_capture(self, path):
+        """Open a video file and read its metadata.
+
+        Direct port of the original's helper of the same name - no
+        Tkinter dependency there to begin with.
+
+        Args:
+            path (str): Path to the video file to open.
+
+        Returns:
+            tuple[cv2.VideoCapture, dict] | tuple[None, None]: The
+            opened capture and its metadata dict (`"fps"`/`"width"`/
+            `"height"`/`"frame_count"`), or `(None, None)` if the file
+            couldn't be opened or reports a nonsensical size/frame
+            count.
+        """
+        cap = cv2.VideoCapture(path)
+        if not cap.isOpened():
+            return None, None
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        if frame_count <= 0 or width <= 0 or height <= 0:
+            cap.release()
+            return None, None
+
+        return cap, {"fps": fps, "width": width, "height": height, "frame_count": frame_count}
+
+    def on_load_left_video(self):
+        """Prompt for and load the left video.
+
+        Just handles the file dialog; the actual loading logic lives
+        in `_load_left_video_from_path` so `_open_project_from_path`
+        can reuse it with a path read from a project file instead.
+
+        Returns:
+            None
+        """
+        path, _filter = QFileDialog.getOpenFileName(self, "Load Left Video", "", "MP4 Video (*.mp4);;All Files (*)")
+        if not path:
+            return
+        self._load_left_video_from_path(path)
+
+    def _load_left_video_from_path(self, path):
+        """Load the left video from an already-known path, updating UI state.
+
+        Dialog-free so it can be driven by either `on_load_left_video`
+        (file picker) or `_open_project_from_path` (a path stored in a
+        project file).
+
+        Args:
+            path (str): Path to the left video file to open.
+
+        Returns:
+            bool: True if the video opened successfully, False
+            otherwise (with an error dialog already shown).
+        """
+        if self.capL:
+            self.capL.release()
+            self.capL = None
+            self.metaL = None
+
+        cap, meta = self._open_video_capture(path)
+        if cap is None:
+            QMessageBox.critical(self, "Load Left Video", "Failed to open the selected video file.")
+            return False
+
+        self.left_video_path = path
+        self.capL = cap
+        self.metaL = meta
+        self.left_frame_index = 0
+        self.pane_left.reset_view()
+
+        self._update_slider_ranges()
+        self.render_current_frames()
+        self._set_status_mid(
+            f"Loaded left video ({meta['width']}×{meta['height']}, fps={meta['fps']:.3f}, frames={meta['frame_count']})"
+        )
+        return True
+
+    def on_load_right_video(self):
+        """Prompt for and load the right video.
+
+        Just handles the file dialog; the actual loading logic lives
+        in `_load_right_video_from_path` so `_open_project_from_path`
+        can reuse it with a path read from a project file instead.
+
+        Returns:
+            None
+        """
+        path, _filter = QFileDialog.getOpenFileName(self, "Load Right Video", "", "MP4 Video (*.mp4);;All Files (*)")
+        if not path:
+            return
+        self._load_right_video_from_path(path)
+
+    def _load_right_video_from_path(self, path):
+        """Load the right video from an already-known path, updating UI state.
+
+        Mirrors `_load_left_video_from_path` for the right pane.
+
+        Args:
+            path (str): Path to the right video file to open.
+
+        Returns:
+            bool: True if the video opened successfully, False
+            otherwise (with an error dialog already shown).
+        """
+        if self.capR:
+            self.capR.release()
+            self.capR = None
+            self.metaR = None
+
+        cap, meta = self._open_video_capture(path)
+        if cap is None:
+            QMessageBox.critical(self, "Load Right Video", "Failed to open the selected video file.")
+            return False
+
+        self.right_video_path = path
+        self.capR = cap
+        self.metaR = meta
+        self.right_frame_index = 0
+        self.pane_right.reset_view()
+
+        self._update_slider_ranges()
+        self.render_current_frames()
+        self._set_status_mid(
+            f"Loaded right video ({meta['width']}×{meta['height']}, fps={meta['fps']:.3f}, frames={meta['frame_count']})"
+        )
+        return True
+
+    def on_load_calibration_folder(self):
+        """Prompt for and load a calibration folder.
+
+        Just handles the file dialog; the actual loading logic lives in
+        `_load_calibration_from_folder` so `_open_project_from_path` can
+        reuse it with a folder path read from a project file instead.
+
+        Note:
+            Deliberately uses an *open file* dialog rather than a folder
+            picker, even though what's actually wanted is a folder.
+            Windows' native folder-picker dialog only shows folder
+            names, never the files inside them - so a user comparing
+            several candidate folders has no way to see which one
+            actually contains the expected NPZ files before picking.
+            Asking for "any file inside the calibration folder" instead,
+            filtered to `calibration_*.npz`, means the picker's own file
+            list does the job the dialog title alone couldn't: the four
+            expected files are right there to look at. The containing
+            folder is then just the dirname of whichever one gets
+            picked.
+
+        Returns:
+            None
+        """
+        sample_path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Select any file inside the calibration folder — expects "
+            "calibration_intrinsics.npz, calibration_extrinsics.npz, "
+            "calibration_rectification.npz, calibration_maps.npz",
+            "",
+            "Calibration NPZ (calibration_*.npz);;All Files (*)",
+        )
+        if not sample_path:
             return
 
-        if key == 32:
-            self.anaglyph_playing = not self.anaglyph_playing
+        folder = os.path.dirname(sample_path)
+        self._load_calibration_from_folder(folder)
 
-        if key == ord("a"):
-            self.anaglyph_playing = False
-            self.anaglyph_index -= 1
-
-        if key == ord("d"):
-            self.anaglyph_playing = False
-            self.anaglyph_index += 1
-
-        # Advance if playing.
-        if self.anaglyph_playing:
-            self.anaglyph_index += 1
-            if self.anaglyph_index > max_i:
-                self.anaglyph_index = max_i
-                self.anaglyph_playing = False
-
-        # Schedule next tick (25 fps target).
-        self.anaglyph_after_id = self.root.after(40, self._anaglyph_tick)
-
-
-    # Creates a red/cyan anaglyph from BGR frames.
-    # Output is BGR for cv2.imshow.
-    def _make_anaglyph_red_cyan(self, frameL_bgr, frameR_bgr):
-        # Convert both to grayscale for a simple, robust anaglyph.
-        gL = cv2.cvtColor(frameL_bgr, cv2.COLOR_BGR2GRAY)
-        gR = cv2.cvtColor(frameR_bgr, cv2.COLOR_BGR2GRAY)
-
-        # Build output channels:
-        #   Red from left, Cyan (G+B) from right.
-        out = np.zeros_like(frameL_bgr)
-
-        # OpenCV uses BGR order:
-        #   out[:,:,2] is red
-        #   out[:,:,1] is green
-        #   out[:,:,0] is blue
-        out[:, :, 2] = gL
-        out[:, :, 1] = gR
-        out[:, :, 0] = gR
-
-        return out
-
-    # Opens (or focuses) the calibration summary window.
     def on_show_calibration_summary(self):
+        """Open (or focus) the calibration summary window.
+
+        Requires calibration to already be loaded.
+
+        Returns:
+            None
+        """
         if self.cal is None:
             self._set_status_mid("Load calibration first")
             return
 
-        self._ensure_calibration_window()
-        self._update_calibration_window()
-
-
-    # Creates the calibration summary window if it does not exist.
-    def _ensure_calibration_window(self):
-        if self.cal_win is not None:
-            try:
-                self.cal_win.lift()
-                return
-            except Exception:
-                self.cal_win = None
-
-        win = tk.Toplevel(self.root)
-        win.title("Calibration Summary")
-        win.geometry("700x600")
-
-        def _on_close():
-            win.destroy()
-            self.cal_win = None
-            self.cal_tree = None
-            self.cal_copy_text = None
-
-        win.protocol("WM_DELETE_WINDOW", _on_close)
-
-        outer = ttk.Frame(win, padding=(10, 10))
-        outer.grid(row=0, column=0, sticky="nsew")
-
-        win.grid_rowconfigure(0, weight=1)
-        win.grid_columnconfigure(0, weight=1)
-        outer.grid_rowconfigure(1, weight=1)
-        outer.grid_columnconfigure(0, weight=1)
-
-        ttk.Label(outer, text="Calibration Summary", font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w")
-
-        cols = ("Item", "Value")
-        tree = ttk.Treeview(outer, columns=cols, show="headings", height=18)
-        tree.grid(row=1, column=0, sticky="nsew", pady=(8, 10))
-
-        tree.heading("Item", text="Item")
-        tree.heading("Value", text="Value")
-        tree.column("Item", width=320, anchor="w")
-        tree.column("Value", width=340, anchor="w")
-
-        ttk.Label(outer, text="Copy", font=("Segoe UI", 10, "bold")).grid(row=2, column=0, sticky="w")
-
-        txt = tk.Text(outer, height=10, width=1, wrap="none")
-        txt.grid(row=3, column=0, sticky="nsew")
-        txt.configure(state="disabled")
-
-        outer.grid_rowconfigure(3, weight=0)
-
-        self.cal_win = win
-        self.cal_tree = tree
-        self.cal_copy_text = txt
-
-
-    # Helper for inserting a row.
-    def _cal_add_row(self, label, value):
-        self.cal_tree.insert("", "end", values=(label, value))
-
-
-    # Computes map out-of-bounds percent.
-    def _map_oob_percent(self, mapx, mapy, w, h):
-        # mapx/mapy are float maps from rectified pixel -> source pixel.
-        # Out-of-bounds means sampling outside the source image.
-        oob = (mapx < 0) | (mapx >= (w - 1)) | (mapy < 0) | (mapy >= (h - 1))
-        return 100.0 * float(np.count_nonzero(oob)) / float(oob.size)
-
-
-    # Updates the calibration summary contents from self.cal.
-    def _update_calibration_window(self):
-        if self.cal is None or self.cal_tree is None:
-            return
-
-        # Clear existing.
-        for item in self.cal_tree.get_children():
-            self.cal_tree.delete(item)
-
-        c = self.cal
-        w = int(c["w"])
-        h = int(c["h"])
-
-        lines = []
-
-        # ---- Overview ----
-        self._cal_add_row("Image size", f"{w}×{h}")
-        lines.append(f"Image size:\t{w}x{h}")
-
-        # Baseline and translation components (mm).
-        T = np.array(c["T"], dtype=np.float64).reshape(-1)
-        Tx, Ty, Tz = float(T[0]), float(T[1]), float(T[2])
-        baseline = float(np.linalg.norm(T))
-
-        self._cal_add_row("Baseline ||T|| (mm)", f"{baseline:.2f}")
-        self._cal_add_row("T (mm)", f"Tx {Tx:.2f}  Ty {Ty:.2f}  Tz {Tz:.2f}")
-        lines.append(f"Baseline_mm:\t{baseline:.2f}")
-        lines.append(f"T_mm:\t{Tx:.2f}\t{Ty:.2f}\t{Tz:.2f}")
-
-        # Relative rotation magnitude and axis.
-        Rm = np.array(c["R"], dtype=np.float64)
-        # Angle from trace formula.
-        tr = float(np.trace(Rm))
-        cosang = (tr - 1.0) / 2.0
-        cosang = max(-1.0, min(1.0, cosang))
-        ang = math.degrees(math.acos(cosang))
-
-        rvec, _ = cv2.Rodrigues(Rm)
-        rvec = rvec.reshape(-1)
-        rmag = float(np.linalg.norm(rvec))
-        if rmag > 1e-12:
-            axis = rvec / rmag
-            axis_str = f"{axis[0]:.3f}, {axis[1]:.3f}, {axis[2]:.3f}"
-        else:
-            axis_str = "0, 0, 0"
-
-        self._cal_add_row("Relative rotation angle (deg)", f"{ang:.4f}")
-        self._cal_add_row("Rotation axis (unit)", axis_str)
-        lines.append(f"Rot_angle_deg:\t{ang:.4f}")
-        lines.append(f"Rot_axis:\t{axis_str}")
-
-        # Stereo RMS (if present).
-        if c.get("stereo_rms", None) is not None:
-            self._cal_add_row("Stereo RMS", f"{float(c['stereo_rms']):.6f}")
-            lines.append(f"Stereo_RMS:\t{float(c['stereo_rms']):.6f}")
-
-        # ---- Intrinsics ----
-        mtxL = np.array(c["mtxL"], dtype=np.float64)
-        mtxR = np.array(c["mtxR"], dtype=np.float64)
-
-        fxL, fyL = float(mtxL[0, 0]), float(mtxL[1, 1])
-        cxL, cyL = float(mtxL[0, 2]), float(mtxL[1, 2])
-        fxR, fyR = float(mtxR[0, 0]), float(mtxR[1, 1])
-        cxR, cyR = float(mtxR[0, 2]), float(mtxR[1, 2])
-
-        self._cal_add_row("Left intrinsics", f"fx {fxL:.2f}  fy {fyL:.2f}  cx {cxL:.2f}  cy {cyL:.2f}")
-        self._cal_add_row("Right intrinsics", f"fx {fxR:.2f}  fy {fyR:.2f}  cx {cxR:.2f}  cy {cyR:.2f}")
-        lines.append(f"L_fx_fy_cx_cy:\t{fxL:.2f}\t{fyL:.2f}\t{cxL:.2f}\t{cyL:.2f}")
-        lines.append(f"R_fx_fy_cx_cy:\t{fxR:.2f}\t{fyR:.2f}\t{cxR:.2f}\t{cyR:.2f}")
-
-        # FOV estimates.
-        fovxL = math.degrees(2.0 * math.atan(w / (2.0 * fxL)))
-        fovyL = math.degrees(2.0 * math.atan(h / (2.0 * fyL)))
-        fovxR = math.degrees(2.0 * math.atan(w / (2.0 * fxR)))
-        fovyR = math.degrees(2.0 * math.atan(h / (2.0 * fyR)))
-
-        self._cal_add_row("Left FOV (deg)", f"FOVx {fovxL:.2f}  FOVy {fovyL:.2f}")
-        self._cal_add_row("Right FOV (deg)", f"FOVx {fovxR:.2f}  FOVy {fovyR:.2f}")
-        lines.append(f"L_FOVx_FOVy_deg:\t{fovxL:.2f}\t{fovyL:.2f}")
-        lines.append(f"R_FOVx_FOVy_deg:\t{fovxR:.2f}\t{fovyR:.2f}")
-
-        # Distortion coefficients (show all).
-        distL = np.array(c["distL"], dtype=np.float64).reshape(-1)
-        distR = np.array(c["distR"], dtype=np.float64).reshape(-1)
-        self._cal_add_row("Left distortion", " ".join([f"{v:.6g}" for v in distL]))
-        self._cal_add_row("Right distortion", " ".join([f"{v:.6g}" for v in distR]))
-
-        # ---- Rectification ----
-        PL = np.array(c["PL"], dtype=np.float64)
-        PR = np.array(c["PR"], dtype=np.float64)
-        fx_rect_L = float(PL[0, 0])
-        fx_rect_R = float(PR[0, 0])
-        self._cal_add_row("Rectified fx (PL, PR)", f"{fx_rect_L:.2f}, {fx_rect_R:.2f}")
-
-        # ROIs and overlap.
-        roiL = c.get("roiL", None)
-        roiR = c.get("roiR", None)
-        if roiL is not None and roiR is not None:
-            roiL = np.array(roiL).reshape(-1).astype(int)
-            roiR = np.array(roiR).reshape(-1).astype(int)
-            self._cal_add_row("roiL", f"{tuple(roiL)}")
-            self._cal_add_row("roiR", f"{tuple(roiR)}")
-
-            # Intersection area percent of full image.
-            x0 = max(roiL[0], roiR[0])
-            y0 = max(roiL[1], roiR[1])
-            x1 = min(roiL[0] + roiL[2], roiR[0] + roiR[2])
-            y1 = min(roiL[1] + roiL[3], roiR[1] + roiR[3])
-            iw = max(0, x1 - x0)
-            ih = max(0, y1 - y0)
-            inter = iw * ih
-            pct = 100.0 * float(inter) / float(w * h)
-            self._cal_add_row("ROI overlap (% image)", f"{pct:.2f}%")
-            lines.append(f"ROI_overlap_pct:\t{pct:.2f}")
-
-        # ---- Map validity ----
-        oobL = self._map_oob_percent(c["mapLx"], c["mapLy"], w, h)
-        oobR = self._map_oob_percent(c["mapRx"], c["mapRy"], w, h)
-        self._cal_add_row("Map out-of-bounds L", f"{oobL:.3f}%")
-        self._cal_add_row("Map out-of-bounds R", f"{oobR:.3f}%")
-        lines.append(f"Map_OOB_L_pct:\t{oobL:.3f}")
-        lines.append(f"Map_OOB_R_pct:\t{oobR:.3f}")
-
-        # ---- Warnings ----
-        warnings = []
-        if baseline < 1.0:
-            warnings.append("Baseline is very small")
-        if abs(fx_rect_L - fx_rect_R) > 1e-3:
-            warnings.append("Rectified fx differs between PL and PR")
-        if oobL > 1.0 or oobR > 1.0:
-            warnings.append("High map out-of-bounds percentage")
-
-        if warnings:
-            self._cal_add_row("Warnings", "; ".join(warnings))
-            lines.append(f"Warnings:\t{'; '.join(warnings)}")
-
-        # Update copy box (tab separated).
-        copy_block = "\n".join(lines)
-        self.cal_copy_text.configure(state="normal")
-        self.cal_copy_text.delete("1.0", "end")
-        self.cal_copy_text.insert("1.0", copy_block)
-        self.cal_copy_text.configure(state="disabled")
-
-    # Redraws overlay items for both panes.
-    # For now, this draws a single test handle and label in each pane.
-    def _redraw_overlays(self):
-        # Draw left overlay.
-        self._draw_overlay_for_pane("L", self.left_overlay_canvas, self.ptsL)
-
-        # Draw right overlay.
-        self._draw_overlay_for_pane("R", self.right_overlay_canvas, self.ptsR)
-
-    # Draws handles, labels, and connecting segments for one pane.
-    # Points are stored in IMAGE pixel coordinates and mapped to SCREEN coords using the same scale as the video.
-    def _draw_overlay_for_pane(self, which, canvas, pts):
-        # Clear only overlay items so the video frame stays intact.
-        canvas.delete("overlay")
-
-        # Compute image->screen scale so overlay tracks the displayed video.
-        scale = self._get_pane_scale(which, canvas)
-
-        # Draw line segments first so handles sit on top.
-        # For N points, draw segments (0-1), (1-2), ...
-        if len(pts) >= 2:
-            for i in range(1, len(pts)):
-                x0, y0 = pts[i - 1]
-                x1, y1 = pts[i]
-
-                sx0, sy0 = self._image_to_screen(which, canvas, x0, y0)
-                sx1, sy1 = self._image_to_screen(which, canvas, x1, y1)
-
-                canvas.create_line(
-                    sx0,
-                    sy0,
-                    sx1,
-                    sy1,
-                    width=2,
-                    fill="#00ff66",
-                    tags=("overlay",),
-                )
-
-        # Draw handles and index labels.
-        r = int(self.handle_radius_px)
-
-        for i, (x, y) in enumerate(pts):
-
-            # Translate to screen coordinates
-            sx, sy = self._image_to_screen(which, canvas, x, y)
-
-            # Handle oval:
-            # Tag it as "handle" so _get_handle_index_under_cursor can recognize it.
-            # Tag idx:<n> so we can identify which point index was clicked.
-            canvas.create_oval(
-                sx - r,
-                sy - r,
-                sx + r,
-                sy + r,
-                outline="#00ff66",
-                width=2,
-                fill="",
-                tags=("overlay", "handle", f"idx:{i}"),
-            )
-
-            # Index label near the handle.
-            canvas.create_text(
-                sx + r + 6,
-                sy - r - 6,
-                text=str(i),
-                fill="#00ff66",
-                font=("Segoe UI", 11, "bold"),
-                tags=("overlay",),
-            )
-
-        # Mouse wheel zoom for a pane, anchored under the cursor.
-    def on_mouse_wheel(self, which, event):
-        canvas = self.left_overlay_canvas if which == "L" else self.right_overlay_canvas
-
-        # Require metadata so we know how to map coords.
-        if self._get_image_size(which) is None:
-            return
-
-        view = self._get_view(which)
-
-        # Convert cursor position to image coords before zoom changes.
-        ix, iy = self._screen_to_image(which, canvas, event.x, event.y)
-
-        # Wheel direction (Windows: event.delta is typically ±120 per notch).
-        if event.delta > 0:
-            new_zoom = float(view["zoom"]) * float(self.zoom_step)
-        else:
-            new_zoom = float(view["zoom"]) / float(self.zoom_step)
-
-        # Clamp zoom.
-        new_zoom = max(float(self.zoom_min), min(float(self.zoom_max), new_zoom))
-        view["zoom"] = new_zoom
-
-        # After zoom changes, compute new total scale.
-        S_new = self._get_total_scale(which, canvas)
-
-        # Keep the same image point under the cursor.
-        # event.x/event.y are in canvas coords, so subtract the display rect origin first.
-        dx, dy, _dw, _dh = self._get_display_rect(which, canvas)
-
-        view["off_x"] = (float(event.x) - float(dx)) - float(ix) * S_new
-        view["off_y"] = (float(event.y) - float(dy)) - float(iy) * S_new
-
-        # Redraw everything using the new transform.
-        self._render_current_frames()
-
-    # Closes OpenCV windows and releases captures before exiting.
-    def on_app_close(self):
-        # Stop playback loop.
-        self.is_playing = False
-        if self.play_after_id is not None:
-            self.root.after_cancel(self.play_after_id)
-            self.play_after_id = None
-
-        # Close the anaglyph viewer if it is running.
-        if self.anaglyph_active:
-            self._stop_anaglyph_preview()
-
-        # Release capture objects if open.
+        self.cal_summary_window.ensure_window()
+        self.cal_summary_window.update_window()
+
+    def on_perform_calibration(self):
+        """Open (or focus) the Perform Calibration window.
+
+        Unlike `on_show_calibration_summary`, this doesn't require an
+        existing calibration to already be loaded — capturing frame
+        pairs is how a *new* calibration gets built in the first place.
+
+        Returns:
+            None
+        """
+        self.perform_calibration_window.ensure_window()
+
+    def on_generate_calibration_target(self):
+        """Open (or focus) the Generate Calibration Target window.
+
+        Doesn't require any video or calibration to be loaded - printing
+        a target is a prep step done before capturing anything.
+
+        Returns:
+            None
+        """
+        self.generate_calibration_target_window.ensure_window()
+
+    def _load_calibration_from_folder(self, folder):
+        """Load a calibration bundle from an already-known folder path.
+
+        Dialog-free so it can be driven by either
+        `on_load_calibration_folder` (folder picker) or
+        `_open_project_from_path` (a path stored in a project file).
+
+        Args:
+            folder (str): Path to the calibration folder to load.
+
+        Returns:
+            bool: True if the calibration loaded successfully, False
+            otherwise (with an error dialog already shown).
+        """
+        cal, error = calibration_io.load_calibration_bundle(folder, self.metaL, self.metaR)
+        if error is not None:
+            QMessageBox.critical(self, "Load Calibration", error)
+            return False
+
+        self.cal = cal
+        self.calibration_folder = folder
+        self._set_status_mid(f"Loaded calibration from {folder}")
+        self._refresh_status_left()
+        return True
+
+    # -------------------------------------------------------------------------
+    # Frame decode/render
+    # -------------------------------------------------------------------------
+
+    def _read_frame_at(self, cap, index):
+        """Decode the frame at a specific index, seeking only if needed.
+
+        A `cap.set(CAP_PROP_POS_FRAMES)` seek is expensive (profiled at
+        ~54-105ms/frame, vs. ~3ms/frame for a plain sequential
+        `cap.read()`) - the original optimization here avoided it for
+        the exact-same-index case (nothing to do) and the pure
+        one-frame-forward case (already the default outcome of the
+        previous `cap.read()`). That left one real gap: 2x/4x playback
+        deliberately requests indices 2/4 frames ahead each tick,
+        which - being neither "same index" nor "exactly one frame
+        ahead" - fell through to a seek on *every single tick*,
+        making faster-than-1x playback slower in wall-clock terms than
+        1x despite needing fewer ticks to cover the same duration (this
+        is what a "2x plays even slower than 1x" report traced back
+        to). Small forward gaps now decode-and-discard the skipped
+        frames instead (confirmed via profiling to stay ~10-12x cheaper
+        than seeking for the gaps current playback speeds actually
+        produce); only a genuinely large or backward jump (e.g. a
+        slider drag) still seeks.
+
+        Args:
+            cap (cv2.VideoCapture): The capture to read from.
+            index (int): The zero-based frame index to read.
+
+        Returns:
+            numpy.ndarray | None: The decoded BGR frame, or None if the
+            seek/decode failed.
+        """
+        index = int(index)
+        current_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+        gap = index - current_pos
+
+        if gap != 0:
+            if 0 < gap <= MAX_SEQUENTIAL_SKIP_FRAMES:
+                for _ in range(gap):
+                    cap.read()
+            else:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, index)
+
+        ok, frame_bgr = cap.read()
+        if not ok:
+            return None
+        return frame_bgr
+
+    def render_current_frames(self):
+        """Decode, (if rectified) remap, cache, and display both panes' current frames.
+
+        Returns:
+            None
+        """
         if self.capL:
-            self.capL.release()
-            self.capL = None
+            frame_l = self._read_frame_at(self.capL, self.left_frame_index)
+            if self.view_rectified.get() and self.cal is not None:
+                frame_l = cv2.remap(frame_l, self.cal["mapLx"], self.cal["mapLy"], interpolation=cv2.INTER_LINEAR)
+            self.current_frameL = frame_l
+            self.pane_left.set_frame(frame_l)
+
         if self.capR:
-            self.capR.release()
-            self.capR = None
+            frame_r = self._read_frame_at(self.capR, self.right_frame_index)
+            if self.view_rectified.get() and self.cal is not None:
+                frame_r = cv2.remap(frame_r, self.cal["mapRx"], self.cal["mapRy"], interpolation=cv2.INTER_LINEAR)
+            self.current_frameR = frame_r
+            self.pane_right.set_frame(frame_r)
 
-        # Close any OpenCV windows.
-        cv2.destroyAllWindows()
+        self._update_frame_labels()
 
-        # Close the Tk app.
-        self.root.destroy()
+    def redisplay_current_frames(self):
+        """Repaint both panes from their already-decoded cached frames.
 
-    # Called when either canvas is resized.
-    # We debounce redraw to avoid decoding and encoding on every resize event.
-    def on_canvas_resized(self, _event):
-        # If Fit To Window is off, resizing the window does not change the image size.
-        # In that case, we can ignore resize events entirely.
-        if not self.fit_to_window.get():
-            return
+        Used for interactions that only change the on-screen transform
+        (panning) rather than which frame is showing - avoids a costly
+        re-seek+re-decode on every mouse-move event. The `VideoPane`s
+        already have the current `QImage` cached; this just asks Qt to
+        repaint them with their (already-updated) pan/zoom state.
 
-        # Cancel any pending redraw so we only redraw once after resizing settles.
-        if self._resize_after_id is not None:
-            self.root.after_cancel(self._resize_after_id)
-            self._resize_after_id = None
+        Returns:
+            None
+        """
+        self.pane_left.update()
+        self.pane_right.update()
 
-        # Schedule a redraw shortly in the future.
-        # 50 ms is short enough to feel responsive but avoids resize storm spam.
-        self._resize_after_id = self.root.after(50, self._redraw_after_resize)
+    def on_points_changed(self):
+        """Redraw both panes and recompute measurements after a point
+        was placed/moved.
 
-    # Runs after the debounce delay to redraw the current frames.
-    def _redraw_after_resize(self):
-        # Clear the pending handle first.
-        self._resize_after_id = None
-
-        # If no videos are loaded yet, keep the placeholders.
-        if not self.capL and not self.capR:
-            self._refresh_placeholder_canvases()
-            return
-
-        # Otherwise, redraw the current decoded frames.
-        # This will re run the Fit To Window scaling logic.
-        self._render_current_frames()
-
-    # Returns the view dict for a pane.
-    def _get_view(self, which):
-        if which == "L":
-            return self.viewL
-        return self.viewR
-
-    # Returns the source image width/height for a pane.
-    def _get_image_size(self, which):
-        if which == "L":
-            if not self.metaL:
-                return None
-            return int(self.metaL["width"]), int(self.metaL["height"])
-        else:
-            if not self.metaR:
-                return None
-            return int(self.metaR["width"]), int(self.metaR["height"])
-
-    # Computes the base fit-to-window scale (by width only).
-    def _get_fit_scale(self, which, canvas):
-        # If Fit To Window is off, base scale is 1.
-        if not self.fit_to_window.get():
-            return 1.0
-
-        size = self._get_image_size(which)
-        if size is None:
-            return 1.0
-
-        img_w, _img_h = size
-
-        # Use the actual draw rect width, not the full canvas width.
-        _dx, _dy, dw, _dh = self._get_display_rect(which, canvas)
-        return float(dw) / float(img_w)
-
-    # Computes the total scale used for both video and overlays: S = fit_scale * zoom.
-    def _get_total_scale(self, which, canvas):
-        view = self._get_view(which)
-        fit_scale = self._get_fit_scale(which, canvas)
-        return fit_scale * float(view["zoom"])
-
-    # Converts image pixel coords to screen coords for a pane.
-    def _image_to_screen(self, which, canvas, ix, iy):
-        view = self._get_view(which)
-
-        # Display rect defines where the video lives inside the canvas.
-        dx, dy, _dw, _dh = self._get_display_rect(which, canvas)
-
-        # Total scale includes Fit To Window scale and zoom.
-        S = self._get_total_scale(which, canvas)
-
-        # off_x/off_y are pan offsets in screen pixels relative to the display rect.
-        sx = float(dx) + float(ix) * S + float(view["off_x"])
-        sy = float(dy) + float(iy) * S + float(view["off_y"])
-        return sx, sy
-
-    # Converts screen coords to image pixel coords for a pane.
-    def _screen_to_image(self, which, canvas, sx, sy):
-        view = self._get_view(which)
-
-        dx, dy, _dw, _dh = self._get_display_rect(which, canvas)
-
-        S = self._get_total_scale(which, canvas)
-        if S <= 0.0:
-            S = 1.0
-
-        # Convert screen->image by undoing display rect origin and offsets first.
-        ix = (float(sx) - float(dx) - float(view["off_x"])) / S
-        iy = (float(sy) - float(dy) - float(view["off_y"])) / S
-        return ix, iy
-
-    """ # Converts screen coordinates (canvas pixels) to image pixel coordinates.
-    # This must invert the same scale used to draw the video and overlays.
-    def _screen_to_image(self, which, canvas, sx, sy):
-        # Scale maps image->screen. We invert it to map screen->image.
-        scale = self._get_pane_scale(which, canvas)
-
-        # Guard against divide by zero.
-        if scale <= 0.0:
-            scale = 1.0
-
-        # Convert to image pixel coords.
-        ix = float(sx) / scale
-        iy = float(sy) / scale
-
-        return ix, iy """
-
-    # Returns the point list for a pane.
-    def _get_points_list(self, which):
-        if which == "L":
-            return self.ptsL
-        return self.ptsR
-    
-    # Attempts to extract a handle index from the canvas item under the cursor.
-    # Returns an integer index if the current item is a handle, else returns None.
-    def _get_handle_index_under_cursor(self, canvas):
-        # "current" is the canvas item under the mouse pointer at event time.
-        items = canvas.find_withtag("current")
-        if not items:
-            return None
-
-        item_id = items[0]
-
-        # Read the item's tags and look for the "handle" marker and an "idx:<n>" tag.
-        tags = canvas.gettags(item_id)
-
-        # Only treat this as a draggable point if it is tagged as a handle.
-        if "handle" not in tags:
-            return None
-
-        # Parse an index tag formatted like "idx:0", "idx:1", etc.
-        for t in tags:
-            if t.startswith("idx:"):
-                try:
-                    return int(t.split(":", 1)[1])
-                except ValueError:
-                    return None
-
-        return None
-    
-    # Left mouse button pressed on overlay.
-    def on_overlay_left_down(self, which, event):
-        # Choose the correct overlay canvas for this pane.
-        canvas = self.left_overlay_canvas if which == "L" else self.right_overlay_canvas
-
-        # If the user clicked a handle, start dragging that handle.
-        idx = self._get_handle_index_under_cursor(canvas)
-        if idx is not None:
-            # Begin drag mode.
-            self.drag_active = True
-            self.drag_which = which
-            self.drag_index = idx
-            return
-
-        # Otherwise, treat this as a "place a new point" click.
-        pts = self._get_points_list(which)
-
-        # If we are already at the point cap, ignore clicks on empty space.
-        # This is important because later we will raise the cap for curves.
-        if len(pts) >= int(self.max_points_per_pane):
-            return
-
-        # Convert the click from screen coords to image coords.
-        ix, iy = self._screen_to_image(which, canvas, event.x, event.y)
-
-        # Append as the next point.
-        pts.append((ix, iy))
-
-        # Trigger overlay redraw and measurement stub.
-        self._on_points_changed()
-
-    # Mouse moved while left button is held.
-    def on_overlay_left_drag(self, which, event):
-        # Only drag if we are actively dragging a handle.
-        if not self.drag_active:
-            return
-
-        # Only respond if the drag belongs to this pane.
-        if self.drag_which != which:
-            return
-
-        canvas = self.left_overlay_canvas if which == "L" else self.right_overlay_canvas
-        pts = self._get_points_list(which)
-
-        # Validate index.
-        if self.drag_index is None:
-            return
-        if self.drag_index < 0 or self.drag_index >= len(pts):
-            return
-
-        # Convert cursor position to image coords.
-        ix, iy = self._screen_to_image(which, canvas, event.x, event.y)
-
-        # Update the dragged point.
-        pts[self.drag_index] = (ix, iy)
-
-        # Redraw overlays and update measurement stub continuously while dragging.
-        self._on_points_changed()
-
-    # Left mouse button released.
-    def on_overlay_left_up(self, which, _event):
-        # End drag mode cleanly.
-        if self.drag_active and self.drag_which == which:
-            self.drag_active = False
-            self.drag_which = None
-            self.drag_index = None
-
-    
-
-    # Called whenever points are added, moved, or deleted.
-    # This is the single place that triggers overlay redraw and measurement refresh.
-    def _on_points_changed(self):
-        # Redraw overlays (function will be updated next step to draw real points/lines).
-        # For now, keep calling it so the pipeline is correct.
-        self._redraw_overlays()
-
-        # Update measurement status text (stub for now).
+        Returns:
+            None
+        """
+        self.pane_left.update()
+        self.pane_right.update()
         self._update_measurement_status_stub()
 
-    # Updates the status bar with a simple "ready" message.
+    def _current_measurement_context(self):
+        """Build the video/frame/timestamp identifying info for the
+        current measurement.
+
+        This is what lets a copied-and-pasted measurement row still
+        mean something once it's sitting in a spreadsheet with no other
+        context. Always reads the *left* timeline/video, since
+        measurements are computed in the rectified left camera
+        coordinate frame (see `README.md`'s "Measurement notes").
+
+        Returns:
+            dict: Keys "video_name" (str), "frame_index" (int),
+            "timestamp" (str, elapsed video time since frame 0), and
+            "actual_time" (str, the calculated real-world time if a
+            real-time anchor is set, or "" if not).
+        """
+        if self.left_video_path:
+            video_name = os.path.basename(self.left_video_path)
+        else:
+            video_name = "(no video)"
+
+        frame_index = int(self.left_frame_index)
+        fps = self.metaL["fps"] if self.metaL else None
+
+        actual_time = self._format_actual_time(frame_index)
+        if actual_time == "(not set)":
+            # A spreadsheet column should be empty when there's nothing to
+            # show, not carry a placeholder string as if it were real data.
+            actual_time = ""
+
+        return {
+            "video_name": video_name,
+            "frame_index": frame_index,
+            "timestamp": self._format_timestamp(frame_index, fps),
+            "actual_time": actual_time,
+        }
+
     def _update_measurement_status_stub(self):
+        """Recompute measurements from current points and refresh the UI.
+
+        Triangulates all currently paired left/right points, builds one
+        unified list of result rows (a "Point" row per point, a
+        "Segment" row per consecutive pair, and - for 2+ points - one
+        "Total" row summing the connected chain's segment lengths),
+        updates the status bar's right section with a short summary (or
+        the reason measurement isn't available), and refreshes the
+        measurement results window.
+
+        Note:
+            If a point in the middle of the list fails to triangulate,
+            the loop below stops there (via `break`) but the function
+            still continues on to report a summary count for whatever
+            points triangulated successfully beforehand - the partial-
+            failure `err_msg` is passed on to the measurement popup
+            window (which does display it), but is not shown in this
+            window's own status bar, which instead gets overwritten with
+            the "Measured N pts" summary.
+
+        Returns:
+            None
+        """
         l_count = len(self.ptsL)
         r_count = len(self.ptsR)
 
@@ -912,7 +1406,7 @@ class SizeamaticProApp:
         err_msg = ""
 
         for i in range(n):
-            P, err = self._triangulate_point_pair(i)
+            P, err = stereo_matching.triangulate_point_pair(self, i)
             if err is not None:
                 err_msg = f"Point {i} failed: {err}"
                 break
@@ -923,19 +1417,37 @@ class SizeamaticProApp:
             self._set_status_right(err_msg if err_msg else "No valid points")
             return
 
-        # Build rows for the points table.
-        points_rows = []
+        # Video/frame/timestamp context, shared by every row this call produces.
+        ctx = self._current_measurement_context()
+        video_col = ctx["video_name"]
+        frame_col = str(ctx["frame_index"])
+        time_col = ctx["timestamp"]
+        actual_time_col = ctx["actual_time"]
+
+        rows = []
         sigma_px = float(self.click_sigma_px)
 
+        # Build one "Point" row per clicked point pair.
         for i, (X, Y, Z) in enumerate(pts3d):
             R = (X * X + Y * Y + Z * Z) ** 0.5
 
-            # Assumption-free quality metric.
-            erms = self._reprojection_rms_px(i)
+            # Assumption-free quality metric (pixel-space reprojection
+            # consistency, using the Y-averaged triangulated point).
+            erms = stereo_matching.reprojection_rms_px(self, i)
             erms_str = f"{erms:.2f}" if erms is not None else ""
 
-            # Assumption-based uncertainty in mm.
-            sig = self._estimate_point_sigma_mm(i, sigma_px)
+            # Assumption-free quality metric (object-space distance between
+            # the two original, un-averaged left/right viewing rays) - a
+            # different quantity from erms above, not a duplicate; see
+            # stereo_matching.ray_residual_mm's docstring.
+            ray_residual = stereo_matching.stereo_ray_residual_mm(self, i)
+            ray_residual_str = f"{ray_residual:.2f}" if ray_residual is not None else ""
+
+            # Assumption-based uncertainty in mm (sample-standard-deviation
+            # estimate, shown side by side with the Jacobian estimate below -
+            # ROADMAP.md Phase 13, a project owner decision not to replace
+            # this pair outright).
+            sig = stereo_matching.estimate_point_sigma_mm(self, i, sigma_px)
             if sig is None:
                 sZ_str = ""
                 sR_str = ""
@@ -944,19 +1456,45 @@ class SizeamaticProApp:
                 sZ_str = f"{sZ:.1f}"
                 sR_str = f"{sR:.1f}"
 
-            points_rows.append((
-                str(i),
-                f"{X:.1f}",
-                f"{Y:.1f}",
-                f"{Z:.1f}",
-                f"{R:.1f}",
-                erms_str,
-                sZ_str,
-                sR_str,
+            # Assumption-based uncertainty in mm (Jacobian/covariance-
+            # propagation estimate - see stereo_matching's docstring for how
+            # this differs from the sample-standard-deviation estimate above).
+            sig_jac = stereo_matching.estimate_point_sigma_mm_jacobian(self, i, sigma_px)
+            if sig_jac is None:
+                sZ_jac_str = ""
+                sR_jac_str = ""
+            else:
+                sZ_jac, sR_jac = sig_jac
+                sZ_jac_str = f"{sZ_jac:.1f}"
+                sR_jac_str = f"{sR_jac:.1f}"
+
+            # Read the clicked left and right pixels for this point.
+            xL, yL = self.ptsL[i]
+            xR, yR = self.ptsR[i]
+
+            # Compute disparity, which drives stereo depth.
+            disp = xL - xR
+
+            # Compute rectified Y mismatch between left and right clicks.
+            dy = yR - yL
+
+            rows.append((
+                video_col, frame_col, time_col, actual_time_col, "",
+                "Point", str(i),
+                f"{X:.1f}", f"{Y:.1f}", f"{Z:.1f}", f"{R:.1f}",
+                f"{disp:.2f}", f"{dy:.2f}", erms_str, ray_residual_str, sZ_str, sR_str,
+                sZ_jac_str, sR_jac_str,
             ))
 
-        # Build rows for the segments table.
-        seg_rows = []
+        # Build one "Segment" row per consecutive point pair (the chain is a
+        # single connected polyline: 0-1, 1-2, 2-3, ...), plus a running
+        # total length and quadrature-summed sigma across the whole chain.
+        total_len_mm = 0.0
+        total_var_mm2 = 0.0
+        have_total_sigma = True
+        total_var_jac_mm2 = 0.0
+        have_total_sigma_jac = True
+
         if len(pts3d) >= 2:
             for i in range(1, len(pts3d)):
                 X0, Y0, Z0 = pts3d[i - 1]
@@ -965,1131 +1503,375 @@ class SizeamaticProApp:
                 dY = Y1 - Y0
                 dZ = Z1 - Z0
                 L = (dX * dX + dY * dY + dZ * dZ) ** 0.5
+                total_len_mm += L
 
-                # Segment sigma length estimate.
-                seg_est = self._estimate_segment_sigma_len_mm(i - 1, i, sigma_px)
+                # Segment sigma length estimate (sample-standard-deviation).
+                seg_est = stereo_matching.estimate_segment_sigma_len_mm(self, i - 1, i, sigma_px)
                 if seg_est is None:
                     sL_str = ""
+                    # Can't propagate a total sigma if any segment along the
+                    # chain is missing one.
+                    have_total_sigma = False
                 else:
                     _L0, sL = seg_est
                     sL_str = f"{sL:.1f}"
+                    total_var_mm2 += sL * sL
 
-                seg_rows.append((
-                    f"{i-1}-{i}",
-                    f"{dX:.1f}",
-                    f"{dY:.1f}",
-                    f"{dZ:.1f}",
-                    f"{L:.1f}",
-                    sL_str,
+                # Segment sigma length estimate (Jacobian/covariance
+                # propagation - ROADMAP.md Phase 13, shown side by side with
+                # the sample-standard-deviation estimate above).
+                seg_est_jac = stereo_matching.estimate_segment_sigma_len_mm_jacobian(self, i - 1, i, sigma_px)
+                if seg_est_jac is None:
+                    sL_jac_str = ""
+                    have_total_sigma_jac = False
+                else:
+                    _L0_jac, sL_jac = seg_est_jac
+                    sL_jac_str = f"{sL_jac:.1f}"
+                    total_var_jac_mm2 += sL_jac * sL_jac
+
+                rows.append((
+                    video_col, frame_col, time_col, actual_time_col, "",
+                    "Segment", f"{i-1}-{i}",
+                    f"{dX:.1f}", f"{dY:.1f}", f"{dZ:.1f}", f"{L:.1f}",
+                    "", "", "", "", sL_str, "", sL_jac_str, "",
                 ))
 
-            self._set_status_right(f"Measured {len(pts3d)} pts, {len(seg_rows)} segs")
+            # Total: sum of the connected chain's segment lengths. Segment
+            # sigmas are each estimated independently, so a sum of
+            # independent errors adds in quadrature:
+            # sigma_total = sqrt(sum(sigma_i^2)). Done separately for each
+            # of the two sigma estimators.
+            total_sigma_str = f"{total_var_mm2 ** 0.5:.1f}" if have_total_sigma else ""
+            total_sigma_jac_str = f"{total_var_jac_mm2 ** 0.5:.1f}" if have_total_sigma_jac else ""
+            rows.append((
+                video_col, frame_col, time_col, actual_time_col, "",
+                "Total", "",
+                "", "", "", f"{total_len_mm:.1f}",
+                "", "", "", "", total_sigma_str, "", total_sigma_jac_str, "",
+            ))
+
+            self._set_status_right(
+                f"Measured {len(pts3d)} pts, {len(pts3d) - 1} segs, total {total_len_mm:.1f}mm"
+            )
         else:
             self._set_status_right("Measured 1 point")
 
         # Update popup window (creates it on first valid measurement).
-        self._update_measurement_window(points_rows, seg_rows, err_msg)
+        self.measurement_window.update_window(rows, err_msg)
 
-    # -------------------------------------------------------------------------
-    # Menu bar
-    # -------------------------------------------------------------------------
+    def _on_measurement_recorded(self):
+        """Snapshot enough state to restore this exact measurement later.
 
-    def _build_menu(self):
-        menubar = tk.Menu(self.root)
+        Called by `self.measurement_window.record_current_measurement`
+        right after it successfully appends to the Log. Records which
+        frame each timeline was on and the exact clicked points at this
+        moment, so a saved project file can jump back to "the very last
+        place that was recorded" and show those same points again on
+        reopen (`_open_project_from_path`).
 
-        # ---- File menu ----
-        file_menu = tk.Menu(menubar, tearoff=False)
-        file_menu.add_command(label="Load Left Video…", command=self.on_load_left_video)
-        file_menu.add_command(label="Load Right Video…", command=self.on_load_right_video)
-        file_menu.add_separator()
-        file_menu.add_command(label="Load Calibration Folder…", command=self.on_load_calibration_folder)
-        file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self.root.quit)
-        menubar.add_cascade(label="File", menu=file_menu)
+        Returns:
+            None
+        """
+        self.last_recorded_snapshot = {
+            "left_frame_index": int(self.left_frame_index),
+            "right_frame_index": int(self.right_frame_index),
+            "ptsL": [list(p) for p in self.ptsL],
+            "ptsR": [list(p) for p in self.ptsR],
+        }
 
-        # ---- View menu ----
-        view_menu = tk.Menu(menubar, tearoff=False)
-
-        # Show Raw / Show Rectified as a single toggle.
-        # Disabled behavior (until calibration loaded) can be added later.
-        view_menu.add_checkbutton(
-            label="Show Rectified",
-            variable=self.view_rectified,
-            command=self.on_toggle_view_rectified,
-        )
-
-        view_menu.add_command(label="Anaglyph 3D Preview…", command=self.on_toggle_anaglyph_preview)
-
-        view_menu.add_separator()
-        view_menu.add_checkbutton(
-            label="Fit To Window",
-            variable=self.fit_to_window,
-            command=self.on_toggle_fit_to_window,
-        )
-        view_menu.add_checkbutton(
-            label="Show Overlays",
-            variable=self.show_overlays,
-            command=self.on_toggle_show_overlays,
-        )
-        view_menu.add_checkbutton(
-            label="Show Epipolar Cursor Line",
-            variable=self.show_epipolar,
-            command=self.on_toggle_show_epipolar,
-        )
-
-        view_menu.add_separator()
-        view_menu.add_command(label="Calibration Summary…", command=self.on_show_calibration_summary)
-
-        menubar.add_cascade(label="View", menu=view_menu)
-
-        self.root.config(menu=menubar)
-
-    # -------------------------------------------------------------------------
-    # Toolbar
-    # -------------------------------------------------------------------------
-
-    def _build_toolbar(self):
-        self.toolbar = ttk.Frame(self.root, padding=(8, 6))
-        self.toolbar.grid(row=1, column=0, sticky="ew")
-        self.toolbar.grid_columnconfigure(20, weight=1)
-
-        # ---- Transport buttons ----
-        self.btn_to_start = ttk.Button(self.toolbar, text="⏮", width=3, command=self.on_to_start)
-        self.btn_step_back = ttk.Button(self.toolbar, text="◀", width=3, command=self.on_step_back)
-        self.btn_play_pause = ttk.Button(self.toolbar, text="⏯", width=3, command=self.on_play_pause)
-        self.btn_step_fwd = ttk.Button(self.toolbar, text="▶", width=3, command=self.on_step_forward)
-        self.btn_to_end = ttk.Button(self.toolbar, text="⏭", width=3, command=self.on_to_end)
-
-        self.btn_to_start.grid(row=0, column=0, padx=(0, 2))
-        self.btn_step_back.grid(row=0, column=1, padx=2)
-        self.btn_play_pause.grid(row=0, column=2, padx=2)
-        self.btn_step_fwd.grid(row=0, column=3, padx=2)
-        self.btn_to_end.grid(row=0, column=4, padx=(2, 12))
-
-        # ---- Speed control ----
-        ttk.Label(self.toolbar, text="Speed").grid(row=0, column=5, padx=(0, 6))
-
-        self.speed_var = tk.StringVar(value="1x")
-        self.speed_combo = ttk.Combobox(
-            self.toolbar,
-            textvariable=self.speed_var,
-            values=["0.25x", "0.5x", "1x", "2x", "4x"],
-            width=6,
-            state="readonly",
-        )
-        self.speed_combo.grid(row=0, column=6, padx=(0, 12))
-        self.speed_combo.bind("<<ComboboxSelected>>", self.on_speed_changed)
-
-        # ---- Lock checkbox ----
-        self.lock_check = ttk.Checkbutton(
-            self.toolbar,
-            text="Lock L and R",
-            variable=self.lock_lr,
-            command=self.on_toggle_lock,
-        )
-        self.lock_check.grid(row=0, column=7, padx=(0, 12))
-
-        # Clears all measurement points in both panes.
-        # This is the only delete mechanism for now (simple and safe).
-        self.btn_clear_points = ttk.Button(
-            self.toolbar,
-            text="Clear Points",
-            command=self.on_clear_points,
-        )
-        self.btn_clear_points.grid(row=0, column=8, padx=(0, 12))
-
-        # ---- Spacer (keeps toolbar left packed, leaves room to add more) ----
-        ttk.Frame(self.toolbar).grid(row=0, column=20, sticky="ew")
-
-    # Clears all measurement points in both panes.
     def on_clear_points(self):
-        # Clear both point lists to keep pairing consistent.
+        """Clear all measurement points in both panes.
+
+        Direct port of the original's `on_clear_points` - also cancels
+        any active drag/pan/refine state on both panes, since clearing
+        the point lists out from under an in-progress drag would leave
+        a stale index pointing at nothing.
+
+        Returns:
+            None
+        """
         self.ptsL.clear()
         self.ptsR.clear()
 
-        # Cancel any active drag state.
-        self.drag_active = False
-        self.drag_which = None
-        self.drag_index = None
+        for pane in (self.pane_left, self.pane_right):
+            pane.drag_active = False
+            pane.drag_index = None
+            pane.refine_drag_active = False
+            pane.refine_drag_index = None
+            pane.pan_active = False
+            pane.pan_last_pos = None
+
+        self.on_points_changed()
+        self._set_status_mid("Cleared all points")
+
+    def _update_frame_labels(self):
+        """Refresh the "Frame: i/max" labels, the shared Frame/Video
+        Time/Actual Time readout, the status bar's left section, and
+        (if an anchor is set) the six real-time entry boxes themselves.
+
+        Returns:
+            None
+        """
+        lmax = max(0, int(self.left_frame_max))
+        rmax = max(0, int(self.right_frame_max))
+        li = int(self.left_frame_index)
+        ri = int(self.right_frame_index)
+
+        self.left_frame_label.setText(f"Frame: {li}/{lmax}")
+        self.right_frame_label.setText(f"Frame: {ri}/{rmax}")
+
+        # The shared readout is referenced to the left/master timeline, same
+        # as the real-world time anchor itself.
+        video_time = self._format_timestamp(li, self.metaL["fps"] if self.metaL else None)
+        actual_time = self._format_actual_time(li)
+        self.time_readout_label.setText(f"Frame: {li}/{lmax} | Video: {video_time} | Actual: {actual_time}")
 
-        # Redraw overlays to remove handles and lines.
-        self._redraw_overlays()
-
-        # Update measurement status text.
-        self._update_measurement_status_stub()
-
-        # Show a short confirmation in the center status area.
-        self._set_status_mid("Points cleared")
-
-    # Triangulates directly from pixel coordinates (rectified) into XYZ millimeters.
-    def _triangulate_from_pixels(self, xL, yL, xR, yR):
-        ptsL = np.array([[xL], [yL]], dtype=np.float64)
-        ptsR = np.array([[xR], [yR]], dtype=np.float64)
-
-        Xh = cv2.triangulatePoints(self.cal["PL"], self.cal["PR"], ptsL, ptsR)
-
-        W = float(Xh[3, 0])
-        if abs(W) < 1e-9:
-            return None
-
-        X = float(Xh[0, 0]) / W
-        Y = float(Xh[1, 0]) / W
-        Z = float(Xh[2, 0]) / W
-        return (X, Y, Z)
-
-
-    # Projects a 3D point (X,Y,Z) into pixel coords using a 3x4 projection matrix P.
-    def _project_point(self, P, X, Y, Z):
-        # Build homogeneous 3D point.
-        Xh = np.array([[X], [Y], [Z], [1.0]], dtype=np.float64)
-
-        # Project to homogeneous image coordinates.
-        ph = P @ Xh
-
-        w = float(ph[2, 0])
-        if abs(w) < 1e-12:
-            return None
-
-        u = float(ph[0, 0]) / w
-        v = float(ph[1, 0]) / w
-        return (u, v)
-
-
-    # Computes reprojection RMS (px) for point index i using current clicked pixels.
-    def _reprojection_rms_px(self, index):
-        # Require a valid triangulated 3D point.
-        P, err = self._triangulate_point_pair(index)
-        if err is not None:
-            return None
-
-        X, Y, Z = P
-
-        # Read clicked pixels.
-        xL, yL = self.ptsL[index]
-        xR, yR = self.ptsR[index]
-
-        # Project back into both images.
-        pL = self._project_point(self.cal["PL"], X, Y, Z)
-        pR = self._project_point(self.cal["PR"], X, Y, Z)
-        if pL is None or pR is None:
-            return None
-
-        uL, vL = pL
-        uR, vR = pR
-
-        # Compute pixel residual magnitudes.
-        eL = ((uL - xL) ** 2 + (vL - yL) ** 2) ** 0.5
-        eR = ((uR - xR) ** 2 + (vR - yR) ** 2) ** 0.5
-
-        # RMS across left and right.
-        erms = ((eL * eL + eR * eR) / 2.0) ** 0.5
-        return float(erms)
-
-
-    # Estimates sigma(Z) and sigma(Range) in mm for a point using finite differences.
-    # Assumes isotropic click uncertainty sigma_px in each image coordinate.
-    def _estimate_point_sigma_mm(self, index, sigma_px):
-        # Pull clicked pixels.
-        xL, yL = self.ptsL[index]
-        xR, yR = self.ptsR[index]
-
-        # Baseline triangulation.
-        P0 = self._triangulate_from_pixels(xL, yL, xR, yR)
-        if P0 is None:
-            return None
-
-        X0, Y0, Z0 = P0
-        R0 = (X0 * X0 + Y0 * Y0 + Z0 * Z0) ** 0.5
-
-        # Perturbation set: ±sigma in each coordinate independently.
-        # This is cheap and provides a practical sensitivity-based sigma.
-        perturbs = [
-            (xL + sigma_px, yL, xR, yR),
-            (xL - sigma_px, yL, xR, yR),
-            (xL, yL + sigma_px, xR, yR),
-            (xL, yL - sigma_px, xR, yR),
-            (xL, yL, xR + sigma_px, yR),
-            (xL, yL, xR - sigma_px, yR),
-            (xL, yL, xR, yR + sigma_px),
-            (xL, yL, xR, yR - sigma_px),
-        ]
-
-        # Collect Z and Range results for each perturbation.
-        Zs = []
-        Rs = []
-
-        for (pxL, pyL, pxR, pyR) in perturbs:
-            Pp = self._triangulate_from_pixels(pxL, pyL, pxR, pyR)
-            if Pp is None:
-                continue
-
-            Xp, Yp, Zp = Pp
-            Rp = (Xp * Xp + Yp * Yp + Zp * Zp) ** 0.5
-
-            Zs.append(Zp)
-            Rs.append(Rp)
-
-        # If too many perturbations failed, give up.
-        if len(Zs) < 4:
-            return None
-
-        # Use sample standard deviation as sigma estimate.
-        sZ = float(np.std(np.array(Zs, dtype=np.float64), ddof=1))
-        sR = float(np.std(np.array(Rs, dtype=np.float64), ddof=1))
-
-        return (sZ, sR)
-
-
-    # Estimates sigma(length) in mm for segment (i-1 -> i) using endpoint perturbations.
-    # We perturb each endpoint independently and observe how length changes.
-    def _estimate_segment_sigma_len_mm(self, i0, i1, sigma_px):
-        # Require endpoints exist.
-        if i0 < 0 or i1 < 0:
-            return None
-        if i0 >= len(self.ptsL) or i1 >= len(self.ptsL):
-            return None
-        if i0 >= len(self.ptsR) or i1 >= len(self.ptsR):
-            return None
-
-        # Baseline 3D endpoints.
-        P0 = self._triangulate_from_pixels(*self.ptsL[i0], *self.ptsR[i0])
-        P1 = self._triangulate_from_pixels(*self.ptsL[i1], *self.ptsR[i1])
-        if P0 is None or P1 is None:
-            return None
-
-        X0, Y0, Z0 = P0
-        X1, Y1, Z1 = P1
-
-        # Baseline length.
-        dX = X1 - X0
-        dY = Y1 - Y0
-        dZ = Z1 - Z0
-        L0 = (dX * dX + dY * dY + dZ * dZ) ** 0.5
-
-        # Build perturbations for each endpoint, same as point sigma.
-        def _endpoint_perturbs(idx):
-            xL, yL = self.ptsL[idx]
-            xR, yR = self.ptsR[idx]
-            return [
-                (xL + sigma_px, yL, xR, yR),
-                (xL - sigma_px, yL, xR, yR),
-                (xL, yL + sigma_px, xR, yR),
-                (xL, yL - sigma_px, xR, yR),
-                (xL, yL, xR + sigma_px, yR),
-                (xL, yL, xR - sigma_px, yR),
-                (xL, yL, xR, yR + sigma_px),
-                (xL, yL, xR, yR - sigma_px),
-            ]
-
-        Ls = []
-
-        # Perturb endpoint 0, keep endpoint 1 baseline.
-        for (pxL, pyL, pxR, pyR) in _endpoint_perturbs(i0):
-            P0p = self._triangulate_from_pixels(pxL, pyL, pxR, pyR)
-            if P0p is None:
-                continue
-
-            X0p, Y0p, Z0p = P0p
-            dX = X1 - X0p
-            dY = Y1 - Y0p
-            dZ = Z1 - Z0p
-            Lp = (dX * dX + dY * dY + dZ * dZ) ** 0.5
-            Ls.append(Lp)
-
-        # Perturb endpoint 1, keep endpoint 0 baseline.
-        for (pxL, pyL, pxR, pyR) in _endpoint_perturbs(i1):
-            P1p = self._triangulate_from_pixels(pxL, pyL, pxR, pyR)
-            if P1p is None:
-                continue
-
-            X1p, Y1p, Z1p = P1p
-            dX = X1p - X0
-            dY = Y1p - Y0
-            dZ = Z1p - Z0
-            Lp = (dX * dX + dY * dY + dZ * dZ) ** 0.5
-            Ls.append(Lp)
-
-        if len(Ls) < 6:
-            return None
-
-        sL = float(np.std(np.array(Ls, dtype=np.float64), ddof=1))
-        return (L0, sL)
-
-    # Triangulates a matched point pair (same index in left and right) into 3D XYZ in millimeters.
-    def _triangulate_point_pair(self, index):
-        # Measurements require rectified coordinates and rectified projection matrices.
-        if not self.view_rectified.get():
-            return None, "Enable rectified view to measure"
-
-        # Calibration must be loaded and must contain PL and PR.
-        if self.cal is None:
-            return None, "Load calibration to measure"
-
-        # We need a matched point on both sides.
-        if index < 0:
-            return None, "Invalid point index"
-        if index >= len(self.ptsL) or index >= len(self.ptsR):
-            return None, "Point pair incomplete"
-
-        # Read the point coordinates in IMAGE pixel coords.
-        # These coordinates must correspond to the rectified view.
-        xL, yL = self.ptsL[index]
-        xR, yR = self.ptsR[index]
-
-        # Build 2x1 arrays for OpenCV triangulation.
-        # cv2.triangulatePoints expects float arrays shaped (2, N).
-        ptsL = np.array([[xL], [yL]], dtype=np.float64)
-        ptsR = np.array([[xR], [yR]], dtype=np.float64)
-
-        # Triangulate in homogeneous coordinates.
-        # Output shape is (4, N). For N=1, we have one 4-vector.
-        Xh = cv2.triangulatePoints(self.cal["PL"], self.cal["PR"], ptsL, ptsR)
-
-        # Convert homogeneous (X, Y, Z, W) to Euclidean (X/W, Y/W, Z/W).
-        W = float(Xh[3, 0])
-        if abs(W) < 1e-9:
-            return None, "Triangulation unstable (W≈0)"
-
-        X = float(Xh[0, 0]) / W
-        Y = float(Xh[1, 0]) / W
-        Z = float(Xh[2, 0]) / W
-
-        # Units are millimeters if your calibration translation was in millimeters.
-        return (X, Y, Z), None
-
-
-    # Formats a float millimeter value for display.
-    def _fmt_mm(self, v):
-        # Use one decimal place to keep it readable, but still precise enough.
-        return f"{v:.1f} mm"
-
-    # -------------------------------------------------------------------------
-    # Viewer panes
-    # -------------------------------------------------------------------------
-
-    def _build_viewers(self):
-        # ---- Paned window for resizable left/right panes ----
-        self.panes = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
-        self.panes.grid(row=2, column=0, sticky="nsew")
-        self.root.grid_rowconfigure(2, weight=1)
-
-        # ---- Left pane ----
-        self.left_frame = ttk.Frame(self.panes, padding=(8, 8))
-        self.left_frame.grid_rowconfigure(1, weight=1)
-        self.left_frame.grid_columnconfigure(0, weight=1)
-
-        self.left_header = ttk.Label(self.left_frame, text="Left", font=("Segoe UI", 10, "bold"))
-        self.left_header.grid(row=0, column=0, sticky="w", pady=(0, 6))
-
-        # Left: replace the single canvas with a viewport that contains two stacked canvases.
-        # Bottom canvas draws video, top canvas draws overlays later.
-
-        # Create a container frame in the exact grid cell where the old canvas lived.
-        self.left_viewport = ttk.Frame(self.left_frame)
-        self.left_viewport.grid(row=1, column=0, sticky="nsew")
-
-        # Allow row 1 (the video area) to grow when the window grows.
-        self.left_frame.grid_rowconfigure(1, weight=1)
-
-        # Allow column 0 (the only column) to grow when the window grows.
-        self.left_frame.grid_columnconfigure(0, weight=1)
-
-        # Make the viewport frame expand to fill its parent cell.
-        self.left_viewport.grid_rowconfigure(0, weight=1)
-        self.left_viewport.grid_columnconfigure(0, weight=1)
-
-        # Bottom canvas: this is where we draw the video image.
-        self.left_video_canvas = tk.Canvas(
-            self.left_viewport,
-            bg="black",                    # Fill background when no frame is drawn.
-            highlightthickness=1,          # Thin border for visibility.
-            highlightbackground="#333333", # Border color.
-        )
-        self.left_video_canvas.grid(row=0, column=0, sticky="nsew")  # Fill the viewport.
-
-        # Top canvas: overlays live here (points, lines, labels).
-        # We do NOT draw video here, so we can change video rendering later without touching overlays.
-        self.left_overlay_canvas = tk.Canvas(
-            self.left_viewport,
-            bg="black",          # Tk requires a valid color; we fake transparency later.
-            highlightthickness=0,
-            bd=0,
-        )
-
-        # Use place so the overlay canvas always covers the video canvas exactly.
-        # relwidth/relheight = 1 makes it track the viewport size automatically.
-        self.left_overlay_canvas.place(x=0, y=0, relwidth=1.0, relheight=1.0)
-
-        # Slider row: slider + label
-        self.left_slider_row = ttk.Frame(self.left_frame)
-        self.left_slider_row.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-        self.left_slider_row.grid_columnconfigure(0, weight=1)
-
-        self.left_slider = ttk.Scale(
-            self.left_slider_row,
-            from_=0,
-            to=0,
-            orient=tk.HORIZONTAL,
-            command=self.on_left_slider_changed,
-        )
-        self.left_slider.grid(row=0, column=0, sticky="ew")
-
-        self.left_frame_label = ttk.Label(self.left_slider_row, text="Frame: 0/0", width=14, anchor="e")
-        self.left_frame_label.grid(row=0, column=1, padx=(10, 0))
-
-        # ---- Right pane ----
-        self.right_frame = ttk.Frame(self.panes, padding=(8, 8))
-        self.right_frame.grid_rowconfigure(1, weight=1)
-        self.right_frame.grid_columnconfigure(0, weight=1)
-
-        self.right_header = ttk.Label(self.right_frame, text="Right", font=("Segoe UI", 10, "bold"))
-        self.right_header.grid(row=0, column=0, sticky="w", pady=(0, 6))
-
-        # Right: same stacked canvas setup as left.
-
-        self.right_viewport = ttk.Frame(self.right_frame)
-        self.right_viewport.grid(row=1, column=0, sticky="nsew")
-
-        # Let the right pane's video row expand with window size.
-        self.right_frame.grid_rowconfigure(1, weight=1)
-
-        # Let the right pane's single column expand with window size.
-        self.right_frame.grid_columnconfigure(0, weight=1)
-
-        # Let the viewport expand inside that growing area.
-        self.right_viewport.grid_rowconfigure(0, weight=1)
-        self.right_viewport.grid_columnconfigure(0, weight=1)
-
-        # Bottom canvas draws video frames.
-        self.right_video_canvas = tk.Canvas(
-            self.right_viewport,
-            bg="black",
-            highlightthickness=1,
-            highlightbackground="#333333",
-        )
-        self.right_video_canvas.grid(row=0, column=0, sticky="nsew")
-
-        # Top canvas draws overlay shapes and handles later.
-        self.right_overlay_canvas = tk.Canvas(
-            self.right_viewport,
-            bg="black",
-            highlightthickness=0,
-            bd=0,
-        )
-        self.right_overlay_canvas.place(x=0, y=0, relwidth=1.0, relheight=1.0)
-
-        self.right_slider_row = ttk.Frame(self.right_frame)
-        self.right_slider_row.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-        self.right_slider_row.grid_columnconfigure(0, weight=1)
-
-        self.right_slider = ttk.Scale(
-            self.right_slider_row,
-            from_=0,
-            to=0,
-            orient=tk.HORIZONTAL,
-            command=self.on_right_slider_changed,
-        )
-        self.right_slider.grid(row=0, column=0, sticky="ew")
-
-        self.right_frame_label = ttk.Label(self.right_slider_row, text="Frame: 0/0", width=14, anchor="e")
-        self.right_frame_label.grid(row=0, column=1, padx=(10, 0))
-
-        # ---- Add panes to PanedWindow ----
-        self.panes.add(self.left_frame, weight=1)
-        self.panes.add(self.right_frame, weight=1)
-
-        # When the canvas size changes, we need to redraw the current frames.
-        # We debounce because resize events fire rapidly while dragging the window.
-        self.left_video_canvas.bind("<Configure>", self.on_canvas_resized)
-        self.right_video_canvas.bind("<Configure>", self.on_canvas_resized)
-
-        self.left_overlay_canvas.bind("<Configure>", self.on_canvas_resized)
-        self.right_overlay_canvas.bind("<Configure>", self.on_canvas_resized)
-
-        # Left overlay canvas receives user input.
-        self.left_overlay_canvas.bind("<Button-1>", lambda e: self.on_overlay_left_down("L", e))
-        self.left_overlay_canvas.bind("<B1-Motion>", lambda e: self.on_overlay_left_drag("L", e))
-        self.left_overlay_canvas.bind("<ButtonRelease-1>", lambda e: self.on_overlay_left_up("L", e))
-
-        # Right overlay canvas receives user input.
-        self.right_overlay_canvas.bind("<Button-1>", lambda e: self.on_overlay_left_down("R", e))
-        self.right_overlay_canvas.bind("<B1-Motion>", lambda e: self.on_overlay_left_drag("R", e))
-        self.right_overlay_canvas.bind("<ButtonRelease-1>", lambda e: self.on_overlay_left_up("R", e))
-
-        # Mouse wheel zoom for each pane (Windows uses <MouseWheel> with event.delta).
-        self.left_overlay_canvas.bind("<MouseWheel>", lambda e: self.on_mouse_wheel("L", e))
-        self.right_overlay_canvas.bind("<MouseWheel>", lambda e: self.on_mouse_wheel("R", e))
-
-       
-
-    # -------------------------------------------------------------------------
-    # Status bar
-    # -------------------------------------------------------------------------
-
-    def _build_statusbar(self):
-        self.status = ttk.Frame(self.root, padding=(8, 6))
-        self.status.grid(row=3, column=0, sticky="ew")
-        self.status.grid_columnconfigure(1, weight=1)
-
-        # Left: file/cal/view state.
-        # width is in characters, used to stop the label from resizing the window.
-        self.status_left = ttk.Label(self.status, text="", anchor="w", width=90)
-        self.status_left.grid(row=0, column=0, sticky="w")
-
-        # Middle: warnings / messages.
-        # sticky="ew" lets it stretch inside the fixed grid column.
-        self.status_mid = ttk.Label(self.status, text="", anchor="center", width=40)
-        self.status_mid.grid(row=0, column=1, sticky="ew")
-
-        # Right: measurement results.
-        self.status_right = ttk.Label(self.status, text="", anchor="e", width=60)
-        self.status_right.grid(row=0, column=2, sticky="e")
-
-    # -------------------------------------------------------------------------
-    # Stub handlers (menu)
-    # -------------------------------------------------------------------------
-
-    # Loads the left video and updates UI state.
-    def on_load_left_video(self):
-        # Ask user to choose a left MP4 file.
-        path = filedialog.askopenfilename(
-            title="Load Left Video",
-            filetypes=[("MP4 Video", "*.mp4"), ("All Files", "*.*")],
-        )
-        if not path:
-            return
-
-        # Close any previous capture so we do not leak file handles.
-        if self.capL:
-            self.capL.release()
-            self.capL = None
-            self.metaL = None
-
-        # Open the new capture and read its metadata.
-        cap, meta = self._open_video_capture(path)
-        if cap is None:
-            messagebox.showerror("Load Left Video", "Failed to open the selected video file.")
-            return
-
-        # Save state.
-        self.left_video_path = path
-        self.capL = cap
-        self.metaL = meta
-
-        # Update header with metadata so you can verify the file quickly.
-        self.left_header.config(
-            text=f"Left  ({meta['width']}×{meta['height']}, fps={meta['fps']:.3f}, frames={meta['frame_count']})"
-        )
-
-        # Reset left index to 0 on new load to avoid seeking into nonsense.
-        self.left_frame_index.set(0)
-
-        # Update slider ranges based on lock mode and which videos are loaded.
-        self._update_slider_ranges()
-
-        # Render whichever frames are available.
-        self._render_current_frames()
-
-        # Update status.
-        self._set_status_mid("Loaded left video")
         self._refresh_status_left()
 
+        # Keep the entry boxes live-tracking the current frame's actual time,
+        # once an anchor exists (a no-op before that, so typing a fresh
+        # anchor isn't clobbered by this running on every frame change).
+        self._refresh_real_time_entries(li)
 
+    # -------------------------------------------------------------------------
+    # Real-time sync
+    # -------------------------------------------------------------------------
 
+    def _format_timestamp(self, frame_index, fps):
+        """Format a frame index as an HH:MM:SS:FF timecode.
 
-    # Loads the right video and updates UI state.
-    def on_load_right_video(self):
-        # Ask user to choose a right MP4 file.
-        # We do not assume both videos are loaded at once, so this must work independently.
-        path = filedialog.askopenfilename(
-            title="Load Right Video",
-            filetypes=[("MP4 Video", "*.mp4"), ("All Files", "*.*")],
-        )
-        if not path:
-            # User cancelled the dialog.
-            return
+        The trailing "FF" is the frame number *within* that second
+        (0-based, wrapping at the video's own fps) - not a fraction of a
+        second - so scrubbing to a specific frame shows exactly which
+        frame that is, the same way professional video timecode does.
 
-        # If we already had a right capture open, release it.
-        # This avoids file handle leaks and lets the user reload different files safely.
-        if self.capR:
-            self.capR.release()
-            self.capR = None
-            self.metaR = None
+        Args:
+            frame_index (int): Zero-based frame index.
+            fps (float | None): The video's frames-per-second, or None/0
+                if unknown.
 
-        # Open the new capture and read container metadata.
-        # We do this immediately so the UI can show fps, resolution, and frame count.
-        cap, meta = self._open_video_capture(path)
-        if cap is None:
-            # If OpenCV cannot open it, inform the user with a clear error.
-            messagebox.showerror("Load Right Video", "Failed to open the selected video file.")
-            return
+        Returns:
+            str: The formatted timecode, or "?" if `fps` isn't a usable
+            positive number (e.g. no video loaded yet).
+        """
+        if not fps or fps <= 0:
+            return "?"
 
-        # Save state so the rest of the app can render frames from this capture.
-        self.right_video_path = path
-        self.capR = cap
-        self.metaR = meta
+        fps_int = max(1, round(float(fps)))
+        frame_index = int(frame_index)
 
-        # Update the right header text so it is obvious what file was loaded.
-        # This is important for debugging when videos are mismatched.
-        self.right_header.config(
-            text=f"Right  ({meta['width']}×{meta['height']}, fps={meta['fps']:.3f}, frames={meta['frame_count']})"
-        )
+        whole_seconds, frame_in_second = divmod(frame_index, fps_int)
+        hours = whole_seconds // 3600
+        minutes = (whole_seconds % 3600) // 60
+        seconds = whole_seconds % 60
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}:{frame_in_second:02d}"
 
-        # Reset the right timeline to frame 0 on load.
-        # This avoids "seek into the middle" behavior that is confusing during testing.
-        self.right_frame_index.set(0)
+    def _format_actual_time(self, frame_index):
+        """Calculate and format the real-world time at a given frame.
 
-        # Update slider max ranges and clamping rules.
-        # If lock is enabled and both videos exist, we clamp to the shorter length here.
-        self._update_slider_ranges()
+        Uses the real-world time anchor (`self.real_time_anchor_frame`/
+        `self.real_time_anchor_dt`, set by `on_real_time_entered`) plus
+        the left video's fps to project forward/backward from that one
+        known point, in whole frames rather than fractional seconds -
+        see `_format_timestamp`'s docstring for why.
 
-        # Draw the current frames (left if present, right always now).
-        # This makes it immediately obvious that loading worked.
-        self._render_current_frames()
+        Args:
+            frame_index (int): The left-timeline frame index to
+                calculate the real-world time for.
 
-        # Update status line.
-        self._set_status_mid("Loaded right video")
-        self._refresh_status_left()
+        Returns:
+            str: The calculated real-world time as
+            "YYYY-MM-DD HH:MM:SS:FF" (FF = frame number within that
+            second), or "(not set)" if no anchor has been set yet or the
+            left video's fps isn't known.
+        """
+        if self.real_time_anchor_frame is None or self.real_time_anchor_dt is None:
+            return "(not set)"
 
-    # Called when the user decides to load a new calibration folder.
-    def on_load_calibration_folder(self):
-        folder = filedialog.askdirectory(title="Load Calibration Folder")
-        if not folder:
-            return
+        fps = self.metaL["fps"] if self.metaL else None
+        if not fps or fps <= 0:
+            return "(not set)"
 
-        # Store the folder path for status display.
-        self.calibration_folder = folder
+        fps_int = max(1, round(float(fps)))
+        frame_delta = int(frame_index) - int(self.real_time_anchor_frame)
 
-        # Build expected file paths.
-        intr_path = os.path.join(folder, "calibration_intrinsics.npz")
-        extr_path = os.path.join(folder, "calibration_extrinsics.npz")
-        rect_path = os.path.join(folder, "calibration_rectification.npz")
-        maps_path = os.path.join(folder, "calibration_maps.npz")
+        # divmod floors toward negative infinity for a positive divisor, so a
+        # negative frame_delta still lands on a frame_in_second in [0, fps_int)
+        # rather than a negative frame count - e.g. one frame before the
+        # anchor is "the second before, frame fps_int - 1", not "-1 frames".
+        whole_seconds_delta, frame_in_second = divmod(frame_delta, fps_int)
 
-        # Verify required files exist.
-        missing = []
-        for p in [intr_path, extr_path, rect_path, maps_path]:
-            if not os.path.isfile(p):
-                missing.append(os.path.basename(p))
+        actual_dt = self.real_time_anchor_dt + datetime.timedelta(seconds=whole_seconds_delta)
+        return actual_dt.strftime("%Y-%m-%d %H:%M:%S") + f":{frame_in_second:02d}"
 
-        # Handle the case where a calibration file doesn't exist
-        if missing:
-            self.cal = None
-            self.view_rectified.set(False)
-            self._set_status_mid(f"Missing calibration files: {', '.join(missing)}")
-            self._refresh_status_left()
-            return
+    def on_real_time_entered(self):
+        """Handle the user pressing "Set Time Sync".
 
+        Reads the six year/month/day/hour/minute/second boxes and, if
+        they form a valid date/time, anchors it to the left timeline's
+        current frame index - from then on, `_format_actual_time` can
+        calculate the real-world time at any other frame. Requires the
+        left video to already be loaded (its fps is needed for that
+        calculation). Nothing is validated or applied by typing alone -
+        only this explicit action does that, deliberately, so a
+        half-typed date never triggers a premature error dialog.
+
+        Returns:
+            None
+        """
         try:
-            intr = np.load(intr_path)
-            rect = np.load(rect_path)
-            maps = np.load(maps_path)
-            extr = np.load(extr_path)
-
-            # Pull required matrices/maps.
-            PL = rect["PL"]
-            PR = rect["PR"]
-            Q = rect["Q"]
-
-            mapLx = maps["mapLx"]
-            mapLy = maps["mapLy"]
-            mapRx = maps["mapRx"]
-            mapRy = maps["mapRy"]
-
-            # Intrinsics
-            mtxL = intr["mtxL"]
-            distL = intr["distL"]
-            mtxR = intr["mtxR"]
-            distR = intr["distR"]
-
-            # Extrinsics
-            R = extr["R"]
-            T = extr["T"]
-            E = extr["E"]
-            F = extr["F"]
-            stereo_rms = float(extr["stereo_rms"]) if "stereo_rms" in extr.files else None
-
-            # Rectification
-            RL = rect["RL"] if "RL" in rect.files else None
-            RR = rect["RR"] if "RR" in rect.files else None
-            roiL = rect["roiL"] if "roiL" in rect.files else None
-            roiR = rect["roiR"] if "roiR" in rect.files else None
-
-            # Intrinsics file stores expected calibration resolution.
-            cal_w = int(intr["image_width"])
-            cal_h = int(intr["image_height"])
-
-        except Exception as e:
-            self.cal = None
-            self.view_rectified.set(False)
-            self._set_status_mid(f"Failed to load calibration: {e}")
-            self._refresh_status_left()
+            year = int(self.real_time_year_edit.text().strip())
+            month = int(self.real_time_month_edit.text().strip())
+            day = int(self.real_time_day_edit.text().strip())
+            hour = int(self.real_time_hour_edit.text().strip())
+            minute = int(self.real_time_minute_edit.text().strip())
+            second = int(self.real_time_second_edit.text().strip())
+            parsed = datetime.datetime(year, month, day, hour, minute, second)
+        except ValueError:
+            # A box is empty/non-numeric, or the values parsed as ints fine
+            # but don't form a real date (e.g. day 31 in a 30-day month).
+            # Either way, there's nothing safe to anchor yet.
+            QMessageBox.critical(
+                self,
+                "Real Time",
+                "That's not a valid date/time — check that every box is "
+                "filled in and the day of month is valid.",
+            )
             return
 
-        # If we have a loaded video, enforce resolution match now.
-        # Rectification maps must match the decoded frame size.
-        if self.metaL:
-            if self.metaL["width"] != cal_w or self.metaL["height"] != cal_h:
-                self.cal = None
-                self.view_rectified.set(False)
-                self._set_status_mid("Calibration resolution does not match LEFT video")
-                self._refresh_status_left()
-                return
-
-        if self.metaR:
-            if self.metaR["width"] != cal_w or self.metaR["height"] != cal_h:
-                self.cal = None
-                self.view_rectified.set(False)
-                self._set_status_mid("Calibration resolution does not match RIGHT video")
-                self._refresh_status_left()
-                return
-
-        # Store calibration bundle.
-        self.cal = {
-            # Sizes
-            "w": cal_w,
-            "h": cal_h,
-
-            # Intrinsics
-            "mtxL": mtxL,
-            "distL": distL,
-            "mtxR": mtxR,
-            "distR": distR,
-
-            # Extrinsics
-            "R": R,
-            "T": T,
-            "E": E,
-            "F": F,
-            "stereo_rms": stereo_rms,
-
-            # Rectification
-            "RL": RL,
-            "RR": RR,
-            "PL": PL,
-            "PR": PR,
-            "Q": Q,
-            "roiL": roiL,
-            "roiR": roiR,
-
-            # Maps
-            "mapLx": mapLx,
-            "mapLy": mapLy,
-            "mapRx": mapRx,
-            "mapRy": mapRy,
-        }
-
-        self._set_status_mid("Calibration loaded")
-        self._refresh_status_left()
-
-        # Trigger redraw so rectified mode can be enabled immediately.
-        self._render_current_frames()
-
-        # In real wiring, you will enable "Show Rectified" only after maps load.
-        # For now, we leave it togglable to test UI.
-
-    # -------------------------------------------------------------------------
-    # Stub handlers (view toggles)
-    # -------------------------------------------------------------------------
-
-    # Toggle whether the user is watching recitfied stereo video, or raw stereo video
-    def on_toggle_view_rectified(self):
-        # If user turned rectified on, ensure calibration is ready.
-        if self.view_rectified.get():
-            if self.cal is None:
-                # Force it off and warn.
-                self.view_rectified.set(False)
-                self._set_status_mid("Rectified view requires calibration")
-                self._refresh_status_left()
-                return
-
-            # If videos are loaded, ensure sizes match calibration.
-            if self.metaL:
-                if self.metaL["width"] != self.cal["w"] or self.metaL["height"] != self.cal["h"]:
-                    self.view_rectified.set(False)
-                    self._set_status_mid("Rectified view disabled: LEFT video resolution mismatch")
-                    self._refresh_status_left()
-                    return
-
-            if self.metaR:
-                if self.metaR["width"] != self.cal["w"] or self.metaR["height"] != self.cal["h"]:
-                    self.view_rectified.set(False)
-                    self._set_status_mid("Rectified view disabled: RIGHT video resolution mismatch")
-                    self._refresh_status_left()
-                    return
-
-        self._refresh_status_left()
-        self._render_current_frames()
-
-    # Toggles fit-to-window rendering and redraws the current frames.
-    def on_toggle_fit_to_window(self):
-        # Fit-to-window changes the display size calculation.
-        # It does not change the underlying frame indices.
-        self._set_status_mid("Fit To Window toggled")
-
-        # Redraw using the new scale rule.
-        # If videos are not loaded yet, _render_current_frames() is a no-op.
-        self._render_current_frames()
-
-    def on_toggle_show_overlays(self):
-        # In real wiring, this would enable/disable drawing points/lines on canvas.
-        self._set_status_mid("Show Overlays toggled (UI only)")
-        self._refresh_placeholder_canvases()
-
-    def on_toggle_show_epipolar(self):
-        # In real wiring, only makes sense when rectified is active.
-        self._set_status_mid("Epipolar cursor toggled (UI only)")
-        self._refresh_placeholder_canvases()
-
-    # -------------------------------------------------------------------------
-    # Stub handlers (toolbar)
-    # -------------------------------------------------------------------------
-
-    def on_to_start(self):
-        self._jump_frames_locked_or_single(target_index=0)
-
-    def on_to_end(self):
-        # For now, "end" means whatever the current slider max is.
-        if self.lock_lr.get():
-            max_i = int(min(self.left_frame_max, self.right_frame_max))
-            self._jump_frames_locked_or_single(target_index=max_i)
-        else:
-            self.left_frame_index.set(self.left_frame_max)
-            self.right_frame_index.set(self.right_frame_max)
-            self.left_slider.set(self.left_frame_max)
-            self.right_slider.set(self.right_frame_max)
-            self._update_frame_labels()
-            self._refresh_placeholder_canvases()
-
-    # Steps one frame backward.
-    def on_step_back(self):
-        # If we are locked and both videos are loaded, step the master timeline
-        # and keep the stored offset alignment.
-        if self.lock_lr.get() and self._both_videos_loaded():
-            # Left is the master timeline for transport controls.
-            li = int(self.left_frame_index.get())
-            self._jump_frames_locked_with_offset("L", li - 1)
+        if not self.metaL:
+            self._set_status_mid("Load the left video before setting a real-time anchor")
             return
 
-        # Otherwise, fall back to the old behavior.
-        self._nudge_frames_locked_or_single(delta=-1)
+        self.real_time_anchor_frame = int(self.left_frame_index)
+        self.real_time_anchor_dt = parsed
+        self.real_time_anchor_iso = parsed.isoformat()
 
-    # Steps one frame forward.
-    def on_step_forward(self):
-        # If we are locked and both videos are loaded, step the master timeline
-        # and keep the stored offset alignment.
-        if self.lock_lr.get() and self._both_videos_loaded():
-            li = int(self.left_frame_index.get())
-            self._jump_frames_locked_with_offset("L", li + 1)
-            return
-
-        # Otherwise, fall back to the old behavior.
-        self._nudge_frames_locked_or_single(delta=+1)
-
-    # Toggles playback on and off using a Tk after loop.
-    def on_play_pause(self):
-        # Do nothing unless at least one video is loaded.
-        if not self.capL and not self.capR:
-            return
-
-        # Toggle playback state.
-        self.is_playing = not self.is_playing
-
-        # If enabling playback, start the loop immediately.
-        if self.is_playing:
-            self._playback_tick()
-        else:
-            # If disabling, cancel any scheduled tick.
-            if self.play_after_id is not None:
-                self.root.after_cancel(self.play_after_id)
-                self.play_after_id = None
-
-    def on_speed_changed(self, _evt=None):
-        # Speed affects playback step or timer interval later.
-        self._set_status_mid(f"Speed set to {self.speed_var.get()} (UI only)")
-
-    # Toggles lock mode.
-    # When enabling lock, capture the current alignment as a fixed frame offset.
-    def on_toggle_lock(self):
-        # Update status UI.
-        self._set_status_mid("Lock toggled")
-        self._refresh_status_left()
-
-        # Only define an offset when BOTH videos are loaded.
-        # If only one video is loaded, lock is effectively meaningless.
-        if self.lock_lr.get() and self._both_videos_loaded():
-            # Read the current indices.
-            li = int(self.left_frame_index.get())
-            ri = int(self.right_frame_index.get())
-
-            # Store offset so that future locked moves preserve the current alignment.
-            # offset = R - L
-            self.lock_offset_frames = ri - li
-
-            # Do not jump any frames here.
-            # The current point in time is already aligned by the user's manual scrubbing.
-            self._set_status_mid(f"Lock enabled (offset {self.lock_offset_frames:+d} frames)")
-            return
-
-        # If disabling lock, we keep each slider where it is and do nothing else.
-        if not self.lock_lr.get():
-            self._set_status_mid("Lock disabled")
-
-        # When enabling lock, unify indices to the left slider's current value.
-        if self.lock_lr.get():
-            master = int(round(self.left_slider.get()))
-            self._jump_frames_locked_or_single(target_index=master)
-
-    # Advances the timeline and schedules the next playback tick.
-    def _playback_tick(self):
-        # If playback was turned off between ticks, stop immediately.
-        if not self.is_playing:
-            return
-
-        # Determine per tick frame step based on speed setting.
-        # We implement speed by skipping frames rather than changing decode rate.
-        step = 1
-        if self.speed_var.get() == "0.25x":
-            # 0.25x is implemented as a slower tick, not fractional frames.
-            step = 1
-            delay_ms = 160
-        elif self.speed_var.get() == "0.5x":
-            step = 1
-            delay_ms = 80
-        elif self.speed_var.get() == "1x":
-            step = 1
-            delay_ms = 40
-        elif self.speed_var.get() == "2x":
-            step = 2
-            delay_ms = 40
-        else:
-            step = 4
-            delay_ms = 40
-
-        # Compute maximum index depending on lock mode.
-        if self.lock_lr.get() and self.metaL and self.metaR:
-            max_i = min(self.left_frame_max, self.right_frame_max)
-            cur = int(self.left_frame_index.get())
-            nxt = cur + step
-
-            # Stop at the end.
-            if nxt > max_i:
-                self.is_playing = False
-                self.play_after_id = None
-                return
-
-            # Advance both indices in lock mode.
-            self.left_frame_index.set(nxt)
-            self.right_frame_index.set(nxt)
-            self.left_slider.set(nxt)
-            self.right_slider.set(nxt)
-        else:
-            # Unlocked playback advances each loaded stream independently.
-            if self.metaL:
-                curL = int(self.left_frame_index.get())
-                nxtL = curL + step
-                nxtL = self._clamp(nxtL, 0, int(self.left_frame_max))
-                self.left_frame_index.set(nxtL)
-                self.left_slider.set(nxtL)
-
-            if self.metaR:
-                curR = int(self.right_frame_index.get())
-                nxtR = curR + step
-                nxtR = self._clamp(nxtR, 0, int(self.right_frame_max))
-                self.right_frame_index.set(nxtR)
-                self.right_slider.set(nxtR)
-
-        # Render the new frames.
-        self._render_current_frames()
-
-        # Schedule the next tick.
-        self.play_after_id = self.root.after(delay_ms, self._playback_tick)
-
-    # -------------------------------------------------------------------------
-    # Slider callbacks
-    # -------------------------------------------------------------------------
-
-    # Called whenever the user drags the left slider.
-    # This is the primary scrubbing mechanism for the left timeline.
-    def on_left_slider_changed(self, _value):
-        # If we are moving the slider in code, ignore this callback.
-        # This prevents recursion when lock mode updates both sliders.
-        if self._suppress_slider_callbacks:
-            return
-
-        i = int(round(float(self.left_slider.get())))
-
-        # In lock mode, left slider drives the master and right follows with offset.
-        if self.lock_lr.get() and self._both_videos_loaded():
-            self._jump_frames_locked_with_offset("L", i)
-            return
-
-        # If unlocked, the left slider only controls the left timeline.
-        # We update the stored index so future renders use this frame.
-        self.left_frame_index.set(i)
-
-        # Update the numeric "Frame: i/max" label under the slider.
+        self._set_status_mid(f"Real time anchored at frame {self.real_time_anchor_frame}")
+        self.time_sync_indicator.setText("✓ Synced")
         self._update_frame_labels()
 
-        # Render frames so the left pane updates immediately as the slider moves.
-        # Right pane will render too if the right video is loaded, but it stays on its own index.
-        self._render_current_frames()
+    def _refresh_real_time_entries(self, frame_index):
+        """Update the six real-time anchor boxes to the calculated actual
+        time at a given frame.
 
-    # Called whenever the user drags the right slider.
-    # This is the primary scrubbing mechanism for the right timeline.
-    def on_right_slider_changed(self, _value):
-        # If we are moving the slider in code, ignore this callback.
-        # This prevents recursion when lock mode updates both sliders.
-        if self._suppress_slider_callbacks:
+        A no-op if no anchor is set yet - so the boxes stay exactly as
+        the user is typing them until "Set Time Sync" actually
+        establishes an anchor; once one exists, this keeps the boxes
+        live-tracking the calculated real-world time as the frame
+        changes (scrubbing, playback, stepping), not frozen at the
+        original anchor value.
+
+        Args:
+            frame_index (int): The left-timeline frame index to display
+                the calculated actual time for.
+
+        Returns:
+            None
+        """
+        if self.real_time_anchor_frame is None or self.real_time_anchor_dt is None:
             return
-    
-        # Quantize slider float to an integer frame index.
-        i = int(round(float(self.right_slider.get())))
 
-        # In lock mode, right slider drives the master and left follows with offset.
-        if self.lock_lr.get() and self._both_videos_loaded():
-            self._jump_frames_locked_with_offset("R", i)
+        fps = self.metaL["fps"] if self.metaL else None
+        if not fps or fps <= 0:
             return
 
-        # Unlocked mode means right slider controls right video only.
-        self.right_frame_index.set(i)
+        elapsed_seconds = (float(frame_index) - float(self.real_time_anchor_frame)) / float(fps)
+        current_dt = self.real_time_anchor_dt + datetime.timedelta(seconds=elapsed_seconds)
 
-        # Update the numeric labels under each slider.
+        self.real_time_year_edit.setText(f"{current_dt.year:04d}")
+        self.real_time_month_edit.setText(f"{current_dt.month:02d}")
+        self.real_time_day_edit.setText(f"{current_dt.day:02d}")
+        self.real_time_hour_edit.setText(f"{current_dt.hour:02d}")
+        self.real_time_minute_edit.setText(f"{current_dt.minute:02d}")
+        self.real_time_second_edit.setText(f"{current_dt.second:02d}")
+
+    # -------------------------------------------------------------------------
+    # Slider ranges / lock-sync
+    # -------------------------------------------------------------------------
+
+    def _clamp(self, value, lo, hi):
+        """Clamp a value to `[lo, hi]`.
+
+        Args:
+            value (int): Value to clamp.
+            lo (int): Minimum.
+            hi (int): Maximum.
+
+        Returns:
+            int: The clamped value.
+        """
+        return max(lo, min(hi, value))
+
+    def _update_slider_ranges(self):
+        """Update slider max ranges and clamp indices based on lock mode.
+
+        Direct port of the original's method of the same name.
+
+        Returns:
+            None
+        """
+        self.left_frame_max = (self.metaL["frame_count"] - 1) if self.metaL else 0
+        self.right_frame_max = (self.metaR["frame_count"] - 1) if self.metaR else 0
+
+        self._suppress_slider_callbacks = True
+        try:
+            if self.lock_lr and self.metaL and self.metaR:
+                master_max = min(self.left_frame_max, self.right_frame_max)
+
+                li = self._clamp(int(self.left_frame_index), 0, master_max)
+
+                self.left_frame_index = li
+                self.right_frame_index = li
+
+                self.left_slider.setRange(0, master_max)
+                self.right_slider.setRange(0, master_max)
+                self.left_slider.setValue(li)
+                self.right_slider.setValue(li)
+            else:
+                self.left_slider.setRange(0, int(self.left_frame_max))
+                self.right_slider.setRange(0, int(self.right_frame_max))
+
+                li = self._clamp(int(self.left_frame_index), 0, int(self.left_frame_max))
+                ri = self._clamp(int(self.right_frame_index), 0, int(self.right_frame_max))
+
+                self.left_frame_index = li
+                self.right_frame_index = ri
+
+                self.left_slider.setValue(li)
+                self.right_slider.setValue(ri)
+        finally:
+            self._suppress_slider_callbacks = False
+
         self._update_frame_labels()
 
-        # Render so the right pane updates immediately.
-        self._render_current_frames()
-
-    # Jumps timelines in lock mode while preserving the stored frame offset.
-    # master_side indicates which slider the user is driving: "L" or "R".
     def _jump_frames_locked_with_offset(self, master_side, target_index):
-        # Guard: lock mode requires both videos.
-        if not self._both_videos_loaded():
-            return
+        """Move both timelines together, preserving the locked offset.
 
-        # Convert target to int frame index.
-        target = int(target_index)
+        Direct port of the original's method of the same name - if one
+        side hits an end stop, shifts the *other* side to preserve the
+        offset rather than changing the offset itself ("Option A"
+        clamping).
 
-        # Compute desired indices using the offset definition:
-        # offset = R - L
+        Args:
+            master_side (str): `"L"` or `"R"` - which side's index
+                `target_index` refers to.
+            target_index (int): The requested frame index for
+                `master_side`.
+
+        Returns:
+            None
+        """
+        lmax = self.left_frame_max
+        rmax = self.right_frame_max
+
         if master_side == "L":
-            # User is driving left.
-            li = target
+            li = target_index
             ri = li + int(self.lock_offset_frames)
         else:
-            # User is driving right.
-            ri = target
+            ri = target_index
             li = ri - int(self.lock_offset_frames)
 
-        # Clamp using Option A:
-        # If one side hits an end stop, shift the other side to preserve offset.
-        #
-        # Left legal range is [0, left_frame_max]
-        # Right legal range is [0, right_frame_max]
-        lmax = int(self.left_frame_max)
-        rmax = int(self.right_frame_max)
-
-        # Clamp left first, and adjust right accordingly.
         if li < 0:
             li = 0
             ri = li + int(self.lock_offset_frames)
@@ -2097,7 +1879,6 @@ class SizeamaticProApp:
             li = lmax
             ri = li + int(self.lock_offset_frames)
 
-        # Now clamp right, and adjust left accordingly.
         if ri < 0:
             ri = 0
             li = ri - int(self.lock_offset_frames)
@@ -2105,716 +1886,707 @@ class SizeamaticProApp:
             ri = rmax
             li = ri - int(self.lock_offset_frames)
 
-        # Final safety clamp in case adjustment pushed the other side slightly out.
-        # This keeps indices always valid even in extreme offset cases.
         li = self._clamp(li, 0, lmax)
         ri = self._clamp(ri, 0, rmax)
 
-        # Save indices.
-        self.left_frame_index.set(li)
-        self.right_frame_index.set(ri)
+        self.left_frame_index = li
+        self.right_frame_index = ri
 
-        # Update sliders without triggering callbacks.
         self._suppress_slider_callbacks = True
         try:
-            self.left_slider.set(li)
-            self.right_slider.set(ri)
+            self.left_slider.setValue(li)
+            self.right_slider.setValue(ri)
         finally:
             self._suppress_slider_callbacks = False
 
-        # Redraw.
+        self.render_current_frames()
+
+    def on_left_slider_changed(self, value):
+        """Handle the left slider moving (by user or programmatically).
+
+        Args:
+            value (int): The slider's new value.
+
+        Returns:
+            None
+        """
+        if self._suppress_slider_callbacks:
+            return
+
+        if self.lock_lr and self.capL and self.capR:
+            self._jump_frames_locked_with_offset("L", value)
+        else:
+            self.left_frame_index = value
+            self.render_current_frames()
+
+    def on_right_slider_changed(self, value):
+        """Handle the right slider moving (by user or programmatically).
+
+        Args:
+            value (int): The slider's new value.
+
+        Returns:
+            None
+        """
+        if self._suppress_slider_callbacks:
+            return
+
+        if self.lock_lr and self.capL and self.capR:
+            self._jump_frames_locked_with_offset("R", value)
+        else:
+            self.right_frame_index = value
+            self.render_current_frames()
+
+    def on_toggle_lock(self, checked):
+        """Handle the Lock L and R checkbox toggling.
+
+        Enabling lock captures the current alignment as the new offset
+        without moving either timeline - a direct port of the
+        original's `on_toggle_lock`.
+
+        Args:
+            checked (bool): The checkbox's new state.
+
+        Returns:
+            None
+        """
+        self.lock_lr = checked
+        if checked and self.capL and self.capR:
+            self.lock_offset_frames = self.right_frame_index - self.left_frame_index
+            self.offset_spin.blockSignals(True)
+            self.offset_spin.setValue(self.lock_offset_frames)
+            self.offset_spin.blockSignals(False)
+        self._update_slider_ranges()
+        self._refresh_status_left()
+
+    def on_offset_changed(self, value):
+        """Handle the Offset spin box changing.
+
+        Args:
+            value (int): The spin box's new value.
+
+        Returns:
+            None
+        """
+        self.lock_offset_frames = value
+        if self.lock_lr and self.capL and self.capR:
+            self._jump_frames_locked_with_offset("L", self.left_frame_index)
+
+    # -------------------------------------------------------------------------
+    # Playback
+    # -------------------------------------------------------------------------
+
+    def on_play_pause(self):
+        """Toggle play/pause.
+
+        Returns:
+            None
+        """
+        if not self.capL and not self.capR:
+            return
+
+        self.is_playing = not self.is_playing
+        self._update_play_pause_icon()
+        if self.is_playing:
+            self._playback_tick()
+        else:
+            self.playback_timer.stop()
+
+    def _update_play_pause_icon(self):
+        """Set the play/pause button's icon to match `self.is_playing`.
+
+        Returns:
+            None
+        """
+        icon_name = "fa5s.pause" if self.is_playing else "fa5s.play"
+        self.btn_play_pause.setIcon(qta.icon(icon_name, color=ICON_COLOR))
+
+    def _playback_tick(self):
+        """Advance playback by one speed-dependent step, then reschedule.
+
+        See `_compute_playback_timing`'s docstring for the exact
+        step/delay semantics - "1x" plays at the loaded video's actual
+        native fps rather than a fixed assumption.
+
+        Returns:
+            None
+        """
+        if not self.is_playing:
+            return
+
+        fps = None
+        if self.metaL:
+            fps = self.metaL["fps"]
+        elif self.metaR:
+            fps = self.metaR["fps"]
+        step, delay_ms = _compute_playback_timing(fps, self.speed_combo.currentText())
+
+        if self.lock_lr and self.capL and self.capR:
+            master_max = min(self.left_frame_max, self.right_frame_max)
+            nxt = self.left_frame_index + step
+            if nxt > master_max:
+                self.is_playing = False
+                self._update_play_pause_icon()
+                return
+            self._jump_frames_locked_with_offset("L", nxt)
+        else:
+            if self.capL:
+                nxt = self._clamp(self.left_frame_index + step, 0, self.left_frame_max)
+                self.left_frame_index = nxt
+            if self.capR:
+                nxt = self._clamp(self.right_frame_index + step, 0, self.right_frame_max)
+                self.right_frame_index = nxt
+            self.render_current_frames()
+
+        if self.is_playing:
+            self.playback_timer.start(delay_ms)
+
+    def on_step_forward(self):
+        """Step forward by one frame (or one locked pair).
+
+        Returns:
+            None
+        """
+        if self.lock_lr and self.capL and self.capR:
+            self._jump_frames_locked_with_offset("L", self.left_frame_index + 1)
+        else:
+            if self.capL:
+                self.left_frame_index = self._clamp(self.left_frame_index + 1, 0, self.left_frame_max)
+            if self.capR:
+                self.right_frame_index = self._clamp(self.right_frame_index + 1, 0, self.right_frame_max)
+            self.render_current_frames()
+            self._sync_slider_positions()
+
+    def on_step_back(self):
+        """Step back by one frame (or one locked pair).
+
+        Returns:
+            None
+        """
+        if self.lock_lr and self.capL and self.capR:
+            self._jump_frames_locked_with_offset("L", self.left_frame_index - 1)
+        else:
+            if self.capL:
+                self.left_frame_index = self._clamp(self.left_frame_index - 1, 0, self.left_frame_max)
+            if self.capR:
+                self.right_frame_index = self._clamp(self.right_frame_index - 1, 0, self.right_frame_max)
+            self.render_current_frames()
+            self._sync_slider_positions()
+
+    def on_to_start(self):
+        """Jump to frame 0 (or a locked pair at frame 0).
+
+        Returns:
+            None
+        """
+        if self.lock_lr and self.capL and self.capR:
+            self._jump_frames_locked_with_offset("L", 0)
+        else:
+            if self.capL:
+                self.left_frame_index = 0
+            if self.capR:
+                self.right_frame_index = 0
+            self.render_current_frames()
+            self._sync_slider_positions()
+
+    def on_to_end(self):
+        """Jump to the last frame (or a locked pair at the last common frame).
+
+        Returns:
+            None
+        """
+        if self.lock_lr and self.capL and self.capR:
+            self._jump_frames_locked_with_offset("L", min(self.left_frame_max, self.right_frame_max))
+        else:
+            if self.capL:
+                self.left_frame_index = self.left_frame_max
+            if self.capR:
+                self.right_frame_index = self.right_frame_max
+            self.render_current_frames()
+            self._sync_slider_positions()
+
+    def _sync_slider_positions(self):
+        """Move both sliders to match the current frame indices without recursing.
+
+        Returns:
+            None
+        """
+        self._suppress_slider_callbacks = True
+        try:
+            self.left_slider.setValue(self.left_frame_index)
+            self.right_slider.setValue(self.right_frame_index)
+        finally:
+            self._suppress_slider_callbacks = False
         self._update_frame_labels()
-        self._render_current_frames()
 
     # -------------------------------------------------------------------------
-    # Canvas stubs
+    # View toggles
     # -------------------------------------------------------------------------
 
-    def on_canvas_click(self, which, event):
-        # Placeholder for later measurement interactions.
-        # Keep it minimal: show click coords.
-        self._set_status_mid(f"{which} click at ({event.x}, {event.y}) (UI only)")
+    def on_toggle_view_rectified(self, checked):
+        """Handle the Show Rectified action toggling, with validation.
+
+        Direct port of the original's `on_toggle_view_rectified` -
+        requires calibration to be loaded, and (if videos are loaded)
+        their resolution to match the calibrated resolution; forces the
+        toggle back off with a status message otherwise.
+
+        Args:
+            checked (bool): The action's new (requested) state.
+
+        Returns:
+            None
+        """
+        if checked:
+            if self.cal is None:
+                self._force_rectified_off("Rectified view requires calibration")
+                return
+            if self.metaL and (self.metaL["width"] != self.cal["w"] or self.metaL["height"] != self.cal["h"]):
+                self._force_rectified_off("Rectified view disabled: LEFT video resolution mismatch")
+                return
+            if self.metaR and (self.metaR["width"] != self.cal["w"] or self.metaR["height"] != self.cal["h"]):
+                self._force_rectified_off("Rectified view disabled: RIGHT video resolution mismatch")
+                return
+
+        self.view_rectified.set(checked)
+        self.rectified_indicator.setText("  RECTIFIED  " if checked else "  NOT RECTIFIED  ")
+        self.rectified_indicator.setProperty("state", "rectified" if checked else "not_rectified")
+        self.rectified_indicator.style().polish(self.rectified_indicator)
+        self.render_current_frames()
+
+    def _force_rectified_off(self, message):
+        """Force the Show Rectified action back off and show a status message.
+
+        Args:
+            message (str): The status bar message to show.
+
+        Returns:
+            None
+        """
+        self.action_show_rectified.blockSignals(True)
+        self.action_show_rectified.setChecked(False)
+        self.action_show_rectified.blockSignals(False)
+        self.view_rectified.set(False)
+        self._set_status_mid(message)
+
+    def on_toggle_anaglyph_preview(self):
+        """Start or stop the anaglyph preview window.
+
+        Requires both videos to be loaded. Toggles based on the current
+        `self.anaglyph_preview.active` state.
+
+        Returns:
+            None
+        """
+        if not self._both_videos_loaded():
+            self._set_status_mid("Load both videos to use anaglyph preview")
+            return
+
+        if self.anaglyph_preview.active:
+            self.anaglyph_preview.stop()
+            return
+
+        self.anaglyph_preview.start()
+
+    def on_reset_pan_zoom(self):
+        """Reset both panes' zoom/pan back to the plain fit view.
+
+        A plain one-shot action, not a toggle/mode - there is no
+        separate "native size" display mode to switch between (see
+        `video_overlay.py`'s `_display_rect`); this just resets zoom
+        and pan, nothing else.
+
+        Returns:
+            None
+        """
+        self.pane_left.reset_view()
+        self.pane_right.reset_view()
 
     # -------------------------------------------------------------------------
-    # Internal helpers
+    # Project save/load
     # -------------------------------------------------------------------------
 
-    def _refresh_status_left(self):
-        l = self.left_video_path if self.left_video_path else "(none)"
-        r = self.right_video_path if self.right_video_path else "(none)"
-        c = self.calibration_folder if self.calibration_folder else "(none)"
-        view = "Rectified" if self.view_rectified.get() else "Raw"
-        lock = "Locked" if self.lock_lr.get() else "Unlocked"
+    def _app_window_title(self):
+        """Build the title text this window should show.
 
-        # Only show an offset when lock is enabled and both videos are loaded.
-        # This keeps the status line clean when you are still loading files.
-        offset_txt = ""
-        if self.lock_lr.get() and self._both_videos_loaded():
-            offset_txt = f" | Offset: {self.lock_offset_frames:+d}f"
+        Returns:
+            str: "Sizeamatic Pro vX.Y.Z" (or just "Sizeamatic Pro" if
+            the version couldn't be read), plus " - <project name>"
+            once a project has been saved/opened this session.
+        """
+        version = get_app_version()
+        base = f"Sizeamatic Pro v{version}" if version != "unknown" else "Sizeamatic Pro"
+        if self.current_project_name:
+            return f"{base} - {self.current_project_name}"
+        return base
 
-        self.status_left.config(
-            text=f"L: {self._short_path(l)} | R: {self._short_path(r)} | Cal: {self._short_path(c)} | View: {view} | {lock}{offset_txt}"
+    def _refresh_window_title(self):
+        """Reapply this window's title, plus any open sub-window's, e.g.
+        after a project is saved/opened.
+
+        Returns:
+            None
+        """
+        title = self._app_window_title()
+        self.setWindowTitle(title)
+        if self.measurement_window.win is not None:
+            self.measurement_window.win.setWindowTitle(title)
+        if self.cal_summary_window.win is not None:
+            self.cal_summary_window.win.setWindowTitle(title)
+
+    def on_save_project(self):
+        """Prompt for a save location and write the current project state.
+
+        Saves the left/right video paths, calibration folder, current
+        resync offset, and rectified-view toggle state, plus whatever
+        this port already has ported for the measurement log/last-
+        recorded-snapshot/real-time-anchor/perform-calibration-capture-
+        folder fields (see this class's `__init__` for why those are
+        still plain passthrough attributes rather than backed by real
+        UI yet).
+
+        Returns:
+            None
+        """
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Save Project", "", "Sizeamatic Project (*.json);;All Files (*)"
+        )
+        if not path:
+            return
+
+        error = project_io.save_project(
+            path,
+            self.left_video_path,
+            self.right_video_path,
+            self.calibration_folder,
+            self.lock_offset_frames,
+            self.view_rectified.get(),
+            get_app_version(),
+            self.measurement_window.get_log_text(),
+            self.last_recorded_snapshot,
+            self.real_time_anchor_frame,
+            self.real_time_anchor_iso,
+            self.perform_calibration_window.capture_folder,
         )
 
+        if error is not None:
+            QMessageBox.critical(self, "Save Project", error)
+            return
+
+        recent_projects.add_recent_project(path)
+
+        self.current_project_name = os.path.splitext(os.path.basename(path))[0]
+        self._refresh_window_title()
+        self._set_status_mid("Project saved")
+
+    def on_open_project(self):
+        """Prompt for a project file and reload the saved video/calibration state.
+
+        Just handles the file dialog - the actual load/restore logic
+        is shared with the File > Recent Projects submenu via
+        `_open_project_from_path`.
+
+        Returns:
+            None
+        """
+        path, _filter = QFileDialog.getOpenFileName(
+            self, "Open Project", "", "Sizeamatic Project (*.json);;All Files (*)"
+        )
+        if not path:
+            return
+        self._open_project_from_path(path)
+
+    def _open_project_from_path(self, path):
+        """Load and apply a project manifest from an already-known path.
+
+        Reads the project manifest via `project_io.load_project`, then
+        reuses the same dialog-free loading helpers the file-picker
+        menu items use, so a saved path that's since become invalid
+        (moved/deleted file) surfaces the exact same error dialogs a
+        manual reload would, one per stage, rather than failing the
+        whole project load silently. Shared by `on_open_project` (after
+        its file dialog) and the File > Recent Projects submenu
+        (`on_open_recent_project`).
+
+        Args:
+            path (str): Path to the project file to open.
+
+        Returns:
+            None
+        """
+        project, error = project_io.load_project(path)
+        if error is not None:
+            QMessageBox.critical(self, "Open Project", error)
+            return
+
+        if project["left_video_path"]:
+            self._load_left_video_from_path(project["left_video_path"])
+
+        if project["right_video_path"]:
+            self._load_right_video_from_path(project["right_video_path"])
+
+        if project["calibration_folder"]:
+            self._load_calibration_from_folder(project["calibration_folder"])
+
+        # Restore the resync offset after both videos are loaded, so it
+        # doesn't get overwritten by anything the video loads above do.
+        self.lock_offset_frames = int(project["lock_offset_frames"])
+        self.offset_spin.blockSignals(True)
+        self.offset_spin.setValue(self.lock_offset_frames)
+        self.offset_spin.blockSignals(False)
+
+        # Restore the rectified-view toggle, after calibration is loaded -
+        # go through the real toggle handler (not just the flag) so its
+        # existing resolution-mismatch validation still applies, in case
+        # the saved calibration folder no longer matches these videos.
+        self.action_show_rectified.blockSignals(True)
+        self.action_show_rectified.setChecked(bool(project["view_rectified"]))
+        self.action_show_rectified.blockSignals(False)
+        self.on_toggle_view_rectified(bool(project["view_rectified"]))
+
+        self.last_recorded_snapshot = project["last_recorded_snapshot"]
+        self.real_time_anchor_frame = project["real_time_anchor_frame"]
+        self.real_time_anchor_iso = project["real_time_anchor_iso"]
+        self.real_time_anchor_dt = (
+            datetime.datetime.fromisoformat(self.real_time_anchor_iso) if self.real_time_anchor_iso else None
+        )
+        if self.real_time_anchor_dt is not None:
+            self.time_sync_indicator.setText("✓ Synced")
+
+        # The videos were already loaded (and _update_frame_labels already
+        # ran as a side effect) above, before the anchor was restored just
+        # now - so the readout row and the six entry boxes rendered with
+        # no anchor in effect yet and never got refreshed afterward,
+        # leaving them showing "(not set)"/blank until something else
+        # (e.g. pressing Play) happened to trigger a redraw. Refresh now
+        # so a restored anchor is visible immediately.
+        self._update_frame_labels()
+
+        self.measurement_window.restore_log_text(project["measurement_log_text"])
+
+        self.perform_calibration_window.capture_folder = project["perform_calibration_capture_folder"]
+        if self.perform_calibration_window.win is not None:
+            self.perform_calibration_window.folder_label.setText(
+                self.perform_calibration_window.capture_folder or "(no capture folder chosen yet)"
+            )
+            self.perform_calibration_window._refresh_pairs_listbox()
+
+        # Jump back to "the very last place that was recorded" and show
+        # that same measurement on screen again - last, since it depends
+        # on the video/calibration/offset state above already being in
+        # place.
+        snapshot = project["last_recorded_snapshot"]
+        if snapshot:
+            self.left_frame_index = int(snapshot["left_frame_index"])
+            self.right_frame_index = int(snapshot["right_frame_index"])
+            self._sync_slider_positions()
+
+            self.ptsL = [tuple(p) for p in snapshot["ptsL"]]
+            self.ptsR = [tuple(p) for p in snapshot["ptsR"]]
+
+            self.render_current_frames()
+            self.on_points_changed()
+
+        recent_projects.add_recent_project(path)
+
+        self.current_project_name = os.path.splitext(os.path.basename(path))[0]
+        self._refresh_window_title()
+        self._set_status_mid("Project opened")
+
+    def on_open_recent_project(self, path):
+        """Open a project path chosen from the File > Recent Projects submenu.
+
+        Args:
+            path (str): The project file path to open, as listed by
+                `_refresh_recent_projects_menu`.
+
+        Returns:
+            None
+        """
+        self._open_project_from_path(path)
+
+    def _refresh_recent_projects_menu(self):
+        """Rebuild the File > Recent Projects submenu just before it's shown.
+
+        Returns:
+            None
+        """
+        self.recent_projects_menu.clear()
+
+        recent = recent_projects.load_recent_projects()
+        if not recent:
+            action = self.recent_projects_menu.addAction("(none yet)")
+            action.setEnabled(False)
+            return
+
+        for path in recent:
+            self.recent_projects_menu.addAction(
+                self._short_path(path, max_len=60), lambda p=path: self.on_open_recent_project(p)
+            )
+
     def _short_path(self, path, max_len=45):
+        """Truncate a file path for compact display.
+
+        Direct port of the original's helper of the same name.
+
+        Args:
+            path (str | None): The path to shorten, or None.
+            max_len (int): Maximum displayed length before truncating
+                with a leading ellipsis.
+
+        Returns:
+            str: `"(none)"` if `path` is None, the path unchanged if it
+            fits within `max_len`, otherwise an ellipsis-prefixed
+            suffix of the path.
+        """
         if path is None:
             return "(none)"
         if len(path) <= max_len:
             return path
-        return "…" + path[-(max_len - 1):]
-
-    def _set_status_mid(self, text):
-        self.status_mid.config(text=text)
-
-    def _set_status_right(self, text):
-        self.status_right.config(text=text)
-
-    # Creates the measurement window and table widgets if not already created.
-    # Creates the measurement window the first time we have valid measurements.
-    def _ensure_measurement_window(self):
-        if self.meas_win is not None:
-            return
-
-        win = tk.Toplevel(self.root)
-        win.title("Measurement")
-        win.geometry("620x520")
-
-        def _on_close():
-            win.destroy()
-            self.meas_win = None
-            self.points_tree = None
-            self.segs_tree = None
-            self.meas_copy_text = None
-            self.meas_error_var = None
-
-        win.protocol("WM_DELETE_WINDOW", _on_close)
-
-        outer = ttk.Frame(win, padding=(10, 10))
-        outer.grid(row=0, column=0, sticky="nsew")
-
-        win.grid_rowconfigure(0, weight=1)
-        win.grid_columnconfigure(0, weight=1)
-
-        outer.grid_rowconfigure(1, weight=1)
-        outer.grid_rowconfigure(3, weight=1)
-        outer.grid_columnconfigure(0, weight=1)
-
-        # Error line (for triangulation failures etc.)
-        self.meas_error_var = tk.StringVar(value="")
-        ttk.Label(outer, textvariable=self.meas_error_var, foreground="red").grid(row=0, column=0, sticky="w", pady=(0, 6))
-
-        # ---------------- Points table ----------------
-        ttk.Label(outer, text="Points (mm)", font=("Segoe UI", 10, "bold")).grid(row=1, column=0, sticky="w")
-
-        points_cols = ("idx", "X", "Y", "Z", "Range", "ReprojRMS", "sZ", "sRange")
-        points_tree = ttk.Treeview(outer, columns=points_cols, show="headings", height=8)
-        points_tree.grid(row=2, column=0, sticky="nsew", pady=(4, 12))
-
-        points_tree.heading("idx", text="#")
-        points_tree.heading("X", text="X")
-        points_tree.heading("Y", text="Y")
-        points_tree.heading("Z", text="Z")
-        points_tree.heading("Range", text="Range")
-
-        points_tree.column("idx", width=40, anchor="center")
-        points_tree.column("X", width=120, anchor="e")
-        points_tree.column("Y", width=120, anchor="e")
-        points_tree.column("Z", width=120, anchor="e")
-        points_tree.column("Range", width=140, anchor="e")
-
-        points_tree.heading("ReprojRMS", text="Reproj RMS (px)")
-        points_tree.heading("sZ", text="σZ")
-        points_tree.heading("sRange", text="σRange")
-
-        points_tree.column("ReprojRMS", width=120, anchor="e")
-        points_tree.column("sZ", width=90, anchor="e")
-        points_tree.column("sRange", width=110, anchor="e")
-
-        # ---------------- Segments table ----------------
-        ttk.Label(outer, text="Segments (mm)", font=("Segoe UI", 10, "bold")).grid(row=3, column=0, sticky="w")
-
-        seg_cols = ("seg", "dX", "dY", "dZ", "Len", "sLen")
-        segs_tree = ttk.Treeview(outer, columns=seg_cols, show="headings", height=8)
-        segs_tree.grid(row=4, column=0, sticky="nsew", pady=(4, 12))
-
-        segs_tree.heading("seg", text="Seg")
-        segs_tree.heading("dX", text="dX")
-        segs_tree.heading("dY", text="dY")
-        segs_tree.heading("dZ", text="dZ")
-        segs_tree.heading("Len", text="Len")
-
-        segs_tree.column("seg", width=60, anchor="center")
-        segs_tree.column("dX", width=120, anchor="e")
-        segs_tree.column("dY", width=120, anchor="e")
-        segs_tree.column("dZ", width=120, anchor="e")
-        segs_tree.column("Len", width=140, anchor="e")
-
-        segs_tree.heading("sLen", text="σLen")
-        segs_tree.column("sLen", width=110, anchor="e")
-
-        # ---------------- Copy box ----------------
-        ttk.Label(outer, text="Copy", font=("Segoe UI", 10, "bold")).grid(row=5, column=0, sticky="w")
-
-        txt = tk.Text(outer, height=7, width=1, wrap="none")
-        txt.grid(row=6, column=0, sticky="nsew")
-        outer.grid_rowconfigure(6, weight=0)
-
-        txt.configure(state="disabled")
-
-        self.meas_win = win
-        self.points_tree = points_tree
-        self.segs_tree = segs_tree
-        self.meas_copy_text = txt
-
-
-    # Updates the measurement window from computed points and segments.
-    def _update_measurement_window(self, points_rows, seg_rows, error_msg):
-        self._ensure_measurement_window()
-
-        # Update error message line.
-        self.meas_error_var.set(error_msg if error_msg else "")
-
-        if not error_msg:
-            self.meas_error_var.set(f"Assumed click σ = {self.click_sigma_px:.1f} px")
-
-        # Clear existing rows.
-        for item in self.points_tree.get_children():
-            self.points_tree.delete(item)
-        for item in self.segs_tree.get_children():
-            self.segs_tree.delete(item)
-
-        # Insert point rows.
-        for row in points_rows:
-            # row: (idx, X, Y, Z, Range) already formatted strings
-            self.points_tree.insert("", "end", values=row)
-
-        # Insert segment rows.
-        for row in seg_rows:
-            # row: (seg, dX, dY, dZ, Len) already formatted strings
-            self.segs_tree.insert("", "end", values=row)
-
-        # Build copy block (tab separated, easy to paste into Excel).
-        lines = []
-        lines.append("Points")
-        lines.append("idx\tX(mm)\tY(mm)\tZ(mm)\tRange(mm)\tReprojRMS(px)\tSigmaZ(mm)\tSigmaRange(mm)")
-        for idx, X, Y, Z, R, erms, sZ, sR in points_rows:
-            lines.append(f"{idx}\t{X}\t{Y}\t{Z}\t{R}\t{erms}\t{sZ}\t{sR}")
-
-        if seg_rows:
-            lines.append("")
-            lines.append("Segments")
-            lines.append("seg\tdX(mm)\tdY(mm)\tdZ(mm)\tLen(mm)\tSigmaLen(mm)")
-            for seg, dX, dY, dZ, L, sL in seg_rows:
-                lines.append(f"{seg}\t{dX}\t{dY}\t{dZ}\t{L}\t{sL}")
-
-        copy_block = "\n".join(lines)
-
-        self.meas_copy_text.configure(state="normal")
-        self.meas_copy_text.delete("1.0", "end")
-        self.meas_copy_text.insert("1.0", copy_block)
-        self.meas_copy_text.configure(state="disabled")
-
-    def _update_frame_labels(self):
-        # Frame max is currently 0 because no video is loaded.
-        # Later you will set left_frame_max/right_frame_max from cv2 capture length.
-        lmax = max(0, int(self.left_frame_max))
-        rmax = max(0, int(self.right_frame_max))
-
-        li = int(self.left_frame_index.get())
-        ri = int(self.right_frame_index.get())
-
-        self.left_frame_label.config(text=f"Frame: {li}/{lmax}")
-        self.right_frame_label.config(text=f"Frame: {ri}/{rmax}")
-
-    # Draw placeholders only when we do not have video content to display.
-    def _refresh_placeholder_canvases(self):
-        # If either capture is loaded, we should be showing real frames, not placeholders.
-        if self.capL or self.capR:
-            self._render_current_frames()
-            return
-
-        self._draw_placeholder(self.left_overlay_canvas, "LEFT", self.view_rectified.get())
-        self._draw_placeholder(self.right_overlay_canvas, "RIGHT", self.view_rectified.get())
-
-        self._update_frame_labels()
-
-    def _draw_placeholder(self, canvas, label, rectified):
-        canvas.delete("all")
-
-        w = max(1, canvas.winfo_width())
-        h = max(1, canvas.winfo_height())
-
-        # Background is already black; draw border guides.
-        canvas.create_rectangle(2, 2, w - 2, h - 2, outline="#444444")
-
-        # Draw a simple grid so "fit to window" and scaling logic later is obvious.
-        step = 50
-        for x in range(step, w, step):
-            canvas.create_line(x, 0, x, h, fill="#222222")
-        for y in range(step, h, step):
-            canvas.create_line(0, y, w, y, fill="#222222")
-
-        # Central crosshair.
-        cx = w // 2
-        cy = h // 2
-        canvas.create_line(cx, 0, cx, h, fill="#333333")
-        canvas.create_line(0, cy, w, cy, fill="#333333")
-
-        # Big label.
-        mode = "RECTIFIED" if rectified else "RAW"
-        canvas.create_text(
-            cx,
-            cy - 20,
-            text=f"{label} VIEW",
-            fill="white",
-            font=("Segoe UI", 16, "bold"),
-        )
-        canvas.create_text(
-            cx,
-            cy + 15,
-            text=mode,
-            fill="#cccccc",
-            font=("Segoe UI", 12, "bold"),
-        )
-
-        # Overlay indicator (just to test the toggle visually).
-        if self.show_overlays.get():
-            canvas.create_oval(cx - 6, cy - 6, cx + 6, cy + 6, outline="#00ff66", width=2)
-            canvas.create_text(cx, cy + 40, text="Overlay ON", fill="#00ff66", font=("Segoe UI", 10, "normal"))
-        else:
-            canvas.create_text(cx, cy + 40, text="Overlay OFF", fill="#888888", font=("Segoe UI", 10, "normal"))
-
-        # Epipolar cursor indicator stub.
-        if self.show_epipolar.get():
-            canvas.create_line(0, cy + 80, w, cy + 80, fill="#ffcc00", dash=(6, 4))
-            canvas.create_text(90, cy + 65, text="Epipolar Line", fill="#ffcc00", font=("Segoe UI", 9, "normal"))
-
-    def _clamp(self, x, lo, hi):
-        if x < lo:
-            return lo
-        if x > hi:
-            return hi
-        return x
-
-    def _nudge_frames_locked_or_single(self, delta):
-        # Adjust current frame(s) by delta, respecting lock mode and clamp behavior.
-        if self.lock_lr.get():
-            # Locked: clamp to shorter max.
-            max_i = int(min(self.left_frame_max, self.right_frame_max))
-            cur = int(round(self.left_slider.get()))
-            nxt = self._clamp(cur + delta, 0, max_i)
-            self._jump_frames_locked_or_single(nxt)
-        else:
-            # Unlocked: each side clamps independently.
-            li = self._clamp(int(round(self.left_slider.get())) + delta, 0, int(self.left_frame_max))
-            ri = self._clamp(int(round(self.right_slider.get())) + delta, 0, int(self.right_frame_max))
-
-            self.left_frame_index.set(li)
-            self.right_frame_index.set(ri)
-
-            self.left_slider.set(li)
-            self.right_slider.set(ri)
-
-            # Keep the frame counters under the sliders correct.
-            self._update_frame_labels()
-
-            # Now that we can decode frames, render actual video content.
-            # This replaces placeholder drawing.
-            self._render_current_frames()
-
-    def _jump_frames_locked_or_single(self, target_index):
-        # Jump to target_index in lock mode or update only the active slider.
-        if self.lock_lr.get():
-            max_i = int(min(self.left_frame_max, self.right_frame_max))
-            i = self._clamp(int(target_index), 0, max_i)
-
-            self.left_frame_index.set(i)
-            self.right_frame_index.set(i)
-
-            # Programmatically moving the sliders triggers their callbacks.
-            # We suppress callbacks here to prevent recursive lock updates.
-            self._suppress_slider_callbacks = True
-            try:
-                self.left_slider.set(i)
-                self.right_slider.set(i)
-            finally:
-                self._suppress_slider_callbacks = False
-
-            # Update the labels under the sliders so they reflect the new indices.
-            self._update_frame_labels()
-
-            # Render the current frames after the jump so the UI updates immediately.
-            self._render_current_frames()
-        else:
-            # If unlocked, this helper is used for start/end operations.
-            # We treat it as applying to both sides for toolbar actions.
-            li = self._clamp(int(target_index), 0, int(self.left_frame_max))
-            ri = self._clamp(int(target_index), 0, int(self.right_frame_max))
-
-            self.left_frame_index.set(li)
-            self.right_frame_index.set(ri)
-
-            # Programmatically moving the sliders triggers their callbacks.
-            # We suppress callbacks here to prevent recursive lock updates.
-            self._suppress_slider_callbacks = True
-            try:
-                self.left_slider.set(li)
-                self.right_slider.set(ri)
-            finally:
-                self._suppress_slider_callbacks = False
-
-            self._update_frame_labels()
-            self._refresh_placeholder_canvases()
-
-    # Opens a video file and returns (cap, meta) or (None, None) on failure.
-    def _open_video_capture(self, path):
-        # Create the capture object.
-        cap = cv2.VideoCapture(path)
-
-        # Validate that the capture opened successfully.
-        if not cap.isOpened():
-            return None, None
-
-        # Read metadata from the container.
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-        # Guard against weird containers that report 0 frames.
-        if frame_count <= 0 or width <= 0 or height <= 0:
-            cap.release()
-            return None, None
-
-        meta = {
-            "fps": fps,
-            "width": width,
-            "height": height,
-            "frame_count": frame_count,
-        }
-
-        return cap, meta
-    
-
-    # Updates slider max ranges and clamps indices based on lock mode and loaded videos.
-    def _update_slider_ranges(self):
-        # Compute per stream maximum indices.
-        # Index is inclusive, so max = frame_count - 1.
-        self.left_frame_max = (self.metaL["frame_count"] - 1) if self.metaL else 0
-        self.right_frame_max = (self.metaR["frame_count"] - 1) if self.metaR else 0
-
-        # If locked and both videos are loaded, clamp both to the shorter stream.
-        if self.lock_lr.get() and self.metaL and self.metaR:
-            master_max = min(self.left_frame_max, self.right_frame_max)
-
-            # Clamp stored indices to valid range.
-            li = self._clamp(int(self.left_frame_index.get()), 0, master_max)
-            ri = self._clamp(int(self.right_frame_index.get()), 0, master_max)
-
-            # Force both sides to the same master index (left is the master).
-            self.left_frame_index.set(li)
-            self.right_frame_index.set(li)
-
-            # Update both slider ranges to match the clamped master range.
-            self.left_slider.configure(to=master_max)
-            self.right_slider.configure(to=master_max)
-
-            # Updating slider position here should not invoke the slider callbacks.
-            self._suppress_slider_callbacks = True
-            try:
-                self.left_slider.set(li)
-                self.right_slider.set(li)
-            finally:
-                self._suppress_slider_callbacks = False
-        else:
-            # Unlocked mode uses independent ranges.
-            # Each slider range is based on its own stream if loaded, else 0.
-            self.left_slider.configure(to=int(self.left_frame_max))
-            self.right_slider.configure(to=int(self.right_frame_max))
-
-            # Clamp and apply each index independently.
-            li = self._clamp(int(self.left_frame_index.get()), 0, int(self.left_frame_max))
-            ri = self._clamp(int(self.right_frame_index.get()), 0, int(self.right_frame_max))
-
-            self.left_frame_index.set(li)
-            self.right_frame_index.set(ri)
-
-            # Updating slider position here should not invoke the slider callbacks.
-            self._suppress_slider_callbacks = True
-            try:
-                self.left_slider.set(li)
-                self.right_slider.set(ri)
-            finally:
-                self._suppress_slider_callbacks = False
-
-        # Always refresh the numeric labels under the sliders.
-        self._update_frame_labels()
-
-
-    # Seeks to a specific frame index and reads a single frame.
-    def _read_frame_at(self, cap, index):
-        # Seek to the requested frame index.
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(index))
-
-        # Decode a single frame.
-        ok, frame_bgr = cap.read()
-        if not ok:
-            return None
-
-        return frame_bgr
-    
-
-    # Displays a BGR frame on a Tk canvas using Tk's PNG decoder.
-    # This avoids Pillow and avoids PPM decoding quirks in some Tk builds.
-    def _display_bgr_on_canvas(self, canvas, frame_bgr, which):
-        # Compute where the video should be drawn inside this canvas.
-        dx, dy, dw, dh = self._get_display_rect(which, canvas)
-
-        # If we have no metadata yet, just show a simple fit-by-width render.
-        size = self._get_image_size(which)
-        if size is None:
-            # Fall back: draw the full frame scaled to the display width, preserve aspect.
-            h, w = frame_bgr.shape[0], frame_bgr.shape[1]
-            if dw > 0 and w > 0:
-                scale = float(dw) / float(w)
-                out_w = int(round(w * scale))
-                out_h = int(round(h * scale))
-                if out_w > 0 and out_h > 0:
-                    frame_bgr = cv2.resize(frame_bgr, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
-            return
-
-        # Total scale for this pane.
-        view = self._get_view(which)
-        S = self._get_total_scale(which, canvas)
-        if S <= 0.0:
-            S = 1.0
-
-        # Compute visible ROI in IMAGE coords for the display rect (dw x dh).
-        # We treat the display rect as the screen coordinate region for mapping.
-        off_x = float(view["off_x"])
-        off_y = float(view["off_y"])
-
-        ix0 = (0.0 - off_x) / S
-        iy0 = (0.0 - off_y) / S
-        ix1 = (float(dw) - off_x) / S
-        iy1 = (float(dh) - off_y) / S
-
-        x0 = min(ix0, ix1)
-        x1 = max(ix0, ix1)
-        y0 = min(iy0, iy1)
-        y1 = max(iy0, iy1)
-
-        img_w, img_h = size
-
-        # Clamp ROI to image bounds.
-        x0 = max(0.0, min(float(img_w), x0))
-        x1 = max(0.0, min(float(img_w), x1))
-        y0 = max(0.0, min(float(img_h), y0))
-        y1 = max(0.0, min(float(img_h), y1))
-
-        rx0 = int(x0)
-        ry0 = int(y0)
-        rx1 = int(x1 + 0.9999)
-        ry1 = int(y1 + 0.9999)
-
-        # If ROI is invalid, draw a black frame layer.
-        if rx1 <= rx0 or ry1 <= ry0:
-            canvas.delete("frame")
-            canvas.create_rectangle(0, 0, int(canvas.winfo_width()), int(canvas.winfo_height()), fill="black", outline="", tags=("frame",))
-            return
-
-        # Crop and scale to the display rect size (preserves aspect because dw/dh preserves it).
-        crop = frame_bgr[ry0:ry1, rx0:rx1]
-        crop = cv2.resize(crop, (int(dw), int(dh)), interpolation=cv2.INTER_LINEAR)
-
-        # Encode to PNG for Tk PhotoImage.
-        encode_params = [cv2.IMWRITE_PNG_COMPRESSION, 0]
-        ok, png_bytes = cv2.imencode(".png", crop, encode_params)
-        if not ok:
-            self._draw_missing_frame(canvas, "ENCODE", 0)
-            return
-
-        png_b64 = base64.b64encode(png_bytes.tobytes()).decode("ascii")
-        tk_img = tk.PhotoImage(data=png_b64)
-
-        if which == "L":
-            self.tkimg_left = tk_img
-        else:
-            self.tkimg_right = tk_img
-
-        # Replace only frame items: first clear frame layer.
-        canvas.delete("frame")
-
-        # Draw a black background so letterbox areas look clean.
-        cw = int(max(1, canvas.winfo_width()))
-        ch = int(max(1, canvas.winfo_height()))
-        canvas.create_rectangle(0, 0, cw, ch, fill="black", outline="", tags=("frame",))
-
-        # Draw the image inside the display rect.
-        canvas.create_image(int(dx), int(dy), anchor="nw", image=tk_img, tags=("frame",))
-
-     # Renders current left and right frames based on the current indices.
-    def _render_current_frames(self):
-        # Left side render.
-        if self.capL:
-            li = int(self.left_frame_index.get())
-            frameL = self._read_frame_at(self.capL, li)
-
-            # Do Stereo Rectification on this frame if show rectified is set
-            if self.view_rectified.get() and self.cal is not None:
-                frameL = cv2.remap(frameL, self.cal["mapLx"], self.cal["mapLy"], interpolation=cv2.INTER_LINEAR)
-
-            if frameL is None:
-                self._draw_missing_frame(self.left_overlay_canvas, "LEFT", li)
-            else:
-                self._display_bgr_on_canvas(self.left_overlay_canvas, frameL, "L")
-
-        # Right side render.
-        if self.capR:
-            ri = int(self.right_frame_index.get())
-            frameR = self._read_frame_at(self.capR, ri)
-
-            # Do Stereo Rectification on this frame if show rectified is set
-            if self.view_rectified.get() and self.cal is not None:
-                frameR = cv2.remap(frameR, self.cal["mapRx"], self.cal["mapRy"], interpolation=cv2.INTER_LINEAR)
-
-            if frameR is None:
-                self._draw_missing_frame(self.right_overlay_canvas, "RIGHT", ri)
-            else:
-                self._display_bgr_on_canvas(self.right_overlay_canvas, frameR, "R")
-
-        # Update the slider frame labels after rendering.
-        self._update_frame_labels()
-
-        # Draw overlay over frame
-        self._redraw_overlays()
-
-    # Computes the current image->screen scale factor for the given pane.
-    # Fit To Window scales by width only, so we match that here.
-    def _get_pane_scale(self, which, canvas):
-        # Default scale is 1.0 (native pixel mapping).
-        if not self.fit_to_window.get():
-            return 1.0
-
-        # We need source image width to compute scale.
-        # If meta is missing, fall back to 1.0.
-        if which == "L":
-            if not self.metaL:
-                return 1.0
-            src_w = float(self.metaL["width"])
-        else:
-            if not self.metaR:
-                return 1.0
-            src_w = float(self.metaR["width"])
-
-        # Canvas width is the target width under Fit To Window.
-        canvas_w = float(max(1, canvas.winfo_width()))
-
-        # Scale by width only.
-        return canvas_w / src_w
-    
-    # Computes the on-canvas rectangle where the video should be drawn while preserving aspect ratio.
-    # Returns (dx, dy, dw, dh) in SCREEN pixels.
-    def _get_display_rect(self, which, canvas):
-        # Canvas size in screen pixels.
-        cw = int(max(1, canvas.winfo_width()))
-        ch = int(max(1, canvas.winfo_height()))
-
-        # If we do not know the image size yet, fall back to full canvas.
-        size = self._get_image_size(which)
-        if size is None:
-            return 0, 0, cw, ch
-
-        img_w, img_h = size
-
-        # If Fit To Window is off, draw at native size anchored at top-left.
-        # Clamp to canvas so we do not exceed widget bounds.
-        if not self.fit_to_window.get():
-            dw = min(cw, int(img_w))
-            dh = min(ch, int(img_h))
-            return 0, 0, dw, dh
-
-        # Fit To Window means: fit by width, but preserve aspect.
-        # Compute the height implied by fitting the image width to the canvas width.
-        dw = cw
-        dh = int(round(dw * (float(img_h) / float(img_w))))
-
-        # If that height does not fit, instead fit by height (still preserving aspect).
-        if dh > ch:
-            dh = ch
-            dw = int(round(dh * (float(img_w) / float(img_h))))
-
-        # Center the draw rect within the canvas (letterboxing).
-        dx = (cw - dw) // 2
-        dy = (ch - dh) // 2
-
-        return dx, dy, dw, dh
-
-    # Draws a clear error message on a canvas when a frame cannot be decoded.
-    def _draw_missing_frame(self, canvas, label, frame_index):
-        # Only delete the frame layer so overlay items can persist on top.
-        canvas.delete("frame")
-
-        # Canvas size is needed to center the message.
-        w = max(1, canvas.winfo_width())
-        h = max(1, canvas.winfo_height())
-
-        # Draw a border rectangle tagged as frame content.
-        canvas.create_rectangle(
-            2,
-            2,
-            w - 2,
-            h - 2,
-            outline="#444444",
-            tags=("frame",),
-        )
-
-        # Draw the main missing frame text tagged as frame content.
-        canvas.create_text(
-            w // 2,
-            h // 2 - 10,
-            text=f"{label} FRAME MISSING",
-            fill="white",
-            font=("Segoe UI", 14, "bold"),
-            tags=("frame",),
-        )
-
-        # Draw the frame index text tagged as frame content.
-        canvas.create_text(
-            w // 2,
-            h // 2 + 18,
-            text=f"Frame {frame_index}",
-            fill="#cccccc",
-            font=("Segoe UI", 11, "normal"),
-            tags=("frame",),
-        )
-
-    # Returns True only when BOTH captures and metadata exist.
-    def _both_videos_loaded(self):
-        # Require both captures.
-        if self.capL is None:
-            return False
-        if self.capR is None:
-            return False
-
-        # Require both metadata dicts.
-        if self.metaL is None:
-            return False
-        if self.metaR is None:
-            return False
-
-        return True
+        return "…" + path[-(max_len - 1) :]
+
+
+def _size_window_to_screen(window, screen):
+    """Resize `window` to fill most of `screen`, keeping the video panes
+    close to `DEFAULT_VIDEO_ASPECT_RATIO` rather than stretching them.
+
+    Sizes to `WINDOW_SCREEN_FRACTION` of the screen's available width,
+    then derives a matching height from the window's actual non-pane
+    chrome (menu bar, toolbar, slider row, status bar) - that overhead
+    is fixed regardless of window height, since the panes are the only
+    `stretch=1` widgets in their layout, so measuring it once at an
+    arbitrary height gives an exact answer.
+
+    Args:
+        window (SizeamaticProApp): The main window, already built (so
+            its panes/layout exist), not yet shown.
+        screen (QScreen | None): The screen to size against, or `None`
+            to leave the window's current (fallback) size alone.
+
+    Returns:
+        None
+    """
+    if screen is None:
+        return
+
+    available = screen.availableGeometry()
+    target_width = int(available.width() * WINDOW_SCREEN_FRACTION)
+
+    window.resize(target_width, available.height())
+    QApplication.processEvents()
+    pane_width = window.pane_left.width()
+    chrome_height = window.height() - window.pane_left.height()
+
+    target_height = min(
+        available.height(),
+        chrome_height + round(pane_width / DEFAULT_VIDEO_ASPECT_RATIO),
+    )
+    window.resize(target_width, target_height)
 
 
 def main():
-    root = tk.Tk()
+    """Entry point: build the QApplication and main window, run the event loop.
 
-    # ttk theme defaults are OK. If you want a darker theme later, we can style it.
-    app = SizeamaticProApp(root)
+    Sets the Windows taskbar application identity (so the app groups
+    under its own taskbar icon rather than a generic Python one) -
+    unlike Tkinter, Qt already applies the window icon to the taskbar
+    itself, but the AppUserModelID is still needed for correct taskbar
+    grouping/pinning behavior on Windows. Shows the startup splash
+    before building the main window, and keeps it up for at least
+    `STARTUP_SPLASH_MIN_SECONDS` even if building finished faster.
 
-    root.protocol("WM_DELETE_WINDOW", app.on_app_close)
+    Returns:
+        None
+    """
+    if sys.platform == "win32":
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("SizeamaticPro.SizeamaticPro.App")
 
-    root.mainloop()
+    app = QApplication(sys.argv)
+    app.setStyleSheet(DARK_QSS)
+
+    # Qt's C++ event loop (app.exec(), below) never yields back to the
+    # Python interpreter on its own, so a Ctrl+C at the console (SIGINT)
+    # has no chance to actually get processed - Python only checks for a
+    # pending signal between bytecode instructions, and exec() blocks
+    # entirely outside that. Restoring the default handler (so SIGINT
+    # really does terminate rather than whatever Qt/PySide may have set)
+    # plus a trivial repeating QTimer (so the interpreter regains control
+    # briefly every 200ms) together make Ctrl+C work again.
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    keep_alive_timer = QTimer()
+    keep_alive_timer.start(200)
+    keep_alive_timer.timeout.connect(lambda: None)
+
+    icon_path = resource_path("assets/icon.ico")
+    if os.path.isfile(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
+
+    splash = _show_startup_splash()
+    if splash is not None:
+        # Force the splash to actually paint before starting the clock -
+        # show() alone just schedules the paint, it doesn't happen until
+        # the event loop processes it. Without this, the window-building
+        # work below runs first, and the progress bar's very first paint
+        # (once the loop below reaches processEvents) already shows
+        # whatever fraction of STARTUP_SPLASH_MIN_SECONDS that took, i.e.
+        # a bar that visibly starts mid-way rather than at 0.
+        app.processEvents()
+    splash_shown_at = time.monotonic()
+
+    window = SizeamaticProApp()
+    enable_dark_title_bar(window)
+
+    # Park far off any real monitor, then show - still needs a real
+    # show() so the layout actually goes live (a hidden top-level window
+    # doesn't recompute its child widgets' sizes on resize(), which
+    # `_size_window_to_screen` below depends on), but parking it off-
+    # screen first means the user never sees it pop up/flash on top of
+    # the splash before the splash's animation finishes - relying on the
+    # splash merely "staying on top" isn't reliable enough on its own
+    # (window activation on show can still bring the main window forward
+    # mid-animation).
+    window.move(-32000, -32000)
+    window.show()
+
+    # Open on whichever screen the splash just showed on (the one the
+    # cursor's actually on) rather than wherever Qt/the OS would place a
+    # brand new top-level window by default - on a multi-monitor setup
+    # those aren't guaranteed to be the same screen, and the splash and
+    # the real window ending up on different monitors reads as broken.
+    screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+    _size_window_to_screen(window, screen)
+
+    final_x, final_y = None, None
+    if screen is not None:
+        available = screen.availableGeometry()
+        final_x = available.x() + (available.width() - window.width()) // 2
+        final_y = available.y() + (available.height() - window.height()) // 2
+
+    # Smoothly drive the splash's progress bar from 0 to 100 across
+    # STARTUP_SPLASH_MIN_SECONDS (measured from when the splash first
+    # appeared, not from here - building `window` above already used up
+    # part of that budget), rather than jumping straight to 100 the
+    # instant the app happens to finish building. The main window stays
+    # parked off-screen (see above) for this entire loop.
+    while True:
+        elapsed = time.monotonic() - splash_shown_at
+        fraction = min(1.0, elapsed / STARTUP_SPLASH_MIN_SECONDS)
+        if splash is not None and hasattr(splash, "progress_bar"):
+            splash.progress_bar.setValue(int(fraction * 100))
+        if fraction >= 1.0:
+            break
+        app.processEvents()
+        time.sleep(0.01)
+
+    # Only now move the window onto the screen for real, right as the
+    # splash is about to hand off to it.
+    if final_x is not None:
+        window.move(final_x, final_y)
+
+    if splash is not None:
+        splash.finish(window)
+
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":

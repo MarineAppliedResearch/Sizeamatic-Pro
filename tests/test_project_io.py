@@ -1,0 +1,152 @@
+"""Tests for project_io.py's save_project/load_project.
+
+Dialog-free, so these exercise the actual read/write mechanics directly
+against tmp_path files rather than through Tkinter file dialogs — same
+rationale as test_calibration_io.py.
+"""
+
+import json
+import os
+
+import project_io
+
+
+def test_save_then_load_project_round_trips(tmp_path):
+    """Saving a project and loading it back should return exactly what
+    was saved."""
+    path = str(tmp_path / "project.json")
+
+    snapshot = {"left_frame_index": 42, "right_frame_index": 45, "ptsL": [[1.0, 2.0]], "ptsR": [[3.0, 4.0]]}
+
+    err = project_io.save_project(
+        path,
+        left_video_path="left.mp4",
+        right_video_path="right.mp4",
+        calibration_folder="misc/AprilCalibration1",
+        lock_offset_frames=-4,
+        view_rectified=True,
+        app_version="0.1.0",
+        measurement_log_text="Video\tFrame\n...",
+        last_recorded_snapshot=snapshot,
+        real_time_anchor_frame=42,
+        real_time_anchor_iso="2026-08-12T14:32:05",
+        perform_calibration_capture_folder="misc/calibration_captures",
+    )
+    assert err is None
+
+    project, load_err = project_io.load_project(path)
+    assert load_err is None
+    assert project["left_video_path"] == "left.mp4"
+    assert project["right_video_path"] == "right.mp4"
+    assert project["calibration_folder"] == "misc/AprilCalibration1"
+    assert project["lock_offset_frames"] == -4
+    assert project["view_rectified"] is True
+    assert project["app_version"] == "0.1.0"
+    assert project["measurement_log_text"] == "Video\tFrame\n..."
+    assert project["last_recorded_snapshot"] == snapshot
+    assert project["real_time_anchor_frame"] == 42
+    assert project["real_time_anchor_iso"] == "2026-08-12T14:32:05"
+    assert project["perform_calibration_capture_folder"] == "misc/calibration_captures"
+
+
+def test_save_project_allows_none_fields(tmp_path):
+    """A project saved before anything is loaded yet (all None) should
+    still save and load successfully — the field just carries no value
+    rather than being omitted."""
+    path = str(tmp_path / "project.json")
+
+    err = project_io.save_project(
+        path,
+        left_video_path=None,
+        right_video_path=None,
+        calibration_folder=None,
+        lock_offset_frames=0,
+        view_rectified=False,
+        app_version="0.1.0",
+        measurement_log_text="",
+        last_recorded_snapshot=None,
+        real_time_anchor_frame=None,
+        real_time_anchor_iso=None,
+        perform_calibration_capture_folder=None,
+    )
+    assert err is None
+
+    project, load_err = project_io.load_project(path)
+    assert load_err is None
+    assert project["left_video_path"] is None
+    assert project["calibration_folder"] is None
+    assert project["real_time_anchor_frame"] is None
+    assert project["real_time_anchor_iso"] is None
+    assert project["perform_calibration_capture_folder"] is None
+
+
+def test_load_project_defaults_capture_folder_to_none_for_a_project_saved_before_phase_10(tmp_path):
+    """A project file saved before perform_calibration_capture_folder
+    existed (missing that one key entirely, but with every other
+    required field present) should still load successfully, with that
+    field defaulting to None - unlike every other field, a project
+    predating this one shouldn't be rejected just because a brand new,
+    genuinely optional piece of state didn't exist yet when it was
+    saved."""
+    path = tmp_path / "project.json"
+    path.write_text(
+        json.dumps(
+            {
+                "app_version": "0.1.0",
+                "left_video_path": "left.mp4",
+                "right_video_path": "right.mp4",
+                "calibration_folder": None,
+                "lock_offset_frames": 0,
+                "view_rectified": False,
+                "measurement_log_text": "",
+                "last_recorded_snapshot": None,
+                "real_time_anchor_frame": None,
+                "real_time_anchor_iso": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    project, err = project_io.load_project(str(path))
+
+    assert err is None
+    assert project["perform_calibration_capture_folder"] is None
+
+
+def test_load_project_rejects_invalid_json(tmp_path):
+    """A file that isn't valid JSON should report a clear error rather
+    than raising."""
+    path = tmp_path / "project.json"
+    path.write_text("not valid json {{{", encoding="utf-8")
+
+    project, err = project_io.load_project(str(path))
+    assert project is None
+    assert "not valid JSON" in err
+
+
+def test_load_project_rejects_missing_fields(tmp_path):
+    """A JSON file missing required project fields should name what's
+    missing rather than crashing with a KeyError later."""
+    path = tmp_path / "project.json"
+    path.write_text('{"left_video_path": "left.mp4"}', encoding="utf-8")
+
+    project, err = project_io.load_project(str(path))
+    assert project is None
+    assert "right_video_path" in err
+    assert "calibration_folder" in err
+    assert "lock_offset_frames" in err
+    assert "view_rectified" in err
+    assert "app_version" in err
+    assert "measurement_log_text" in err
+    assert "last_recorded_snapshot" in err
+    assert "real_time_anchor_frame" in err
+    assert "real_time_anchor_iso" in err
+
+
+def test_load_project_reports_missing_file():
+    """Pointing at a project file that doesn't exist should report a
+    clear error rather than raising."""
+    project, err = project_io.load_project("this/path/does/not/exist.json")
+    assert project is None
+    assert err is not None
+    assert not os.path.isfile("this/path/does/not/exist.json")

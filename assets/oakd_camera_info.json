@@ -1,0 +1,612 @@
+{
+    "calibration": {
+        "batchName": "",
+        "batchTime": 1782352314,
+        "boardConf": "nIR-C56M52-03",
+        "boardCustom": "",
+        "boardName": "NG9498-ASM",
+        "boardOptions": 0,
+        "boardRev": "P10D3",
+        "cameraData": [
+            [
+                2,
+                {
+                    "cameraType": 0,
+                    "distortionCoeff": [
+                        27.075000762939453,
+                        -46.31623077392578,
+                        0.0003291408356744796,
+                        0.00034370541106909513,
+                        24.47907257080078,
+                        26.376131057739258,
+                        -44.30615234375,
+                        22.995033264160156,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        -0.0015197795582935214,
+                        0.0021963114850223064
+                    ],
+                    "extrinsics": {
+                        "lengthUnit": 1,
+                        "rotationMatrix": [
+                            [
+                                0.9999527335166931,
+                                0.009666896425187588,
+                                0.0010425238870084286
+                            ],
+                            [
+                                -0.009658591821789742,
+                                0.9999237060546875,
+                                -0.007697179913520813
+                            ],
+                            [
+                                -0.0011168521596118808,
+                                0.007686746772378683,
+                                0.9999698400497437
+                            ]
+                        ],
+                        "specTranslation": {
+                            "x": 3.75,
+                            "y": 0.0,
+                            "z": 0.0
+                        },
+                        "toCameraSocket": 0,
+                        "translation": {
+                            "x": 3.7552649974823,
+                            "y": 0.019054990261793137,
+                            "z": -0.021316861733794212
+                        }
+                    },
+                    "height": 800,
+                    "intrinsicMatrix": [
+                        [
+                            795.7462768554688,
+                            0.0,
+                            619.6859130859375
+                        ],
+                        [
+                            0.0,
+                            795.59423828125,
+                            393.26953125
+                        ],
+                        [
+                            0.0,
+                            0.0,
+                            1.0
+                        ]
+                    ],
+                    "lensPosition": 0,
+                    "specHfovDeg": 71.86000061035156,
+                    "width": 1280
+                }
+            ],
+            [
+                1,
+                {
+                    "cameraType": 0,
+                    "distortionCoeff": [
+                        22.438081741333008,
+                        -32.84231185913086,
+                        -0.0018719251966103911,
+                        0.00015798563254065812,
+                        12.117648124694824,
+                        21.811668395996094,
+                        -31.021799087524414,
+                        10.777177810668945,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.005631192121654749,
+                        0.0022530865389853716
+                    ],
+                    "extrinsics": {
+                        "lengthUnit": 1,
+                        "rotationMatrix": [
+                            [
+                                0.9999768733978271,
+                                0.005369132850319147,
+                                -0.004171069711446762
+                            ],
+                            [
+                                -0.00533407973125577,
+                                0.9999507665634155,
+                                0.008370007388293743
+                            ],
+                            [
+                                0.004215803928673267,
+                                -0.008347565308213234,
+                                0.9999562501907349
+                            ]
+                        ],
+                        "specTranslation": {
+                            "x": -7.5,
+                            "y": 0.0,
+                            "z": 0.0
+                        },
+                        "toCameraSocket": 2,
+                        "translation": {
+                            "x": -7.50039529800415,
+                            "y": -0.049419332295656204,
+                            "z": 0.004171997308731079
+                        }
+                    },
+                    "height": 800,
+                    "intrinsicMatrix": [
+                        [
+                            798.9286499023438,
+                            0.0,
+                            628.5542602539063
+                        ],
+                        [
+                            0.0,
+                            799.1751708984375,
+                            423.5922546386719
+                        ],
+                        [
+                            0.0,
+                            0.0,
+                            1.0
+                        ]
+                    ],
+                    "lensPosition": 0,
+                    "specHfovDeg": 71.86000061035156,
+                    "width": 1280
+                }
+            ],
+            [
+                0,
+                {
+                    "cameraType": 0,
+                    "distortionCoeff": [
+                        -6.377093315124512,
+                        12.609601020812988,
+                        0.0005424169939942658,
+                        -0.00042384510743431747,
+                        -1.7841452360153198,
+                        -6.4022345542907715,
+                        12.745672225952148,
+                        -2.013911247253418,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.002092827344313264,
+                        0.0018794399220496416
+                    ],
+                    "extrinsics": {
+                        "lengthUnit": 1,
+                        "rotationMatrix": [
+                            [
+                                0.0,
+                                0.0,
+                                0.0
+                            ],
+                            [
+                                0.0,
+                                0.0,
+                                0.0
+                            ],
+                            [
+                                0.0,
+                                0.0,
+                                0.0
+                            ]
+                        ],
+                        "specTranslation": {
+                            "x": 0.0,
+                            "y": 0.0,
+                            "z": 0.0
+                        },
+                        "toCameraSocket": -1,
+                        "translation": {
+                            "x": 0.0,
+                            "y": 0.0,
+                            "z": 0.0
+                        }
+                    },
+                    "height": 3000,
+                    "intrinsicMatrix": [
+                        [
+                            2980.03515625,
+                            0.0,
+                            1979.1790771484375
+                        ],
+                        [
+                            0.0,
+                            2980.314697265625,
+                            1507.784912109375
+                        ],
+                        [
+                            0.0,
+                            0.0,
+                            1.0
+                        ]
+                    ],
+                    "lensPosition": 121,
+                    "specHfovDeg": 68.7938003540039,
+                    "width": 4000
+                }
+            ]
+        ],
+        "deviceName": "",
+        "hardwareConf": "F0-FV00-BC000",
+        "housingExtrinsics": {
+            "lengthUnit": 1,
+            "rotationMatrix": [
+                [
+                    0.9999744892120361,
+                    0.0015399507246911526,
+                    0.006978783756494522
+                ],
+                [
+                    -0.0016447807429358363,
+                    0.9998855590820313,
+                    0.015040481463074684
+                ],
+                [
+                    -0.006954823154956102,
+                    -0.015051575377583504,
+                    0.999862551689148
+                ]
+            ],
+            "specTranslation": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0
+            },
+            "toCameraSocket": 0,
+            "translation": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0
+            }
+        },
+        "imuCalibrationParams": {
+            "accelerometer": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    0.0
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.0
+                ]
+            ],
+            "gyroscope": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    0.0
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.0
+                ]
+            ],
+            "noise": {
+                "accelerometer": {
+                    "x": {
+                        "biasStability": 0.009083489887416363,
+                        "noiseDensity": 0.026558103039860725,
+                        "randomWalk": 1.0093945093103684e-05
+                    },
+                    "y": {
+                        "biasStability": 0.011575271375477314,
+                        "noiseDensity": 0.02489464171230793,
+                        "randomWalk": 1.0212637789663859e-05
+                    },
+                    "z": {
+                        "biasStability": 0.015433084219694138,
+                        "noiseDensity": 0.032507069408893585,
+                        "randomWalk": 2.0894080080324784e-05
+                    }
+                },
+                "gyroscope": {
+                    "x": {
+                        "biasStability": 1.993801474571228,
+                        "noiseDensity": 0.16962473094463348,
+                        "randomWalk": 0.041524626314640045
+                    },
+                    "y": {
+                        "biasStability": 1.9442933797836304,
+                        "noiseDensity": 0.162065789103508,
+                        "randomWalk": 0.05537966266274452
+                    },
+                    "z": {
+                        "biasStability": 2.205124616622925,
+                        "noiseDensity": 0.14172691106796265,
+                        "randomWalk": 0.05226736515760422
+                    }
+                },
+                "name": "LSM6"
+            }
+        },
+        "imuExtrinsics": {
+            "lengthUnit": 1,
+            "rotationMatrix": [
+                [
+                    1.0,
+                    0.0,
+                    0.0
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "specTranslation": {
+                "x": -4.403200149536133,
+                "y": -0.26969999074935913,
+                "z": -0.20000000298023224
+            },
+            "toCameraSocket": 0,
+            "translation": {
+                "x": -4.403200149536133,
+                "y": -0.26969999074935913,
+                "z": -0.20000000298023224
+            }
+        },
+        "miscellaneousData": [],
+        "productName": "OAK-4-D-AF",
+        "stereoEnableDistortionCorrection": true,
+        "stereoRectificationData": {
+            "leftCameraSocket": 1,
+            "rectifiedRotationLeft": [
+                [
+                    0.9999175071716309,
+                    0.011962086893618107,
+                    -0.004672030918300152
+                ],
+                [
+                    -0.011942426674067974,
+                    0.9999198317527771,
+                    0.004213611129671335
+                ],
+                [
+                    0.004722060170024633,
+                    -0.00415746821090579,
+                    0.9999802112579346
+                ]
+            ],
+            "rectifiedRotationRight": [
+                [
+                    0.9999781250953674,
+                    0.006588752847164869,
+                    -0.0005562248406931758
+                ],
+                [
+                    -0.006591023411601782,
+                    0.9999695420265198,
+                    -0.0041838157922029495
+                ],
+                [
+                    0.0005286417435854673,
+                    0.004187390673905611,
+                    0.9999911189079285
+                ]
+            ],
+            "rightCameraSocket": 2
+        },
+        "stereoUseSpecTranslation": false,
+        "version": 7,
+        "verticalCameraSocket": -1
+    },
+    "camera_features": [
+        {
+            "additionalNames": [],
+            "calibrationResolution": null,
+            "configs": [
+                {
+                    "fov": {
+                        "hasNormalized": false,
+                        "height": 6000.0,
+                        "normalized": false,
+                        "width": 8000.0,
+                        "x": 0.0,
+                        "y": 0.0
+                    },
+                    "hdr": false,
+                    "height": 6000,
+                    "hfr": false,
+                    "maxFps": 18.899999618530273,
+                    "minFps": 10.0,
+                    "type": 0,
+                    "width": 8000
+                },
+                {
+                    "fov": {
+                        "hasNormalized": false,
+                        "height": 6000.0,
+                        "normalized": false,
+                        "width": 8000.0,
+                        "x": 0.0,
+                        "y": 0.0
+                    },
+                    "hdr": false,
+                    "height": 3000,
+                    "hfr": false,
+                    "maxFps": 60.029998779296875,
+                    "minFps": 10.0,
+                    "type": 0,
+                    "width": 4000
+                },
+                {
+                    "fov": {
+                        "hasNormalized": false,
+                        "height": 6000.0,
+                        "normalized": false,
+                        "width": 8000.0,
+                        "x": 0.0,
+                        "y": 0.0
+                    },
+                    "hdr": true,
+                    "height": 3000,
+                    "hfr": false,
+                    "maxFps": 30.0,
+                    "minFps": 10.0,
+                    "type": 0,
+                    "width": 4000
+                },
+                {
+                    "fov": {
+                        "hasNormalized": false,
+                        "height": 6000.0,
+                        "normalized": false,
+                        "width": 8000.0,
+                        "x": 0.0,
+                        "y": 0.0
+                    },
+                    "hdr": false,
+                    "height": 1500,
+                    "hfr": false,
+                    "maxFps": 120.0,
+                    "minFps": 10.0,
+                    "type": 0,
+                    "width": 2000
+                },
+                {
+                    "fov": {
+                        "hasNormalized": false,
+                        "height": 4320.0,
+                        "normalized": false,
+                        "width": 7680.0,
+                        "x": 160.0,
+                        "y": 840.0
+                    },
+                    "hdr": false,
+                    "height": 1080,
+                    "hfr": true,
+                    "maxFps": 240.17999267578125,
+                    "minFps": 10.0,
+                    "type": 0,
+                    "width": 1920
+                },
+                {
+                    "fov": {
+                        "hasNormalized": false,
+                        "height": 2880.0,
+                        "normalized": false,
+                        "width": 5120.0,
+                        "x": 1440.0,
+                        "y": 1560.0
+                    },
+                    "hdr": false,
+                    "height": 720,
+                    "hfr": true,
+                    "maxFps": 480.4200134277344,
+                    "minFps": 10.0,
+                    "type": 0,
+                    "width": 1280
+                }
+            ],
+            "hasAutofocus": true,
+            "hasAutofocusIC": true,
+            "height": 6000,
+            "name": "center",
+            "orientation": -1,
+            "sensorName": "IMX586",
+            "socket": 0,
+            "supportedTypes": [
+                0
+            ],
+            "width": 8000
+        },
+        {
+            "additionalNames": [],
+            "calibrationResolution": null,
+            "configs": [
+                {
+                    "fov": {
+                        "hasNormalized": false,
+                        "height": 800.0,
+                        "normalized": false,
+                        "width": 1280.0,
+                        "x": 0.0,
+                        "y": 0.0
+                    },
+                    "hdr": false,
+                    "height": 800,
+                    "hfr": false,
+                    "maxFps": 60.0,
+                    "minFps": 1.8600000143051147,
+                    "type": 1,
+                    "width": 1280
+                }
+            ],
+            "hasAutofocus": false,
+            "hasAutofocusIC": false,
+            "height": 800,
+            "name": "left",
+            "orientation": -1,
+            "sensorName": "OV9282",
+            "socket": 1,
+            "supportedTypes": [
+                1
+            ],
+            "width": 1280
+        },
+        {
+            "additionalNames": [],
+            "calibrationResolution": null,
+            "configs": [
+                {
+                    "fov": {
+                        "hasNormalized": false,
+                        "height": 800.0,
+                        "normalized": false,
+                        "width": 1280.0,
+                        "x": 0.0,
+                        "y": 0.0
+                    },
+                    "hdr": false,
+                    "height": 800,
+                    "hfr": false,
+                    "maxFps": 60.0,
+                    "minFps": 1.8600000143051147,
+                    "type": 1,
+                    "width": 1280
+                }
+            ],
+            "hasAutofocus": false,
+            "hasAutofocusIC": false,
+            "height": 800,
+            "name": "right",
+            "orientation": -1,
+            "sensorName": "OV9282",
+            "socket": 2,
+            "supportedTypes": [
+                1
+            ],
+            "width": 1280
+        }
+    ],
+    "imu": "accel"
+}
