@@ -19,10 +19,13 @@ Design notes:
     fragility that caused `FINDINGS.md` #1 and #2).
 
     The preview loop mixes OpenCV's own window/event handling
-    (`cv2.imshow`/`cv2.waitKey`) with Tkinter's `after()` scheduling. This
-    is a known-workable pattern but is a bit fragile: it depends on
-    `cv2.waitKey()` being called on every tick to keep the OpenCV window
-    responsive, and on `app.root.after()` continuing to fire on schedule.
+    (`cv2.imshow`/`cv2.waitKey`) with a Qt `QTimer` for scheduling
+    (`self.timer`, ported from the original Tkinter version's `after()`/
+    `after_cancel()` job-ID bookkeeping - this module has no other
+    Tkinter/Qt dependency). This is a known-workable pattern but is a
+    bit fragile: it depends on `cv2.waitKey()` being called on every
+    tick to keep the OpenCV window responsive, and on the timer
+    continuing to fire on schedule.
 
 Assumptions:
     - Both left and right videos are loaded before the preview is started.
@@ -46,6 +49,8 @@ import cv2
 
 # NumPy is used to build OpenCV-compatible point arrays and perform vector math.
 import numpy as np
+
+from PySide6.QtCore import QTimer
 
 
 class AnaglyphPreview:
@@ -90,13 +95,13 @@ class AnaglyphPreview:
         instance, so what the user actually sees matches the app's
         branding rather than this generic default."""
 
-        self.after_id = None
-        """Tkinter `after()` job ID for the scheduled preview tick, so it
-        can be cancelled when the preview stops. `stop` checks this
-        defensively even though it's always set by the time a real
-        window is open — see `FINDINGS.md` #2 for the bug this guarded
-        against when this state lived as an uninitialized module
-        global."""
+        self.timer = QTimer()
+        """`QTimer` driving the scheduled preview tick (`stop` calls
+        `.stop()` on it directly) - replaces the original Tkinter
+        version's `after()`/`after_cancel()` job-ID bookkeeping, which
+        this PySide6 port has no equivalent of."""
+        self.timer.setSingleShot(True)
+        self.timer.timeout.connect(self.tick)
 
     def start(self):
         """Open the anaglyph preview window and start the preview loop.
@@ -111,7 +116,7 @@ class AnaglyphPreview:
         """
 
         # Start at the current left timeline index for convenience.
-        self.index = int(self.app.left_frame_index.get())
+        self.index = int(self.app.left_frame_index)
 
         # Mark the preview active, but start paused so the user controls playback.
         self.active = True
@@ -119,6 +124,21 @@ class AnaglyphPreview:
 
         # Create a resizable OpenCV window for the preview image.
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+
+        # OpenCV's own window has no notion of "the same monitor the rest
+        # of the app is on" - left to its own devices it can land on a
+        # different screen than the main window in a multi-monitor setup.
+        # moveWindow needs an explicit position; the actual window size
+        # isn't known until the first imshow, so this is an placement
+        # estimate (roughly centered for a typical video frame), not
+        # pixel-perfect centering.
+        screen = self.app.screen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            estimated_width, estimated_height = 640, 480
+            x = available.x() + max(0, (available.width() - estimated_width) // 2)
+            y = available.y() + max(0, (available.height() - estimated_height) // 2)
+            cv2.moveWindow(self.window_name, x, y)
 
         # Show the keyboard controls in the main application status bar.
         self.app._set_status_mid("Anaglyph preview opened (Space: play/pause, A/D: step, Q: quit)")
@@ -137,11 +157,9 @@ class AnaglyphPreview:
             None
         """
 
-        # Cancel any scheduled Tkinter after() tick so the preview loop does not keep
-        # running after the preview has been stopped.
-        if self.after_id is not None:
-            self.app.root.after_cancel(self.after_id)
-            self.after_id = None
+        # Cancel any scheduled tick so the preview loop does not keep running
+        # after the preview has been stopped.
+        self.timer.stop()
 
         # Reset the preview state flags.
         self.active = False
@@ -267,9 +285,9 @@ class AnaglyphPreview:
                 self.index = max_i
                 self.playing = False
 
-        # Schedule the next preview tick using the Tkinter event loop. A 40 ms delay
-        # targets roughly 25 frames per second.
-        self.after_id = self.app.root.after(40, self.tick)
+        # Schedule the next preview tick. A 40 ms delay targets roughly 25
+        # frames per second.
+        self.timer.start(40)
 
 
 def make_anaglyph_red_cyan(frameL_bgr, frameR_bgr):

@@ -670,15 +670,63 @@ merge (it predates almost this project's entire current structure —
 it) — treated as reference material to adapt algorithms and conventions
 from, not something to merge wholesale.
 
-## Phase 11 — Look and feel polish `[ ]`
+## Phase 11 — Look and feel polish `[x]`
 
 A dedicated pass on making the app's look and feel as cohesive and
 professional as possible, rather than squeezing visual polish into
-whatever feature happened to touch a given screen. Not yet scoped in
-detail (which screens, what specific visual language/theme, whether
-this touches ttk theming, spacing/layout consistency, iconography
-beyond the app icon itself, etc.) — needs its own planning pass before
-implementation starts, same as Phases 9 and 10.
+whatever feature happened to touch a given screen. Mid-phase, the UI
+framework itself was switched from Tkinter to PySide6/Qt (Tkinter's
+native menu bar can't be dark-themed on Windows) — `main.py` and
+`video_overlay.py` were ported first; `measurement_window.py`,
+`calibration_summary.py`, `perform_calibration.py`, and
+`generate_calibration_target.py` are now ported too, along with
+restoring the measurement pipeline/status bar/real-time sync that had
+been dropped mid-port, and wiring `anaglyph_preview.py` back in. The
+whole test suite (previously left with `--ignore` flags on four
+Tkinter-era files) has also been fully rewritten for Qt — see
+`AGENTS.md`'s Testing section.
+
+**Scope note:** closes with the Qt migration and test-suite rewrite
+done and confirmed working — the general spacing/layout consistency
+pass below is deliberately deferred rather than done now, the same
+kind of explicit, not-silently-dropped deferral prior phases have
+closed with (see Phase 5's `main.py`-splitting note, Phase 7's
+playback-speed fix). It needs more hands-on time with the ported app
+to even know what still looks off, which hasn't happened yet; revisit
+as its own pass whenever that time exists, rather than guessing at
+spacing issues sight-unseen.
+
+- [x] Port `main.py`/`video_overlay.py` to PySide6/Qt, dark title bar,
+      multi-monitor-correct window placement, `qt_helpers.py` shared
+      infrastructure (`ClosableDialog`, `pil_image_to_qpixmap`,
+      `move_to_same_screen_as`)
+- [x] Port `measurement_window.py`, `calibration_summary.py`,
+      `perform_calibration.py`, `generate_calibration_target.py` to
+      `QDialog`-based windows; restore the measurement pipeline/3-part
+      status bar/real-time sync in `main.py`; wire `anaglyph_preview.py`
+      back in via `QTimer`
+- [x] Toolbar iconography — the transport controls and Clear Points
+      button use real Font Awesome icons via the `qtawesome` package
+      (`qta.icon("fa5s.play", color=ICON_COLOR)`, etc.) instead of plain
+      Unicode glyphs, which rendered inconsistently (font-dependent,
+      fell back to emoji/missing-glyph boxes for a couple of the
+      transport symbols specifically). Play/pause now also swaps icon
+      to reflect actual playback state. Any *other* icons this app adds
+      later (menu items, additional dialogs) should reuse the same
+      `qta.icon(name, color=ICON_COLOR)` pattern rather than introducing
+      a second source.
+- [x] Rewrite the whole test suite for Qt — `test_main.py`,
+      `test_video_overlay.py`, `test_rendering_performance.py`,
+      `test_smoke.py`/`smoke_test.py`, plus the four ported sub-window
+      modules' own test files, plus a handful of Qt-specific regression
+      tests (`test_regressions.py`) for bugs found along the way
+      (dark-title-bar/multi-monitor placement, measurement-window
+      focus/positioning, anaglyph-preview resizing the main window)
+- [ ] General spacing/layout consistency pass beyond what's already been
+      fixed (menu/toolbar padding, font size, video pane borders,
+      default window sizing) — not yet scoped in detail; revisit once
+      there's been more hands-on time with the ported app to see what
+      still looks off.
 
 ## Phase 12 — MARE API integration (future, not yet scoped) `[ ]`
 

@@ -1,12 +1,14 @@
-"""Generate Calibration Target window for Sizeamatic Pro.
+"""PySide6 Generate Calibration Target window for Sizeamatic Pro.
 
 Lets the project owner generate a printable checkerboard or ChArUco
 calibration target from inside the app itself (ROADMAP.md Phase 10),
-rather than needing to run a separate command-line script - matching a
-UI precedent found on the unmerged `origin/feature-onlineCalibrations`
-branch, which built board generation directly into its
-`perform_calibration.py` window (settings + a live on-screen preview +
-a "Generate Printable Board" save dialog), never as a standalone script.
+rather than needing to run a separate command-line script.
+
+This is a PySide6 port of the original Tkinter module (ROADMAP.md Phase
+11) - see `main.py`'s module docstring for why the app switched
+frameworks. The board-image rendering/PDF layout are unchanged
+(untouched Tk-free library calls); only the settings form + live
+preview + save dialog widgets changed.
 
 Contents:
     - `GenerateCalibrationTargetWindow` — owns the window and its
@@ -54,27 +56,14 @@ Design notes:
     `info_lines`) - a physical printout should state its own exact
     numbers rather than relying on whoever printed it to remember them.
 
-    The live preview canvas renders at a low, fixed `PREVIEW_DPI`
-    (fast enough to redraw on every keystroke) using Pillow's
-    `Image.fromarray`/`ImageTk.PhotoImage`, the same approach
-    `main.py`'s `_display_bgr_on_canvas` already settled on for
-    rendering OpenCV/NumPy image data onto a Tk canvas - and NOT the
-    `tkinter.PhotoImage(data=base64_png)` round-trip
-    `origin/feature-onlineCalibrations`'s equivalent preview used,
-    which `main.py`'s own docstring already flags as the exact thing
-    that made an earlier version of this app's video rendering
-    "unacceptably slow" (ROADMAP.md Phase 5) before it was replaced.
-    `self.preview_photo_image` holds a live reference to the current
-    `ImageTk.PhotoImage` for the same reason `main.py` keeps one too -
-    Tkinter doesn't keep its own reference, so a locally-scoped
-    `PhotoImage` would get garbage collected and the canvas would show
-    nothing.
+    The live preview renders at a low, fixed `PREVIEW_DPI` (fast enough
+    to redraw on every keystroke) into a `QPixmap` via
+    `qt_helpers.pil_image_to_qpixmap`.
 
 Assumptions:
-    - The main application exposes `app.root` (the Tk root window that
-      owns this Toplevel) and `app._app_window_title` (this app's
-      project-aware window title, shared by every window). Both defined
-      on `main.py`'s `SizeamaticProApp`.
+    - The main application exposes `app._app_window_title` (this app's
+      project-aware window title, shared by every window). Defined on
+      `main.py`'s `SizeamaticProApp`.
 
 Author:
     Isaac Travers
@@ -83,15 +72,26 @@ Date:
     2026-08-13
 """
 
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
-
 import cv2
-from PIL import Image, ImageTk
+from PIL import Image
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QComboBox,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 import create_charuco_calibration_target
 import create_checkerboard_calibration_target
 import perform_calibration
+from qt_helpers import ClosableDialog, move_to_same_screen_as, pil_image_to_qpixmap
 
 PREVIEW_DPI = 96
 """Render resolution used only for this window's on-screen preview -
@@ -104,8 +104,42 @@ PDF_PAGE_MARGIN_IN = 0.5
 a saved board - matches both generator scripts' own `main()` default."""
 
 
+class _PreviewLabel(QLabel):
+    """The live preview `QLabel`, redrawing itself whenever resized.
+
+    A plain `QLabel` doesn't emit anything on resize - this override is
+    the Qt equivalent of the original's `<Configure>` binding on its
+    preview Canvas, which redrew the preview to fit its new size.
+    """
+
+    def __init__(self, on_resize):
+        """Store the resize callback.
+
+        Args:
+            on_resize (Callable[[], None]): Called (with no arguments)
+                after this label is resized.
+
+        Returns:
+            None
+        """
+        super().__init__()
+        self._on_resize = on_resize
+
+    def resizeEvent(self, event):
+        """Call the stored resize callback after the base resize handling.
+
+        Args:
+            event (QResizeEvent): The resize event.
+
+        Returns:
+            None
+        """
+        super().resizeEvent(event)
+        self._on_resize()
+
+
 class GenerateCalibrationTargetWindow:
-    """Owns the Generate Calibration Target Toplevel window and its widgets.
+    """Owns the Generate Calibration Target dialog and its widgets.
 
     One instance lives on the main application
     (`app.generate_calibration_target_window`), created once and reused
@@ -127,103 +161,94 @@ class GenerateCalibrationTargetWindow:
         self.app = app
 
         self.win = None
-        """The Generate Calibration Target Toplevel window, or None if
-        it hasn't been opened yet (or was closed)."""
+        """The Generate Calibration Target dialog, or None if it hasn't
+        been opened yet (or was closed)."""
 
-        self.board_type_var = None
-        """`tk.StringVar` holding which board type is currently
-        selected - `"Checkerboard"` or `"ChArUco"`. Created in
-        `ensure_window`."""
+        self.board_type_combo = None
+        """`QComboBox` holding which board type is currently selected -
+        `"Checkerboard"` or `"ChArUco"`. Created in `ensure_window`."""
 
-        self.checkerboard_squares_x_var = None
-        """`tk.StringVar` holding the checkerboard's width in squares,
+        self.checkerboard_squares_x_edit = None
+        """`QLineEdit` holding the checkerboard's width in squares,
         defaulting to `perform_calibration.DEFAULT_CHECKERBOARD_SQUARES_X`.
         Created in `ensure_window`."""
 
-        self.checkerboard_squares_y_var = None
-        """`tk.StringVar` holding the checkerboard's height in squares.
-        See `self.checkerboard_squares_x_var`."""
+        self.checkerboard_squares_y_edit = None
+        """`QLineEdit` holding the checkerboard's height in squares. See
+        `self.checkerboard_squares_x_edit`."""
 
-        self.checkerboard_square_size_var = None
-        """`tk.StringVar` holding the checkerboard's real-world square
-        size in millimeters, defaulting to
+        self.checkerboard_square_size_edit = None
+        """`QLineEdit` holding the checkerboard's real-world square size
+        in millimeters, defaulting to
         `perform_calibration.DEFAULT_CHECKERBOARD_SQUARE_SIZE_MM`.
         Created in `ensure_window`."""
 
-        self.charuco_squares_x_var = None
-        """`tk.StringVar` holding the ChArUco board's width in squares,
+        self.charuco_squares_x_edit = None
+        """`QLineEdit` holding the ChArUco board's width in squares,
         defaulting to `perform_calibration.DEFAULT_CHARUCO_SQUARES_X`.
         Created in `ensure_window`."""
 
-        self.charuco_squares_y_var = None
-        """`tk.StringVar` holding the ChArUco board's height in squares.
-        See `self.charuco_squares_x_var`."""
+        self.charuco_squares_y_edit = None
+        """`QLineEdit` holding the ChArUco board's height in squares. See
+        `self.charuco_squares_x_edit`."""
 
-        self.charuco_square_size_var = None
-        """`tk.StringVar` holding the ChArUco board's real-world square
-        size in millimeters, defaulting to
+        self.charuco_square_size_edit = None
+        """`QLineEdit` holding the ChArUco board's real-world square size
+        in millimeters, defaulting to
         `perform_calibration.DEFAULT_CHARUCO_SQUARE_SIZE_MM`. Created in
         `ensure_window`."""
 
-        self.charuco_marker_size_var = None
-        """`tk.StringVar` holding the ChArUco board's real-world ArUco
+        self.charuco_marker_size_edit = None
+        """`QLineEdit` holding the ChArUco board's real-world ArUco
         marker size in millimeters, defaulting to
         `perform_calibration.DEFAULT_CHARUCO_MARKER_SIZE_MM` - must be
-        smaller than `self.charuco_square_size_var`
+        smaller than `self.charuco_square_size_edit`
         (`_parse_charuco_settings` enforces this). Created in
         `ensure_window`."""
 
         self.checkerboard_row = None
-        """The `ttk.Frame` holding the checkerboard-specific settings -
-        shown only while `self.board_type_var` is `"Checkerboard"`.
+        """The `QWidget` holding the checkerboard-specific settings -
+        shown only while `self.board_type_combo` reads "Checkerboard".
         Created in `ensure_window`."""
 
         self.charuco_row = None
-        """The `ttk.Frame` holding the ChArUco-specific settings - shown
-        only while `self.board_type_var` is `"ChArUco"`. Created in
+        """The `QWidget` holding the ChArUco-specific settings - shown
+        only while `self.board_type_combo` reads "ChArUco". Created in
         `ensure_window`."""
 
-        self.preview_canvas = None
-        """The `tkinter.Canvas` the current board settings are rendered
+        self.preview_label = None
+        """The `_PreviewLabel` the current board settings are rendered
         onto. Created in `ensure_window`."""
 
-        self.preview_photo_image = None
-        """The `PIL.ImageTk.PhotoImage` currently drawn on
-        `self.preview_canvas` - see this module's docstring for why
-        this reference must be kept alive."""
-
-        self.status_var = None
-        """`tk.StringVar` holding the window's status line, e.g. "Saved:
+        self.status_label = None
+        """`QLabel` holding the window's status line, e.g. "Saved:
         C:/.../checkerboard_letter_landscape.pdf". Created in
         `ensure_window`."""
 
     def _on_close(self):
         """Handle the user manually closing the window.
 
-        Destroys the Tkinter window and clears the stored widget
-        references, matching `PerformCalibrationWindow._on_close`'s
-        reasoning - the next `ensure_window` call needs to rebuild them
-        rather than holding onto references to already-destroyed
-        widgets.
+        Clears the stored widget references, matching
+        `PerformCalibrationWindow._on_close`'s reasoning - the next
+        `ensure_window` call needs to rebuild them rather than holding
+        onto references to already-destroyed widgets.
 
         Returns:
             None
         """
-        self.win.destroy()
         self.win = None
-        self.board_type_var = None
-        self.checkerboard_squares_x_var = None
-        self.checkerboard_squares_y_var = None
-        self.checkerboard_square_size_var = None
-        self.charuco_squares_x_var = None
-        self.charuco_squares_y_var = None
-        self.charuco_square_size_var = None
-        self.charuco_marker_size_var = None
+        self.board_type_combo = None
+        self.checkerboard_squares_x_edit = None
+        self.checkerboard_squares_y_edit = None
+        self.checkerboard_square_size_edit = None
+        self.charuco_squares_x_edit = None
+        self.charuco_squares_y_edit = None
+        self.charuco_square_size_edit = None
+        self.charuco_marker_size_edit = None
         self.checkerboard_row = None
         self.charuco_row = None
-        self.preview_canvas = None
-        self.preview_photo_image = None
-        self.status_var = None
+        self.preview_label = None
+        self.status_label = None
 
     def ensure_window(self):
         """Create the Generate Calibration Target window, or raise it if it exists.
@@ -231,166 +256,130 @@ class GenerateCalibrationTargetWindow:
         Returns:
             None
         """
-        # If the window already exists, bring it to the front and reuse it
-        # instead of creating a duplicate window.
         if self.win is not None:
-            try:
-                self.win.lift()
-                return
+            self.win.show()
+            self.win.raise_()
+            self.win.activateWindow()
+            return
 
-            # If the stored window reference is stale, clear it so a new
-            # window can be created below.
-            except Exception:
-                self.win = None
+        win = ClosableDialog(self._on_close)
+        win.setWindowTitle(self.app._app_window_title())
+        win.resize(560, 600)
 
-        win = tk.Toplevel(self.app.root)
-        win.title(self.app._app_window_title())
-        win.geometry("560x600")
-        win.protocol("WM_DELETE_WINDOW", self._on_close)
+        outer = QVBoxLayout(win)
 
-        outer = ttk.Frame(win, padding=(10, 10))
-        outer.grid(row=0, column=0, sticky="nsew")
-        win.grid_rowconfigure(0, weight=1)
-        win.grid_columnconfigure(0, weight=1)
-        outer.grid_columnconfigure(0, weight=1)
-
-        # ---- Heading ----
-        ttk.Label(
-            outer,
-            text="Generate Calibration Target",
-            font=("Segoe UI", 11, "bold"),
-        ).grid(row=0, column=0, sticky="w")
+        heading = QLabel("Generate Calibration Target")
+        heading.setStyleSheet("font-weight: bold;")
+        outer.addWidget(heading)
 
         # ---- Board type row ----
-        type_row = ttk.Frame(outer)
-        type_row.grid(row=1, column=0, sticky="w", pady=(10, 0))
-
-        ttk.Label(type_row, text="Board type:").grid(row=0, column=0)
-        self.board_type_var = tk.StringVar(value="Checkerboard")
-        board_type_combo = ttk.Combobox(
-            type_row,
-            textvariable=self.board_type_var,
-            values=["Checkerboard", "ChArUco"],
-            width=12,
-            state="readonly",
-        )
-        board_type_combo.grid(row=0, column=1, padx=(4, 0))
-        board_type_combo.bind("<<ComboboxSelected>>", lambda event: self._on_settings_changed())
+        type_row = QHBoxLayout()
+        type_row.addWidget(QLabel("Board type:"))
+        self.board_type_combo = QComboBox()
+        self.board_type_combo.addItems(["Checkerboard", "ChArUco"])
+        self.board_type_combo.currentTextChanged.connect(lambda _text: self._on_settings_changed())
+        type_row.addWidget(self.board_type_combo)
+        type_row.addStretch(1)
+        outer.addLayout(type_row)
 
         # ---- Checkerboard settings row ----
         # Editable - see this module's docstring for why checkerboard
         # (unlike ChArUco) is safe to let the project owner customize.
-        self.checkerboard_row = ttk.Frame(outer)
-        self.checkerboard_row.grid(row=2, column=0, sticky="w", pady=(10, 0))
+        self.checkerboard_row = QWidget()
+        checkerboard_layout = QHBoxLayout(self.checkerboard_row)
+        checkerboard_layout.setContentsMargins(0, 0, 0, 0)
 
-        ttk.Label(self.checkerboard_row, text="Squares (columns x rows):").grid(row=0, column=0)
-        self.checkerboard_squares_x_var = tk.StringVar(
-            value=str(perform_calibration.DEFAULT_CHECKERBOARD_SQUARES_X)
-        )
-        ttk.Entry(self.checkerboard_row, textvariable=self.checkerboard_squares_x_var, width=4).grid(
-            row=0, column=1, padx=(4, 2)
-        )
-        ttk.Label(self.checkerboard_row, text="x").grid(row=0, column=2)
-        self.checkerboard_squares_y_var = tk.StringVar(
-            value=str(perform_calibration.DEFAULT_CHECKERBOARD_SQUARES_Y)
-        )
-        ttk.Entry(self.checkerboard_row, textvariable=self.checkerboard_squares_y_var, width=4).grid(
-            row=0, column=3, padx=(2, 12)
-        )
+        checkerboard_layout.addWidget(QLabel("Squares (columns x rows):"))
+        self.checkerboard_squares_x_edit = QLineEdit(str(perform_calibration.DEFAULT_CHECKERBOARD_SQUARES_X))
+        self.checkerboard_squares_x_edit.setFixedWidth(45)
+        checkerboard_layout.addWidget(self.checkerboard_squares_x_edit)
+        checkerboard_layout.addWidget(QLabel("x"))
+        self.checkerboard_squares_y_edit = QLineEdit(str(perform_calibration.DEFAULT_CHECKERBOARD_SQUARES_Y))
+        self.checkerboard_squares_y_edit.setFixedWidth(45)
+        checkerboard_layout.addWidget(self.checkerboard_squares_y_edit)
 
-        ttk.Label(self.checkerboard_row, text="Square size (mm):").grid(row=0, column=4)
-        self.checkerboard_square_size_var = tk.StringVar(
-            value=str(perform_calibration.DEFAULT_CHECKERBOARD_SQUARE_SIZE_MM)
+        checkerboard_layout.addWidget(QLabel("Square size (mm):"))
+        self.checkerboard_square_size_edit = QLineEdit(
+            str(perform_calibration.DEFAULT_CHECKERBOARD_SQUARE_SIZE_MM)
         )
-        ttk.Entry(self.checkerboard_row, textvariable=self.checkerboard_square_size_var, width=8).grid(
-            row=0, column=5, padx=(4, 0)
-        )
+        self.checkerboard_square_size_edit.setFixedWidth(70)
+        checkerboard_layout.addWidget(self.checkerboard_square_size_edit)
+        checkerboard_layout.addStretch(1)
 
-        # Redraw the preview whenever any checkerboard setting changes -
-        # matching the write-trace pattern
-        # `origin/feature-onlineCalibrations`'s own live preview used.
-        for settings_var in (
-            self.checkerboard_squares_x_var,
-            self.checkerboard_squares_y_var,
-            self.checkerboard_square_size_var,
+        # Redraw the preview whenever any checkerboard setting changes.
+        for edit in (
+            self.checkerboard_squares_x_edit,
+            self.checkerboard_squares_y_edit,
+            self.checkerboard_square_size_edit,
         ):
-            settings_var.trace_add("write", lambda *args: self._redraw_preview())
+            edit.textChanged.connect(lambda _text: self._redraw_preview())
+
+        outer.addWidget(self.checkerboard_row)
 
         # ---- ChArUco settings row ----
         # Editable, same as checkerboard - see this module's docstring
         # for why ChArUco's geometry is user-set too, not fixed.
-        self.charuco_row = ttk.Frame(outer)
-        self.charuco_row.grid(row=2, column=0, sticky="w", pady=(10, 0))
+        self.charuco_row = QWidget()
+        charuco_layout = QHBoxLayout(self.charuco_row)
+        charuco_layout.setContentsMargins(0, 0, 0, 0)
 
-        ttk.Label(self.charuco_row, text="Squares (columns x rows):").grid(row=0, column=0)
-        self.charuco_squares_x_var = tk.StringVar(value=str(perform_calibration.DEFAULT_CHARUCO_SQUARES_X))
-        ttk.Entry(self.charuco_row, textvariable=self.charuco_squares_x_var, width=4).grid(
-            row=0, column=1, padx=(4, 2)
-        )
-        ttk.Label(self.charuco_row, text="x").grid(row=0, column=2)
-        self.charuco_squares_y_var = tk.StringVar(value=str(perform_calibration.DEFAULT_CHARUCO_SQUARES_Y))
-        ttk.Entry(self.charuco_row, textvariable=self.charuco_squares_y_var, width=4).grid(
-            row=0, column=3, padx=(2, 12)
-        )
+        charuco_layout.addWidget(QLabel("Squares (columns x rows):"))
+        self.charuco_squares_x_edit = QLineEdit(str(perform_calibration.DEFAULT_CHARUCO_SQUARES_X))
+        self.charuco_squares_x_edit.setFixedWidth(45)
+        charuco_layout.addWidget(self.charuco_squares_x_edit)
+        charuco_layout.addWidget(QLabel("x"))
+        self.charuco_squares_y_edit = QLineEdit(str(perform_calibration.DEFAULT_CHARUCO_SQUARES_Y))
+        self.charuco_squares_y_edit.setFixedWidth(45)
+        charuco_layout.addWidget(self.charuco_squares_y_edit)
 
-        ttk.Label(self.charuco_row, text="Square (mm):").grid(row=0, column=4)
-        self.charuco_square_size_var = tk.StringVar(value=str(perform_calibration.DEFAULT_CHARUCO_SQUARE_SIZE_MM))
-        ttk.Entry(self.charuco_row, textvariable=self.charuco_square_size_var, width=6).grid(
-            row=0, column=5, padx=(4, 12)
-        )
+        charuco_layout.addWidget(QLabel("Square (mm):"))
+        self.charuco_square_size_edit = QLineEdit(str(perform_calibration.DEFAULT_CHARUCO_SQUARE_SIZE_MM))
+        self.charuco_square_size_edit.setFixedWidth(55)
+        charuco_layout.addWidget(self.charuco_square_size_edit)
 
-        ttk.Label(self.charuco_row, text="Marker (mm):").grid(row=0, column=6)
-        self.charuco_marker_size_var = tk.StringVar(value=str(perform_calibration.DEFAULT_CHARUCO_MARKER_SIZE_MM))
-        ttk.Entry(self.charuco_row, textvariable=self.charuco_marker_size_var, width=6).grid(
-            row=0, column=7, padx=(4, 0)
-        )
+        charuco_layout.addWidget(QLabel("Marker (mm):"))
+        self.charuco_marker_size_edit = QLineEdit(str(perform_calibration.DEFAULT_CHARUCO_MARKER_SIZE_MM))
+        self.charuco_marker_size_edit.setFixedWidth(55)
+        charuco_layout.addWidget(self.charuco_marker_size_edit)
+        charuco_layout.addStretch(1)
 
-        # Redraw the preview whenever any ChArUco setting changes -
-        # same write-trace pattern as the checkerboard fields above.
-        for settings_var in (
-            self.charuco_squares_x_var,
-            self.charuco_squares_y_var,
-            self.charuco_square_size_var,
-            self.charuco_marker_size_var,
+        # Redraw the preview whenever any ChArUco setting changes - same
+        # pattern as the checkerboard fields above.
+        for edit in (
+            self.charuco_squares_x_edit,
+            self.charuco_squares_y_edit,
+            self.charuco_square_size_edit,
+            self.charuco_marker_size_edit,
         ):
-            settings_var.trace_add("write", lambda *args: self._redraw_preview())
+            edit.textChanged.connect(lambda _text: self._redraw_preview())
 
-        # ---- Live preview canvas ----
-        preview_frame = ttk.Frame(outer)
-        preview_frame.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
-        preview_frame.grid_rowconfigure(0, weight=1)
-        preview_frame.grid_columnconfigure(0, weight=1)
+        outer.addWidget(self.charuco_row)
 
-        self.preview_canvas = tk.Canvas(
-            preview_frame,
-            background="#dddddd",
-            highlightthickness=1,
-            highlightbackground="#999999",
-        )
-        self.preview_canvas.grid(row=0, column=0, sticky="nsew")
-        self.preview_canvas.bind("<Configure>", lambda event: self._redraw_preview())
+        # ---- Live preview ----
+        self.preview_label = _PreviewLabel(self._redraw_preview)
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setStyleSheet("background-color: #dddddd; border: 1px solid #999999;")
+        self.preview_label.setMinimumHeight(200)
+        outer.addWidget(self.preview_label, stretch=1)
 
         # ---- Save button ----
-        button_row = ttk.Frame(outer)
-        button_row.grid(row=4, column=0, sticky="w", pady=(10, 0))
-
-        ttk.Button(
-            button_row,
-            text="Save Printable Board…",
-            command=self.on_save_printable_board,
-        ).grid(row=0, column=0)
+        button_row = QHBoxLayout()
+        save_button = QPushButton("Save Printable Board…")
+        save_button.clicked.connect(self.on_save_printable_board)
+        button_row.addWidget(save_button)
+        button_row.addStretch(1)
+        outer.addLayout(button_row)
 
         # ---- Status line ----
-        self.status_var = tk.StringVar(value="")
-        ttk.Label(outer, textvariable=self.status_var, foreground="#555555").grid(
-            row=5, column=0, sticky="w", pady=(6, 0)
-        )
-
-        # Let the preview canvas get the extra space when the window
-        # resizes; everything above/below it stays a fixed height.
-        outer.grid_rowconfigure(3, weight=1)
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("color: #8ea2c6;")
+        outer.addWidget(self.status_label)
 
         self.win = win
+        win.show()
+        # Positioned only after show(), which finalizes the window's real
+        # layout-driven size rather than the initial resize() hint.
+        move_to_same_screen_as(win, self.app)
 
         # Show only the settings row matching the current board type, and
         # draw the first preview.
@@ -399,20 +388,16 @@ class GenerateCalibrationTargetWindow:
     def _on_settings_changed(self):
         """Show the settings row matching the selected board type and redraw.
 
-        Called whenever `self.board_type_var` changes - swaps which of
-        `self.checkerboard_row`/`self.charuco_row` is visible (both are
-        gridded onto the same row, so only one is ever showing), then
+        Called whenever `self.board_type_combo` changes - swaps which of
+        `self.checkerboard_row`/`self.charuco_row` is visible, then
         redraws the preview for the newly selected board type.
 
         Returns:
             None
         """
-        if self.board_type_var.get() == "Checkerboard":
-            self.charuco_row.grid_remove()
-            self.checkerboard_row.grid()
-        else:
-            self.checkerboard_row.grid_remove()
-            self.charuco_row.grid()
+        is_checkerboard = self.board_type_combo.currentText() == "Checkerboard"
+        self.checkerboard_row.setVisible(is_checkerboard)
+        self.charuco_row.setVisible(not is_checkerboard)
 
         self._redraw_preview()
 
@@ -420,7 +405,7 @@ class GenerateCalibrationTargetWindow:
         """Parse and validate the checkerboard squares/size fields.
 
         Deliberately returns `None` on any problem instead of showing a
-        `messagebox` - this is called on every keystroke to refresh the
+        message box - this is called on every keystroke to refresh the
         live preview, and popping an error dialog while the project
         owner is still mid-edit (e.g. squares_x is temporarily empty
         between typing "1" and "10") would be disruptive.
@@ -432,15 +417,15 @@ class GenerateCalibrationTargetWindow:
             square_size_mm)` if all three fields are valid, else None.
         """
         try:
-            squares_x = int(self.checkerboard_squares_x_var.get())
-            squares_y = int(self.checkerboard_squares_y_var.get())
+            squares_x = int(self.checkerboard_squares_x_edit.text())
+            squares_y = int(self.checkerboard_squares_y_edit.text())
         except ValueError:
             return None
         if squares_x < 2 or squares_y < 2:
             return None
 
         try:
-            square_size_mm = float(self.checkerboard_square_size_var.get())
+            square_size_mm = float(self.checkerboard_square_size_edit.text())
         except ValueError:
             return None
         if square_size_mm <= 0:
@@ -452,7 +437,7 @@ class GenerateCalibrationTargetWindow:
         """Parse and validate the ChArUco squares/square size/marker size fields.
 
         Mirrors `_parse_checkerboard_settings` - deliberately returns
-        `None` on any problem instead of showing a `messagebox`, since
+        `None` on any problem instead of showing a message box, since
         this is also called on every keystroke to refresh the live
         preview.
 
@@ -462,16 +447,16 @@ class GenerateCalibrationTargetWindow:
             else None.
         """
         try:
-            squares_x = int(self.charuco_squares_x_var.get())
-            squares_y = int(self.charuco_squares_y_var.get())
+            squares_x = int(self.charuco_squares_x_edit.text())
+            squares_y = int(self.charuco_squares_y_edit.text())
         except ValueError:
             return None
         if squares_x < 2 or squares_y < 2:
             return None
 
         try:
-            square_size_mm = float(self.charuco_square_size_var.get())
-            marker_size_mm = float(self.charuco_marker_size_var.get())
+            square_size_mm = float(self.charuco_square_size_edit.text())
+            marker_size_mm = float(self.charuco_marker_size_edit.text())
         except ValueError:
             return None
         if square_size_mm <= 0 or marker_size_mm <= 0:
@@ -494,7 +479,7 @@ class GenerateCalibrationTargetWindow:
             `(board_img_gray, board_w_mm, board_h_mm, info_lines)` if
             the current settings are valid, else None.
         """
-        if self.board_type_var.get() == "Checkerboard":
+        if self.board_type_combo.currentText() == "Checkerboard":
             settings = self._parse_checkerboard_settings()
             if settings is None:
                 return None
@@ -534,66 +519,57 @@ class GenerateCalibrationTargetWindow:
         """Rebuild and redraw the board preview from the current settings.
 
         Renders at `PREVIEW_DPI`, scales the result to fit
-        `self.preview_canvas`'s current size, and draws it centered.
+        `self.preview_label`'s current size, and draws it centered.
         Shows a plain text message instead if the current settings
-        don't parse, or if the canvas has no usable size yet (e.g. the
-        very first call, before Tkinter has laid out the window).
+        don't parse, or if the label has no usable size yet (e.g. the
+        very first call, before Qt has laid out the window).
 
         Returns:
             None
         """
-        if self.preview_canvas is None:
+        if self.preview_label is None:
             return
 
-        canvas_width = self.preview_canvas.winfo_width()
-        canvas_height = self.preview_canvas.winfo_height()
-        if canvas_width < 2 or canvas_height < 2:
+        label_width = self.preview_label.width()
+        label_height = self.preview_label.height()
+        if label_width < 2 or label_height < 2:
             return
-
-        self.preview_canvas.delete("all")
 
         built = self._build_current_board_image(dpi=PREVIEW_DPI)
         if built is None:
-            self.preview_canvas.create_text(
-                canvas_width / 2,
-                canvas_height / 2,
-                text=(
-                    "Enter valid squares (>= 2 in each direction) and a positive "
-                    "square size - and, for ChArUco, a marker size smaller than "
-                    "the square size."
-                ),
-                fill="#555555",
-                width=canvas_width - 20,
-                justify="center",
+            self.preview_label.clear()
+            self.preview_label.setText(
+                "Enter valid squares (>= 2 in each direction) and a positive "
+                "square size - and, for ChArUco, a marker size smaller than "
+                "the square size."
+            )
+            self.preview_label.setWordWrap(True)
+            self.preview_label.setStyleSheet(
+                "background-color: #dddddd; border: 1px solid #999999; color: #555555; padding: 10px;"
             )
             return
 
         board_img_gray, _board_w_mm, _board_h_mm, _info_lines = built
 
-        # Convert to RGB for Pillow, matching main.py's own
-        # `_display_bgr_on_canvas` convention for showing OpenCV/NumPy
-        # image data on a Tk canvas.
+        # Convert to RGB for Pillow, matching video_overlay.py's own
+        # convention for showing OpenCV/NumPy image data via Qt.
         board_img_rgb = cv2.cvtColor(board_img_gray, cv2.COLOR_GRAY2RGB)
         board_h_px, board_w_px = board_img_rgb.shape[:2]
 
         preview_margin_px = 10
         scale = min(
-            (canvas_width - preview_margin_px * 2) / board_w_px,
-            (canvas_height - preview_margin_px * 2) / board_h_px,
+            (label_width - preview_margin_px * 2) / board_w_px,
+            (label_height - preview_margin_px * 2) / board_h_px,
         )
         scale = max(scale, 0.01)
         display_w_px = max(1, int(board_w_px * scale))
         display_h_px = max(1, int(board_h_px * scale))
 
         pil_image = Image.fromarray(board_img_rgb).resize((display_w_px, display_h_px), Image.NEAREST)
-        self.preview_photo_image = ImageTk.PhotoImage(pil_image)
 
-        self.preview_canvas.create_image(
-            canvas_width / 2,
-            canvas_height / 2,
-            image=self.preview_photo_image,
-            anchor="center",
-        )
+        self.preview_label.setStyleSheet("background-color: #dddddd; border: 1px solid #999999;")
+        self.preview_label.setText("")
+        self.preview_label.setPixmap(pil_image_to_qpixmap(pil_image))
 
     def on_save_printable_board(self):
         """Save the currently selected board as a printable LETTER landscape PDF.
@@ -607,11 +583,12 @@ class GenerateCalibrationTargetWindow:
         Returns:
             None
         """
-        board_type = self.board_type_var.get()
+        board_type = self.board_type_combo.currentText()
 
         built = self._build_current_board_image(dpi=300)
         if built is None:
-            messagebox.showerror(
+            QMessageBox.critical(
+                self.win,
                 "Generate Calibration Target",
                 "Enter valid squares (at least 2 in each direction) and a positive "
                 "square size in millimeters - and, for ChArUco, a marker size "
@@ -622,12 +599,8 @@ class GenerateCalibrationTargetWindow:
 
         default_name = "checkerboard_letter_landscape.pdf" if board_type == "Checkerboard" else "charuco_letter_landscape.pdf"
 
-        file_path = filedialog.asksaveasfilename(
-            parent=self.win,
-            title="Save Printable Calibration Board",
-            defaultextension=".pdf",
-            initialfile=default_name,
-            filetypes=[("PDF Files", "*.pdf"), ("All Files", "*.*")],
+        file_path, _filter = QFileDialog.getSaveFileName(
+            self.win, "Save Printable Calibration Board", default_name, "PDF Files (*.pdf);;All Files (*)"
         )
         if not file_path:
             return
@@ -653,7 +626,7 @@ class GenerateCalibrationTargetWindow:
                 info_lines=info_lines,
             )
         except RuntimeError as error:
-            messagebox.showerror("Generate Calibration Target", str(error))
+            QMessageBox.critical(self.win, "Generate Calibration Target", str(error))
             return
 
-        self.status_var.set(f"Saved: {file_path}")
+        self.status_label.setText(f"Saved: {file_path}")

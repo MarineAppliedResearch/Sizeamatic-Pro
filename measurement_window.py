@@ -1,4 +1,4 @@
-"""Tkinter measurement results window for Sizeamatic Pro.
+"""PySide6 measurement results window for Sizeamatic Pro.
 
 This module creates and updates the measurement output window: one
 unified results table (points, segments, and a chain-total row, tagged by
@@ -6,6 +6,13 @@ a "Type" column), a copyable text block matching that table exactly, and
 an accumulating "Log" that only grows when the user explicitly presses
 Record — all in the same flat, spreadsheet-ready row format (leading
 Video/Frame/Timestamp columns identify which frame each row came from).
+
+This is a PySide6 port of the original Tkinter module (ROADMAP.md Phase
+11) - see `main.py`'s module docstring for why the app switched
+frameworks. `RESULT_COLUMNS`/`RESULT_HEADERS` and the row-shape
+assumptions below are unchanged from the original; only the widgets
+(`ttk.Treeview` -> `QTableWidget`, `tk.Text` -> `QPlainTextEdit`,
+`tk.Toplevel` -> `qt_helpers.ClosableDialog`) changed.
 
 Contents:
     - `MeasurementWindow` — owns the measurement results window and its
@@ -15,12 +22,6 @@ Contents:
       log, so all three always agree.
 
 Design notes:
-    `MeasurementWindow` is a plain class instance owned by the main
-    application (`app.measurement_window`), matching the same conversion
-    already done for `calibration_summary.CalibrationSummaryWindow` — see
-    that module's "Design notes" for why (removes the module-level-global
-    fragility that caused `FINDINGS.md` #1).
-
     Points and segments used to render as two separate Treeview tables
     with two separate, differently-shaped copy formats. They're now one
     flat table with a "Type" column (see ROADMAP.md Phase 7's measurement
@@ -38,7 +39,7 @@ Design notes:
     measurements — computed in `main.py` alongside the rest of the
     measurement math, not in this display-only module.
 
-    The Log is a plain, always-editable `tk.Text` widget, not a
+    The Log is a plain, always-editable `QPlainTextEdit`, not a
     read-only display — the project owner wanted to be able to fix or
     remove a bad recorded measurement directly, and a shared
     "Measurement ID" per Record click (see `_next_measurement_id`) is
@@ -61,12 +62,19 @@ Created:
     2026-05-18
 """
 
-# tkinter provides the measurement results window widgets.
-import tkinter as tk
+from PySide6.QtWidgets import (
+    QApplication,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QPlainTextEdit,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+)
 
-# ttk provides themed Tkinter widgets such as Frame, Label, and Treeview.
-from tkinter import ttk
-
+from qt_helpers import ClosableDialog
 
 RESULT_COLUMNS = (
     "video",
@@ -124,12 +132,12 @@ RESULT_HEADERS = {
     "sigma2": "σRange (mm)",
 }
 """Human-readable header text for each `RESULT_COLUMNS` entry, used for
-both the Treeview column headings and the tab-separated header line in
-the copy block/log."""
+both the table column headings and the tab-separated header line in the
+copy block/log."""
 
 
 class MeasurementWindow:
-    """Owns the measurement results Toplevel window and its widgets.
+    """Owns the measurement results dialog and its widgets.
 
     One instance lives on the main application (`app.measurement_window`),
     created once and reused for the lifetime of the app.
@@ -139,8 +147,8 @@ class MeasurementWindow:
         """Store the owning app and initialize widget references to None.
 
         Args:
-            app: The main application object, used for the Tk root window
-                that owns the measurement Toplevel, and for the assumed
+            app: The main application object, used as the dialog's
+                parent, for the app window title, and for the assumed
                 click uncertainty setting (`app.click_sigma_px`) shown in
                 the status line.
 
@@ -150,28 +158,28 @@ class MeasurementWindow:
         self.app = app
 
         self.win = None
-        """The measurement results Toplevel window, or None if it hasn't
-        been built yet (or was closed)."""
+        """The measurement results dialog, or None if it hasn't been
+        built yet (or was closed)."""
 
-        self.results_tree = None
-        """The single unified results Treeview (points, segments, and the
-        chain total, tagged by a "Type" column), or None if the window
-        hasn't been built yet."""
-
-        self.copy_text = None
-        """The copyable current-measurement Text widget, or None if the
+        self.results_table = None
+        """The single unified results `QTableWidget` (points, segments,
+        and the chain total, tagged by a "Type" column), or None if the
         window hasn't been built yet."""
 
+        self.copy_text = None
+        """The copyable current-measurement `QPlainTextEdit`, or None if
+        the window hasn't been built yet."""
+
         self.log_text = None
-        """The accumulating recorded-measurements Text widget, or None if
-        the window hasn't been built yet. Only grows when the user
-        presses Record (`record_current_measurement`) — never
+        """The accumulating recorded-measurements `QPlainTextEdit`, or
+        None if the window hasn't been built yet. Only grows when the
+        user presses Record (`record_current_measurement`) — never
         auto-populated by `update_window`, so it doesn't fill with
         in-progress drag states."""
 
-        self.error_var = None
-        """The `tkinter.StringVar` backing the error/status line, or None
-        if the window hasn't been built yet."""
+        self.error_label = None
+        """The `QLabel` backing the error/status line, or None if the
+        window hasn't been built yet."""
 
         self._last_rows = []
         """The most recently displayed measurement's rows (same shape
@@ -180,10 +188,10 @@ class MeasurementWindow:
         caller to recompute or resend anything."""
 
         self._log_has_header = False
-        """Whether the log Text widget already has the header line
-        written. The header should appear exactly once at the top of the
-        log, not once per Record action — repeating it would break a
-        straight paste-into-spreadsheet workflow."""
+        """Whether the log widget already has the header line written.
+        The header should appear exactly once at the top of the log, not
+        once per Record action — repeating it would break a straight
+        paste-into-spreadsheet workflow."""
 
         self._next_measurement_id = 1
         """The measurement ID `record_current_measurement` will stamp
@@ -197,26 +205,21 @@ class MeasurementWindow:
     def _on_close(self):
         """Handle the user manually closing the measurement window.
 
-        Destroys the Tkinter window and clears the stored widget
-        references. Clearing these references is important because the
-        next `update_window` call needs to know the widgets no longer
-        exist and must be rebuilt via `ensure_window` first. Recorded log
-        content is lost when the window closes, same as the rest of its
-        state — there's no separate persistence for it.
+        Clears the stored widget references. Clearing these is
+        important because the next `update_window` call needs to know
+        the widgets no longer exist and must be rebuilt via
+        `ensure_window` first. Recorded log content is lost when the
+        window closes, same as the rest of its state — there's no
+        separate persistence for it.
 
         Returns:
             None
         """
-
-        # Destroy the Tkinter window.
-        self.win.destroy()
-
-        # Clear the stored references because the widgets were destroyed.
         self.win = None
-        self.results_tree = None
+        self.results_table = None
         self.copy_text = None
         self.log_text = None
-        self.error_var = None
+        self.error_label = None
         self._log_has_header = False
         self._next_measurement_id = 1
 
@@ -232,131 +235,96 @@ class MeasurementWindow:
         Returns:
             None
         """
-
-        # If the measurement window already exists, reuse it instead of
-        # creating a duplicate Toplevel window.
         if self.win is not None:
             return
 
-        # Create a separate top level window owned by the main application root.
-        win = tk.Toplevel(self.app.root)
+        win = ClosableDialog(self._on_close)
+        win.setWindowTitle(self.app._app_window_title())
+        win.resize(900, 760)
 
-        # Match the main window's title (app name, plus " - <project
-        # name>" once a project has been saved/opened this session) so
-        # every window makes clear which project it belongs to, rather
-        # than a fixed "Measurement" that never reflects that.
-        win.title(self.app._app_window_title())
+        outer = QVBoxLayout(win)
 
-        # Give the window an initial size large enough for the results table,
-        # the copy box, and the log.
-        win.geometry("900x760")
-
-        # Use the cleanup callback when the user closes the measurement window.
-        win.protocol("WM_DELETE_WINDOW", self._on_close)
-
-        # Create one padded outer frame to hold all measurement window content.
-        outer = ttk.Frame(win, padding=(10, 10))
-        outer.grid(row=0, column=0, sticky="nsew")
-
-        # Let the outer frame expand with the measurement window.
-        win.grid_rowconfigure(0, weight=1)
-        win.grid_columnconfigure(0, weight=1)
-
-        # Let the results table and the log both get a share of extra vertical
-        # space when the window resizes; the copy box stays fixed-height.
-        outer.grid_rowconfigure(2, weight=1)
-        outer.grid_rowconfigure(7, weight=1)
-        outer.grid_columnconfigure(0, weight=1)
-
-        # Create the error/status line used for triangulation failures or other
-        # measurement warnings.
-        error_var = tk.StringVar(value="")
-        ttk.Label(
-            outer,
-            textvariable=error_var,
-            foreground="red",
-        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        error_label = QLabel("")
+        error_label.setStyleSheet("color: #ef5350;")
+        outer.addWidget(error_label)
 
         # -------------------------------------------------------------------------
         # Unified results table.
         # -------------------------------------------------------------------------
 
-        ttk.Label(
-            outer,
-            text="Results",
-            font=("Segoe UI", 10, "bold"),
-        ).grid(row=1, column=0, sticky="w")
+        results_label = QLabel("Results")
+        results_label.setStyleSheet("font-weight: bold;")
+        outer.addWidget(results_label)
 
-        results_tree = ttk.Treeview(
-            outer,
-            columns=RESULT_COLUMNS,
-            show="headings",
-            height=10,
-        )
-        results_tree.grid(row=2, column=0, sticky="nsew", pady=(4, 12))
-
-        # Label and size each column from the shared RESULT_HEADERS mapping, so
-        # the table, copy block, and log headers can never drift apart.
-        for col in RESULT_COLUMNS:
-            results_tree.heading(col, text=RESULT_HEADERS[col])
-
-        # Narrow columns for short identifying fields, wider for the numeric
-        # measurement columns.
-        narrow_cols = {"video", "frame", "timestamp", "actual_time", "measurement_id", "type", "label"}
-        for col in RESULT_COLUMNS:
-            width = 70 if col not in narrow_cols else 90
-            anchor = "center" if col in ("measurement_id", "type", "label") else ("w" if col == "video" else "e")
-            results_tree.column(col, width=width, anchor=anchor)
+        results_table = QTableWidget(0, len(RESULT_COLUMNS))
+        results_table.setHorizontalHeaderLabels([RESULT_HEADERS[col] for col in RESULT_COLUMNS])
+        results_table.verticalHeader().setVisible(False)
+        results_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        outer.addWidget(results_table, stretch=1)
 
         # -------------------------------------------------------------------------
         # Copy box (current measurement only).
         # -------------------------------------------------------------------------
 
-        ttk.Label(
-            outer,
-            text="Copy (current measurement)",
-            font=("Segoe UI", 10, "bold"),
-        ).grid(row=3, column=0, sticky="w")
+        copy_label = QLabel("Copy (current measurement)")
+        copy_label.setStyleSheet("font-weight: bold;")
+        outer.addWidget(copy_label)
 
-        copy_txt = tk.Text(outer, height=6, width=1, wrap="none")
-        copy_txt.grid(row=4, column=0, sticky="nsew", pady=(4, 12))
-        outer.grid_rowconfigure(4, weight=0)
-        copy_txt.configure(state="disabled")
+        copy_text = QPlainTextEdit()
+        copy_text.setReadOnly(True)
+        copy_text.setFixedHeight(120)
+        copy_text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        outer.addWidget(copy_text)
 
         # -------------------------------------------------------------------------
         # Log (accumulated recorded measurements).
         # -------------------------------------------------------------------------
 
-        log_header = ttk.Frame(outer)
-        log_header.grid(row=5, column=0, sticky="ew")
-        log_header.grid_columnconfigure(0, weight=1)
-
-        ttk.Label(
-            log_header,
-            text="Log (recorded measurements — editable; select and delete lines to remove a bad one)",
-            font=("Segoe UI", 10, "bold"),
-        ).grid(row=0, column=0, sticky="w")
+        log_header = QHBoxLayout()
+        log_label = QLabel("Log (recorded measurements — editable; select and delete lines to remove a bad one)")
+        log_label.setStyleSheet("font-weight: bold;")
+        log_header.addWidget(log_label, stretch=1)
 
         # Explicit action, not auto-logged on every recalculation — see this
         # module's "Design notes" and ROADMAP.md Phase 7.
-        ttk.Button(
-            log_header,
-            text="Record",
-            command=self.record_current_measurement,
-        ).grid(row=0, column=1, sticky="e")
+        record_button = QPushButton("Record")
+        record_button.clicked.connect(self.record_current_measurement)
+        log_header.addWidget(record_button)
+        outer.addLayout(log_header)
 
-        # Deliberately left editable (never disabled) — see this module's
+        # Deliberately left editable (never read-only) — see this module's
         # "Design notes": fixing/removing a bad recorded measurement is done
         # by editing this text directly, not through a separate UI.
-        log_txt = tk.Text(outer, height=10, width=1, wrap="none")
-        log_txt.grid(row=7, column=0, sticky="nsew")
+        log_text = QPlainTextEdit()
+        log_text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        outer.addWidget(log_text, stretch=1)
 
         # Store the window and widgets for later update/record calls.
         self.win = win
-        self.results_tree = results_tree
-        self.copy_text = copy_txt
-        self.log_text = log_txt
-        self.error_var = error_var
+        self.results_table = results_table
+        self.copy_text = copy_text
+        self.log_text = log_text
+        self.error_label = error_label
+
+        win.show()
+
+        # This window auto-opens the first time a measurement becomes
+        # available - while the project owner's hands are still on the
+        # mouse, over the video panes - unlike the other three sub-
+        # windows, which only ever open from an explicit menu click.
+        # Anchoring it to the screen's right edge (rather than dead
+        # center, which would land right on top of the video/cursor)
+        # keeps it out of the way of what's actually being worked on.
+        # Positioned only after show() (which finalizes the window's real
+        # layout-driven size - e.g. the results table's 16 columns want
+        # more than the initial `resize(900, 760)` hint) so this reads
+        # `win.width()`/`win.height()` accurately rather than stale.
+        screen = self.app.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            x = available.x() + max(0, available.width() - win.width() - 20)
+            y = available.y() + max(0, (available.height() - win.height()) // 2)
+            win.move(x, y)
 
     def update_window(self, rows, error_msg):
         """Refresh the measurement window with the latest computed rows.
@@ -379,30 +347,25 @@ class MeasurementWindow:
         Returns:
             None
         """
-
-        # Make sure the measurement window and its child widgets exist before trying
-        # to update table rows or copy text.
         self.ensure_window()
 
         # Remember these rows so a later Record click can use them without the
         # caller needing to resend anything.
         self._last_rows = list(rows)
 
-        # Show the measurement error message if one was provided.
-        self.error_var.set(error_msg if error_msg else "")
+        # Show the measurement error message if one was provided; otherwise
+        # show the assumed click uncertainty used for the uncertainty
+        # estimates.
+        if error_msg:
+            self.error_label.setText(error_msg)
+        else:
+            self.error_label.setText(f"Assumed click σ = {self.app.click_sigma_px:.1f} px")
 
-        # If there is no error, show the assumed click uncertainty used for the
-        # uncertainty estimates.
-        if not error_msg:
-            self.error_var.set(f"Assumed click σ = {self.app.click_sigma_px:.1f} px")
-
-        # Clear all existing rows from the previous measurement update.
-        for item in self.results_tree.get_children():
-            self.results_tree.delete(item)
-
-        # Insert the latest formatted rows into the unified results table.
-        for row in rows:
-            self.results_tree.insert("", "end", values=row)
+        # Replace all rows in the results table with the latest measurement.
+        self.results_table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            for c, value in enumerate(row):
+                self.results_table.setItem(r, c, QTableWidgetItem(str(value)))
 
         # Build the tab-separated copy block: one header line plus one line per
         # row, so it can be pasted directly into Excel, LibreOffice Calc, Google
@@ -410,13 +373,7 @@ class MeasurementWindow:
         lines = ["\t".join(RESULT_HEADERS[col] for col in RESULT_COLUMNS)]
         for row in rows:
             lines.append("\t".join(str(v) for v in row))
-        copy_block = "\n".join(lines)
-
-        # Temporarily enable the text widget so generated output can be replaced.
-        self.copy_text.configure(state="normal")
-        self.copy_text.delete("1.0", "end")
-        self.copy_text.insert("1.0", copy_block)
-        self.copy_text.configure(state="disabled")
+        self.copy_text.setPlainText("\n".join(lines))
 
     def record_current_measurement(self):
         """Append the currently displayed measurement to the Log.
@@ -425,15 +382,14 @@ class MeasurementWindow:
         then appends one line per row from the most recent
         `update_window` call — each stamped with the same measurement ID
         (see `_next_measurement_id`), so every row from this one Record
-        click can be found (and, since the Log is a plain editable Text
+        click can be found (and, since the Log is a plain editable
         widget, deleted) together later. Does nothing if there's no
         current measurement to record (e.g. the window was just opened,
         or the last update had zero valid rows).
 
         Notifies `self.app._on_measurement_recorded()` afterward so the
         app can snapshot enough state (which frame, which clicked points)
-        to restore this exact measurement later from a project file — see
-        ROADMAP.md Phase 7's project file item.
+        to restore this exact measurement later from a project file.
 
         Returns:
             None
@@ -443,7 +399,7 @@ class MeasurementWindow:
 
         if not self._log_has_header:
             header_line = "\t".join(RESULT_HEADERS[col] for col in RESULT_COLUMNS)
-            self.log_text.insert("end", header_line + "\n")
+            self.log_text.appendPlainText(header_line)
             self._log_has_header = True
 
         id_index = RESULT_COLUMNS.index("measurement_id")
@@ -452,7 +408,7 @@ class MeasurementWindow:
         for row in self._last_rows:
             stamped = list(row)
             stamped[id_index] = str(measurement_id)
-            self.log_text.insert("end", "\t".join(stamped) + "\n")
+            self.log_text.appendPlainText("\t".join(stamped))
 
         self._next_measurement_id += 1
 
@@ -467,7 +423,7 @@ class MeasurementWindow:
         """
         if self.log_text is None:
             return ""
-        return self.log_text.get("1.0", "end-1c")
+        return self.log_text.toPlainText()
 
     def restore_log_text(self, text):
         """Replace the Log's content with previously-saved text.
@@ -487,14 +443,13 @@ class MeasurementWindow:
         """
         self.ensure_window()
 
-        self.log_text.delete("1.0", "end")
-
         if not text:
+            self.log_text.setPlainText("")
             self._log_has_header = False
             self._next_measurement_id = 1
             return
 
-        self.log_text.insert("1.0", text)
+        self.log_text.setPlainText(text)
         self._log_has_header = True
 
         id_index = RESULT_COLUMNS.index("measurement_id")

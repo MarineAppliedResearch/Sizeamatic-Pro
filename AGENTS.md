@@ -81,9 +81,9 @@ existing code you're not otherwise touching.
 
 ### Errors and status output
 
-Use `tkinter.messagebox` for user-facing errors/dialogs, `print()` for
-console/debug output. Don't introduce the `logging` module as a new
-convention without asking first.
+Use `QMessageBox` (`PySide6.QtWidgets`) for user-facing errors/dialogs,
+`print()` for console/debug output. Don't introduce the `logging` module
+as a new convention without asking first.
 
 ### Naming, formatting, tooling
 
@@ -173,15 +173,15 @@ build:
 uv run python create_app_icon.py path/to/source_image.png
 ```
 
-The startup splash is `main.py`'s own `_show_startup_splash` — a plain
-Tkinter `Toplevel`, deliberately **not** PyInstaller's separate
-bootloader `--splash` feature. An earlier version of this build used
-both: the bootloader splash covering the onefile build's
-self-extraction phase, handed off to this app's own splash once Tk
-started. In practice that showed as two near-identical splashes back to
-back, which looked like a bug rather than a smooth handoff — the
-bootloader `--splash` support was removed from `sizeamatic.spec`
-entirely rather than trying to tune the handoff, since this app's own
+The startup splash is `main.py`'s own `_show_startup_splash` — a Qt
+`QSplashScreen`, deliberately **not** PyInstaller's separate bootloader
+`--splash` feature. An earlier version of this build used both: the
+bootloader splash covering the onefile build's self-extraction phase,
+handed off to this app's own splash once the Qt app started. In
+practice that showed as two near-identical splashes back to back, which
+looked like a bug rather than a smooth handoff — the bootloader
+`--splash` support was removed from `sizeamatic.spec` entirely rather
+than trying to tune the handoff, since this app's own
 splash already covers the whole startup window on its own, identically
 whether launched from source (`uv run python main.py`) or from
 `dist/SizeamaticPro.exe`. It stays up for at least
@@ -218,28 +218,49 @@ finds its resources correctly.
 
 Run the suite: `uv run pytest`. Everything lives under `tests/`.
 
-- **Prefer a `FakeApp` stand-in over the real GUI.** Most of the app's
-  actual logic (`stereo_matching.py`, `calibration_summary.py`'s
-  `map_oob_percent`, etc.) takes an `app` parameter but only reads a
-  handful of specific attributes off it. Use the `make_fake_app` fixture
-  (see `tests/conftest.py`) to build a minimal object with just those
-  attributes set, rather than constructing a real `SizeamaticProApp`. Much
-  faster, and avoids the Tk pitfalls below entirely.
-- **Only one real `tk.Tk()` per test session, ever.** Confirmed
-  empirically: Tcl/Tk does not reliably support creating and fully
-  destroying more than one interpreter within a single process on this
-  setup — it fails with `TclError: invalid command name "tcl_findLibrary"`
-  or a broken `init.tcl` path lookup, intermittently, after the second or
-  third such cycle. `tests/conftest.py`'s `hidden_tk_root` fixture is
-  session-scoped for exactly this reason — reuse it (and the
-  `sizeamatic_app` fixture built on it) rather than calling `tk.Tk()`
-  directly in a new test.
-- **If a test needs to exercise code that calls `self.root.destroy()`**
-  (like `on_app_close`), don't let it actually destroy the shared session
-  root — redirect it first. Use `root.quit` (stops `mainloop()` without
-  destroying anything) if the code under test calls `mainloop()`, or a
-  plain no-op lambda if it doesn't. See `test_smoke.py` and
-  `test_regressions.py`'s `on_app_close` test for both patterns.
+`tests/conftest.py` also replaces pytest's default per-test "PASSED
+[ x%]" stream with a custom terminal report: one aggregated line per
+test file (green if it's all-passing, red if not), printed as each
+file's tests finish, then a boxed totals summary at the very end.
+Pytest's own tracebacks for failures/errors are untouched — only the
+per-test progress line and final counts line are replaced. This is
+implemented via a few `TerminalReporter` hooks/monkeypatches at the
+bottom of `conftest.py`; if you're touching it, note the `trylast=True`
+on `pytest_configure` (needed because `_pytest.terminal`'s own
+`pytest_configure` is what registers the `TerminalReporter` plugin in
+the first place) and that `pytest_report_teststatus` preserves the real
+category pytest computes (only blanking the visible letter/word) so
+`self.stats["failed"]`/`self.stats["error"]` — which the traceback
+sections read from — don't come up empty.
+
+- **Prefer a `FakeApp`/`FakeAppWidget` stand-in over the real GUI.** Most
+  of the app's actual logic (`stereo_matching.py`,
+  `calibration_summary.py`'s `map_oob_percent`, etc.) takes an `app`
+  parameter but only reads a handful of specific attributes off it. Use
+  the `make_fake_app` fixture (see `tests/conftest.py`) to build a
+  minimal plain-object stand-in with just those attributes set, rather
+  than constructing a real `SizeamaticProApp`. Much faster, and avoids
+  spinning up real Qt widgets for logic that doesn't need them. Use
+  `make_fake_app_widget` instead when the code under test needs `app` to
+  be a real `QObject` (e.g. something that parents a `QShortcut` to it).
+- **The whole suite runs with `QT_QPA_PLATFORM=offscreen`**, set at the
+  very top of `tests/conftest.py` before any other import. This means
+  the suite never flashes a visible window, and it must stay set before
+  `PySide6.QtWidgets` is imported anywhere — don't reorder conftest's
+  top-of-file imports.
+- **Tests that touch real Qt widgets need the `qapp` fixture**
+  (session-scoped `QApplication.instance() or QApplication([])`, in
+  `tests/conftest.py`) — Qt only supports one `QApplication` per process,
+  so every test that needs one shares this instance rather than
+  constructing its own. `sizeamatic_app` (a real, per-test
+  `SizeamaticProApp`, closed via `.close()` after each test) is built on
+  top of it.
+- **Qt paints immediate-mode, not retained-mode** — nothing about a
+  `paintEvent`'s drawing persists as an inspectable object afterward (no
+  Tkinter-style canvas item IDs to query). To assert on rendered output,
+  render to an offscreen image and sample pixels:
+  `pane.grab().toImage()`, then `image.pixelColor(x, y).name()`. See
+  `test_video_overlay.py` for the pattern.
 - **Prefer synthetic fixtures with known-correct expected values over real
   captured calibration data.** `tests/conftest.py`'s `synthetic_cal`/
   `known_point_pixels` build a small hand-picked rectified stereo rig
