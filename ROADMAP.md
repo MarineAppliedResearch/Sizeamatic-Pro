@@ -215,7 +215,9 @@ playback-speed paint-path optimization, deliberately deferred (see that
 item below) rather than squeezed in — the same kind of explicit,
 not-silently-dropped deferral Phase 5 closed with for `main.py` splitting.
 A second usability round (Phase 8) and a packaging/distribution phase
-(Phase 9) are planned next.
+(Phase 9) are planned next. (The deferred playback-speed item was later
+picked back up and fixed post-Qt-migration — see its checklist entry
+below.)
 
 - [x] Usability interview — see below for the resulting requirements
 - [x] Calibration folder guidance — first pass just renamed the
@@ -332,24 +334,27 @@ A second usability round (Phase 8) and a packaging/distribution phase
       back through the same screen transform `_image_to_screen` uses, so
       video content and point overlays can no longer diverge. See
       `FINDINGS.md` #11.
-- [~] Playback speed — investigated, not yet fixed. The speed dropdown
-      (0.25x-4x) already exists and "1x" is already intended to match
-      native fps, but it's a hardcoded 40ms tick, not read from the
-      loaded video's actual fps (only coincidentally correct for ~25fps
-      footage) — that specific fix is still open. The suspected cause of
-      the reported slowness (live per-frame rectification) was
-      profiled and ruled out: simulating a real 4-second Play click
-      (the actual self-scheduling `after()` loop, with real screen
-      painting) measured 19.7fps raw vs. 19.0fps rectified against a
-      25fps target — rectification itself only costs ~1-2ms/tick.
-      Forcing real `root.update()` calls (vs. a synthetic tight loop with
-      no actual screen paint, which measured ~85-98 ticks/sec) revealed
-      the real cost is generic Tkinter canvas-paint/event-loop overhead,
-      roughly 50ms/tick against the 40ms budget, regardless of
-      rectification. Deliberately not pursued further right now — a
-      persistent `PhotoImage` + `.paste()` instead of recreating one
-      every frame is a plausible next step, but is real additional
-      investigation/work of its own.
+- [x] Playback speed — fixed under Qt (post-migration). Two real bugs,
+      not one: (1) "1x" was a hardcoded 40ms tick derived from an
+      assumed ~25fps rather than the loaded video's actual fps, wrong
+      for any other real fps — `_compute_playback_timing` now derives
+      the tick delay from `metaL`/`metaR`'s real fps. (2) 2x/4x
+      playback was reported as playing *slower* than 1x: `_read_frame_at`'s
+      seek-skip optimization only covered "same index" and "exactly one
+      frame ahead," so 2x/4x's small forward skips (+2/+4 frames every
+      tick) fell through to a full `cap.set()` seek on *every* tick —
+      profiled at ~54-105ms/frame vs. ~3-10ms/frame to decode-and-discard
+      the same gap, making faster-than-1x speeds slower in wall-clock
+      terms despite needing fewer ticks. Fixed by decoding-and-discarding
+      small forward gaps (`MAX_SEQUENTIAL_SKIP_FRAMES`) instead of
+      seeking. Also switched `playback_timer` to `Qt.TimerType.PreciseTimer`
+      (Qt's default is an intentionally-imprecise "coarse" timer). Verified
+      via real profiling through the actual `app.exec()` loop, not just
+      unit tests: 1x/2x/4x now scale correctly relative to each other
+      (previously 2x was slower than 1x); some gap from 100% of each
+      speed's target fps remains at higher multipliers (decoding-and-
+      discarding several frames per tick on both panes is itself real
+      work), which is a normal software-decode ceiling rather than a bug.
 - [x] Anaglyph 3D preview — confirmed novelty-only, not a usability issue.
       No action; deprioritized for future investment.
 - [x] Sort the above into automated-test-covered vs. manual-judgment-only,

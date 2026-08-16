@@ -241,16 +241,69 @@ WINDOW_SCREEN_FRACTION = 0.9
 window sizes itself to on startup - see `_size_window_to_screen`."""
 
 SPEED_TABLE = {
-    "0.25x": (1, 160),
-    "0.5x": (1, 80),
-    "1x": (1, 40),
-    "2x": (2, 40),
-    "4x": (4, 40),
+    "0.25x": 0.25,
+    "0.5x": 0.5,
+    "1x": 1.0,
+    "2x": 2.0,
+    "4x": 4.0,
 }
-"""Playback speed -> `(frame_step, tick_delay_ms)`. Slower-than-1x
-speeds lengthen the tick interval (frame_step stays 1); faster-than-1x
-speeds skip frames per tick at the same 40ms interval - matches the
-original Tkinter app's `_playback_tick` exactly."""
+"""Playback speed label -> speed multiplier. "1x" means the video's own
+real fps, not a fixed assumption - `_compute_playback_timing` turns a
+multiplier and the loaded video's actual fps into a concrete
+`(frame_step, tick_delay_ms)` pair. Previously this table hardcoded
+`(step, delay_ms)` pairs derived from an assumed ~25fps, so footage at
+any other fps played at the wrong rate even at "1x" - see FINDINGS.md
+#10 and ROADMAP.md Phase 7's deferred playback-speed item."""
+
+MAX_SEQUENTIAL_SKIP_FRAMES = 10
+"""Largest forward frame-index gap `_read_frame_at` will close by
+decoding-and-discarding rather than seeking. Comfortably covers every
+`SPEED_TABLE` step (currently up to 4, for "4x") with headroom for a
+faster speed being added later, while staying well under the point
+where decode-and-discard's linear per-frame cost would outgrow a
+seek's flat cost."""
+
+DEFAULT_PLAYBACK_FPS = 25.0
+"""Fallback fps for `_compute_playback_timing` if a loaded video
+somehow reports a nonsensical fps (e.g. 0, from corrupt metadata) -
+`_open_video_capture` doesn't currently validate fps the way it
+validates width/height/frame_count are positive."""
+
+
+def _compute_playback_timing(fps, speed_label):
+    """Turn a video's real fps and a `SPEED_TABLE` speed label into a
+    concrete `(frame_step, tick_delay_ms)` pair for `_playback_tick`.
+
+    "1x" ticks once every `1000/fps` ms (the video's actual native
+    rate), advancing one frame per tick. Slower-than-1x speeds keep
+    that one-frame step but stretch the tick interval; faster-than-1x
+    speeds keep the native tick interval but skip more frames per
+    tick - same tradeoff the old hardcoded `SPEED_TABLE` used, just
+    parameterized by the real fps instead of assuming ~25fps.
+
+    Args:
+        fps (float): The loaded video's actual frames per second.
+            Falls back to `DEFAULT_PLAYBACK_FPS` if not positive.
+        speed_label (str): One of `SPEED_TABLE`'s keys (e.g. "1x").
+            Falls back to a 1.0 multiplier if not a recognized label.
+
+    Returns:
+        tuple[int, int]: `(frame_step, tick_delay_ms)`, both at least 1.
+    """
+    if not fps or fps <= 0:
+        fps = DEFAULT_PLAYBACK_FPS
+
+    multiplier = SPEED_TABLE.get(speed_label, 1.0)
+    native_delay_ms = 1000.0 / fps
+
+    if multiplier >= 1.0:
+        step = max(1, round(multiplier))
+        delay_ms = round(native_delay_ms)
+    else:
+        step = 1
+        delay_ms = round(native_delay_ms / multiplier)
+
+    return step, max(1, delay_ms)
 
 DARK_QSS = """
 QMainWindow, QWidget { background-color: #0a0f1a; color: #e8eefc; font-family: "Segoe UI"; font-weight: bold; font-size: 11pt; }
@@ -433,6 +486,15 @@ class SizeamaticProApp(QMainWindow):
         self.is_playing = False
         self.playback_timer = QTimer(self)
         self.playback_timer.setSingleShot(True)
+        # Qt's default QTimer uses a "coarse" timer type - intentionally
+        # imprecise (Qt reserves the right to fire up to ~5% or so late)
+        # so the OS can batch wakeups for power efficiency. That slack
+        # was the dominant cost in real playback throughput: profiling
+        # showed decode+render alone takes under 1ms/frame, yet the real
+        # self-rescheduling timer loop averaged ~51ms between ticks
+        # against a 40ms request. PreciseTimer asks the OS for its most
+        # accurate timer facility instead.
+        self.playback_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.playback_timer.timeout.connect(self._playback_tick)
 
         self._suppress_slider_callbacks = False
@@ -1166,9 +1228,23 @@ class SizeamaticProApp(QMainWindow):
     def _read_frame_at(self, cap, index):
         """Decode the frame at a specific index, seeking only if needed.
 
-        Direct port of the original's helper of the same name - see
-        that docstring (in git history) for the seek-cost rationale;
-        unchanged here since it never depended on Tkinter.
+        A `cap.set(CAP_PROP_POS_FRAMES)` seek is expensive (profiled at
+        ~54-105ms/frame, vs. ~3ms/frame for a plain sequential
+        `cap.read()`) - the original optimization here avoided it for
+        the exact-same-index case (nothing to do) and the pure
+        one-frame-forward case (already the default outcome of the
+        previous `cap.read()`). That left one real gap: 2x/4x playback
+        deliberately requests indices 2/4 frames ahead each tick,
+        which - being neither "same index" nor "exactly one frame
+        ahead" - fell through to a seek on *every single tick*,
+        making faster-than-1x playback slower in wall-clock terms than
+        1x despite needing fewer ticks to cover the same duration (this
+        is what a "2x plays even slower than 1x" report traced back
+        to). Small forward gaps now decode-and-discard the skipped
+        frames instead (confirmed via profiling to stay ~10-12x cheaper
+        than seeking for the gaps current playback speeds actually
+        produce); only a genuinely large or backward jump (e.g. a
+        slider drag) still seeks.
 
         Args:
             cap (cv2.VideoCapture): The capture to read from.
@@ -1179,8 +1255,15 @@ class SizeamaticProApp(QMainWindow):
             seek/decode failed.
         """
         index = int(index)
-        if int(cap.get(cv2.CAP_PROP_POS_FRAMES)) != index:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, index)
+        current_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+        gap = index - current_pos
+
+        if gap != 0:
+            if 0 < gap <= MAX_SEQUENTIAL_SKIP_FRAMES:
+                for _ in range(gap):
+                    cap.read()
+            else:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, index)
 
         ok, frame_bgr = cap.read()
         if not ok:
@@ -1881,8 +1964,9 @@ class SizeamaticProApp(QMainWindow):
     def _playback_tick(self):
         """Advance playback by one speed-dependent step, then reschedule.
 
-        Direct port of the original's `_playback_tick` - see
-        `SPEED_TABLE`'s docstring for the exact step/delay semantics.
+        See `_compute_playback_timing`'s docstring for the exact
+        step/delay semantics - "1x" plays at the loaded video's actual
+        native fps rather than a fixed assumption.
 
         Returns:
             None
@@ -1890,7 +1974,12 @@ class SizeamaticProApp(QMainWindow):
         if not self.is_playing:
             return
 
-        step, delay_ms = SPEED_TABLE.get(self.speed_combo.currentText(), (1, 40))
+        fps = None
+        if self.metaL:
+            fps = self.metaL["fps"]
+        elif self.metaR:
+            fps = self.metaR["fps"]
+        step, delay_ms = _compute_playback_timing(fps, self.speed_combo.currentText())
 
         if self.lock_lr and self.capL and self.capR:
             master_max = min(self.left_frame_max, self.right_frame_max)

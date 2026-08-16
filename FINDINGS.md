@@ -340,12 +340,36 @@ panes, not the stereo math — `root.after()` only guarantees a *minimum*
 delay, so a callback that runs longer than its scheduled interval simply
 runs slower than requested, with no error or warning.
 
-**Not fixed.** A persistent `PhotoImage` updated in place via `.paste()`
-(instead of constructing a new one every frame, the current approach in
-`_display_bgr_on_canvas`) is a plausible next step, but investigating and
-verifying that is real additional work, deliberately deferred rather than
-squeezed into the same pass that ruled out rectification. See
-`ROADMAP.md` Phase 7's playback speed item.
+**Not fixed at the time.** A persistent `PhotoImage` updated in place via
+`.paste()` (instead of constructing a new one every frame, the current
+approach in `_display_bgr_on_canvas`) is a plausible next step, but
+investigating and verifying that is real additional work, deliberately
+deferred rather than squeezed into the same pass that ruled out
+rectification. See `ROADMAP.md` Phase 7's playback speed item.
+
+**Update (post-Qt-migration): fixed, and a second, more severe bug
+found alongside it.** Re-profiling under the Qt port (Phase 11) found
+this specific Tkinter-canvas-paint theory no longer applied - full
+per-tick cost (decode + rectify-if-needed + paint, both panes) measured
+~14ms, comfortably under the 40ms budget. The actual playback-speed
+report ("1x doesn't play at full rate, and 2x plays even slower than
+1x") traced to two different bugs: (1) "1x" was still a hardcoded 40ms
+tick assuming ~25fps, wrong for any other real fps - fixed by deriving
+the tick delay from the loaded video's actual fps
+(`_compute_playback_timing`). (2) `_read_frame_at`'s seek-skip
+optimization only covered the exact-index and exactly-one-frame-ahead
+cases; 2x/4x's small forward skips (+2/+4 frames/tick) fell through to
+a full `cap.set()` seek on *every* tick, profiled at ~54-105ms/frame
+vs. ~3-10ms/frame to decode-and-discard the same gap - explaining why
+faster-than-1x speeds played slower in wall-clock terms despite needing
+fewer ticks. Fixed by decoding-and-discarding small forward gaps
+instead of seeking (`MAX_SEQUENTIAL_SKIP_FRAMES`). Also switched
+`playback_timer` to `Qt.TimerType.PreciseTimer` (Qt's default timer
+type is intentionally imprecise). Verified via real profiling through
+the actual `app.exec()` event loop: 1x/2x/4x now scale correctly
+relative to each other. See `tests/test_main.py`'s
+`test_read_frame_at_skips_seeking_for_small_forward_gaps_only` and
+`test_compute_playback_timing_uses_the_videos_real_fps`.
 
 ## Files reviewed with no bugs found
 

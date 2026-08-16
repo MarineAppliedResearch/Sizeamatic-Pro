@@ -870,6 +870,8 @@ def test_read_frame_at_correct_for_sequential_and_random_access(sizeamatic_app):
         [20, 5, 21, 6, 100, 0],           # pure random access
         [30, 31, 32, 33, 34],             # pure sequential access
         [10, 11, 40, 41, 42],             # backward jump, then resume sequential
+        [50, 52, 54, 56, 58],             # small forward skips (2x playback's step)
+        [70, 74, 78, 82],                 # small forward skips (4x playback's step)
     ]
 
     for indices in access_patterns:
@@ -879,3 +881,115 @@ def test_read_frame_at_correct_for_sequential_and_random_access(sizeamatic_app):
             assert np.array_equal(actual, expected), f"Mismatch at frame {index}"
 
     ground_truth_cap.release()
+
+
+class _SeekSpyCapture:
+    """Thin wrapper around a real `cv2.VideoCapture` that records every
+    `set(CAP_PROP_POS_FRAMES, ...)` call, forwarding everything else
+    unchanged.
+
+    `cv2.VideoCapture` is a C extension type - its methods can't be
+    monkeypatched directly on an instance, so this stands in for it
+    instead; `_read_frame_at` only ever calls `get`/`set`/`read`, all
+    of which this forwards to the real capture.
+    """
+
+    def __init__(self, real_cap):
+        self._real_cap = real_cap
+        self.seek_calls = []
+
+    def get(self, prop):
+        return self._real_cap.get(prop)
+
+    def set(self, prop, value):
+        if prop == cv2.CAP_PROP_POS_FRAMES:
+            self.seek_calls.append(value)
+        return self._real_cap.set(prop, value)
+
+    def read(self):
+        return self._real_cap.read()
+
+
+@pytest.mark.skipif(
+    not os.path.isfile(LEFT_VIDEO),
+    reason="Real example video is gitignored/local-only, not present here.",
+)
+def test_read_frame_at_skips_seeking_for_small_forward_gaps_only(sizeamatic_app):
+    """Regression test: 2x/4x playback used to be *slower* than 1x,
+    because requesting a small forward skip (e.g. +2 or +4 frames, the
+    exact step 2x/4x speed produces every tick) fell through to a full
+    `cap.set()` seek every single tick — neither "same index" nor
+    "exactly one frame ahead" (the two cases the original seek-skip
+    optimization actually covered). Profiling traced the reported "2x
+    goes even slower than 1x" bug to seeking costing ~54-105ms/frame
+    against ~3-10ms/frame to decode-and-discard the same gap.
+
+    Verifies the fix by counting real `cap.set()` calls (via
+    `_SeekSpyCapture`, not just checking the returned frame content —
+    the prior test above already covers correctness): a small forward
+    gap should decode-and-discard (no seek at all), while a gap larger
+    than `MAX_SEQUENTIAL_SKIP_FRAMES` or a backward jump should still
+    seek.
+    """
+
+    app = sizeamatic_app
+    real_cap, app.metaL = app._open_video_capture(LEFT_VIDEO)
+    assert real_cap is not None
+    cap = _SeekSpyCapture(real_cap)
+
+    # Establish a starting position with one real read.
+    app._read_frame_at(cap, 20)
+    cap.seek_calls.clear()
+
+    # A gap of exactly MAX_SEQUENTIAL_SKIP_FRAMES (the inclusive boundary)
+    # should decode-and-discard rather than seek. Computed from the
+    # capture's own reported position, not assumed, so this doesn't
+    # silently drift off-by-one if the read-and-discard path itself
+    # changes how far the position advances.
+    pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+    app._read_frame_at(cap, pos + main.MAX_SEQUENTIAL_SKIP_FRAMES)
+    assert cap.seek_calls == [], "gap exactly at the threshold should not seek"
+
+    # A gap one frame past the threshold should fall back to a real seek.
+    pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+    cap.seek_calls.clear()
+    app._read_frame_at(cap, pos + main.MAX_SEQUENTIAL_SKIP_FRAMES + 1)
+    assert len(cap.seek_calls) == 1, "gap beyond the threshold should seek"
+
+    # A backward jump should always seek, regardless of distance.
+    cap.seek_calls.clear()
+    app._read_frame_at(cap, 5)
+    assert len(cap.seek_calls) == 1, "backward jump should seek"
+
+    real_cap.release()
+
+
+def test_compute_playback_timing_uses_the_videos_real_fps():
+    """Regression test: "1x" playback used to always tick at a fixed
+    40ms, derived from an assumed ~25fps — correct only by coincidence
+    for footage actually shot near 25fps, and visibly wrong (too slow
+    or too fast) at any other real fps.
+
+    `_compute_playback_timing` should derive the tick delay from the
+    video's actual fps instead. 25fps is checked first specifically
+    because it must reproduce the old hardcoded table's exact values —
+    this is a behavior change for every other fps, not for existing
+    25fps footage.
+    """
+    # Matches the old hardcoded SPEED_TABLE exactly at 25fps (the
+    # assumption it used to hardcode for every video regardless of
+    # actual fps).
+    assert main._compute_playback_timing(25.0, "0.25x") == (1, 160)
+    assert main._compute_playback_timing(25.0, "0.5x") == (1, 80)
+    assert main._compute_playback_timing(25.0, "1x") == (1, 40)
+    assert main._compute_playback_timing(25.0, "2x") == (2, 40)
+    assert main._compute_playback_timing(25.0, "4x") == (4, 40)
+
+    # 30fps footage should tick faster than the old hardcoded 40ms.
+    assert main._compute_playback_timing(30.0, "1x") == (1, 33)
+    assert main._compute_playback_timing(30.0, "2x") == (2, 33)
+
+    # A video reporting a nonsensical fps (corrupt metadata) falls back
+    # to DEFAULT_PLAYBACK_FPS rather than dividing by zero.
+    assert main._compute_playback_timing(0.0, "1x") == (1, 40)
+    assert main._compute_playback_timing(-1.0, "1x") == (1, 40)
