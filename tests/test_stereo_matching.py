@@ -152,6 +152,82 @@ def test_reprojection_rms_px_near_zero_for_exact_match(
     assert erms == pytest.approx(0.0, abs=1e-3)
 
 
+def test_ray_residual_mm_near_zero_for_exact_match(
+    make_fake_app, synthetic_cal, known_point_pixels
+):
+    """Two rays built from a known 3D point's exact projected pixels
+    should (numerically) intersect at that point, giving ~0 residual."""
+
+    app = make_fake_app(
+        view_rectified=_TrueVar(),
+        cal=synthetic_cal,
+        ptsL=[(known_point_pixels["xL"], known_point_pixels["yL"])],
+        ptsR=[(known_point_pixels["xR"], known_point_pixels["yR"])],
+    )
+    residual = stereo_matching.stereo_ray_residual_mm(app, 0)
+    assert residual == pytest.approx(0.0, abs=1e-3)
+
+
+def test_ray_residual_mm_matches_hand_computed_value_for_y_mismatch(synthetic_cal, known_point_pixels):
+    """A deliberate vertical click mismatch between the left/right pixels
+    should produce a nonzero residual matching an independently
+    hand-derived closest-distance-between-rays calculation - not just
+    "greater than zero", to confirm the actual math, not just its sign.
+
+    Independent derivation (deliberately not reusing
+    `stereo_matching.camera_center_and_ray_direction`/`ray_residual_mm`):
+    the synthetic rig is rectified with identity rotation, so each
+    camera's ray direction in world coordinates is simply
+    `((x - cx) / fx, (y - cy) / fy, 1)`, and each camera's center is
+    exactly its known world position (left at the origin, right at
+    `(+baseline, 0, 0)` - see conftest.py's `synthetic_cal`).
+    """
+
+    fx, fy, cx, cy = 800.0, 800.0, 320.0, 240.0
+    baseline = 100.0
+
+    xL, yL = known_point_pixels["xL"], known_point_pixels["yL"]
+    xR = known_point_pixels["xR"]
+    yR = yL + 6.0  # Deliberate 6px vertical click mismatch.
+
+    center_l = np.array([0.0, 0.0, 0.0])
+    dir_l = np.array([(xL - cx) / fx, (yL - cy) / fy, 1.0])
+    dir_l /= np.linalg.norm(dir_l)
+
+    center_r = np.array([baseline, 0.0, 0.0])
+    dir_r = np.array([(xR - cx) / fx, (yR - cy) / fy, 1.0])
+    dir_r /= np.linalg.norm(dir_r)
+
+    cross = np.cross(dir_l, dir_r)
+    expected = abs(np.dot(center_r - center_l, cross)) / np.linalg.norm(cross)
+
+    result = stereo_matching.ray_residual_mm(synthetic_cal["PL"], synthetic_cal["PR"], xL, yL, xR, yR)
+
+    assert result is not None
+    assert result == pytest.approx(expected, rel=1e-6)
+    assert result > 0.5  # Sanity check: a real 6px mismatch is not near-zero.
+
+
+def test_ray_residual_mm_requires_rectified_view(make_fake_app, synthetic_cal):
+    """Ray residuals are only meaningful in rectified pixel space, same
+    gating as `triangulate_point_pair`/`reprojection_rms_px`."""
+    app = make_fake_app(view_rectified=_FalseVar(), cal=synthetic_cal, ptsL=[(0, 0)], ptsR=[(0, 0)])
+    assert stereo_matching.stereo_ray_residual_mm(app, 0) is None
+
+
+def test_ray_residual_mm_requires_calibration(make_fake_app):
+    """No calibration loaded should return None rather than crash."""
+    app = make_fake_app(view_rectified=_TrueVar(), cal=None, ptsL=[(0, 0)], ptsR=[(0, 0)])
+    assert stereo_matching.stereo_ray_residual_mm(app, 0) is None
+
+
+def test_ray_residual_mm_requires_pl_pr(make_fake_app):
+    """A calibration dict missing PL/PR should return None rather than
+    raising a KeyError."""
+    app = make_fake_app(view_rectified=_TrueVar(), cal={}, ptsL=[(0, 0)], ptsR=[(0, 0)])
+    assert stereo_matching.stereo_ray_residual_mm(app, 0) is None
+
+
 def test_estimate_point_sigma_mm_returns_positive_finite_values(
     make_fake_app, synthetic_cal, known_point_pixels
 ):

@@ -73,7 +73,12 @@ Each is independently unit-testable without constructing a real Qt
 instance for anything that does need an actual widget/dialog (see
 `tests/test_regressions.py`, `tests/test_video_overlay.py`).
 
-`stereo_matching.py` (stereo point matching and triangulation math),
+`stereo_matching.py` (stereo point matching and triangulation math —
+including two distinct point-quality diagnostics: `reprojection_rms_px`,
+a pixel-space check on the Y-averaged triangulated point, and (ROADMAP.md
+Phase 12) `stereo_ray_residual_mm`, an object-space check on the two
+original un-averaged left/right viewing rays — see the latter's
+docstring for why these are deliberately not the same quantity),
 `calibration_io.py` (calibration NPZ loading/validation, pulled out of
 `main.py`'s `on_load_calibration_folder`), and the Phase 7 addition
 `project_io.py` (saves/loads a small JSON manifest of video paths,
