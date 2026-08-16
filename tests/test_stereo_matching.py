@@ -262,6 +262,86 @@ def test_estimate_point_sigma_mm_grows_with_click_uncertainty(
     assert large_sigma > small_sigma
 
 
+def test_estimate_point_sigma_mm_jacobian_matches_manual_propagation(
+    make_fake_app, synthetic_cal, known_point_pixels
+):
+    """The Jacobian estimate should match manually combining the same
+    perturbed triangulations via the documented propagated-variance
+    formula (sigma^2 = sum((g_plus - g_minus) / 2) ** 2) - confirms the
+    actual arithmetic, not just its sign or growth direction.
+
+    Deliberately reimplements the coordinate-pair loop here rather than
+    calling `stereo_matching.estimate_point_sigma_mm_jacobian` for the
+    "expected" side of the comparison, so a mistake in that function's
+    own loop wouldn't also be baked into this test's expectation."""
+
+    xL, yL = known_point_pixels["xL"], known_point_pixels["yL"]
+    xR, yR = known_point_pixels["xR"], known_point_pixels["yR"]
+    sigma_px = 1.0
+
+    app = make_fake_app(cal=synthetic_cal, ptsL=[(xL, yL)], ptsR=[(xR, yR)])
+
+    coord_pairs = [
+        ((xL + sigma_px, yL, xR, yR), (xL - sigma_px, yL, xR, yR)),
+        ((xL, yL + sigma_px, xR, yR), (xL, yL - sigma_px, xR, yR)),
+        ((xL, yL, xR + sigma_px, yR), (xL, yL, xR - sigma_px, yR)),
+        ((xL, yL, xR, yR + sigma_px), (xL, yL, xR, yR - sigma_px)),
+    ]
+
+    z_half_deltas = []
+    r_half_deltas = []
+    for plus_px, minus_px in coord_pairs:
+        Xp, Yp, Zp = stereo_matching.triangulate_from_pixels(app, *plus_px)
+        Xm, Ym, Zm = stereo_matching.triangulate_from_pixels(app, *minus_px)
+        Rp = (Xp * Xp + Yp * Yp + Zp * Zp) ** 0.5
+        Rm = (Xm * Xm + Ym * Ym + Zm * Zm) ** 0.5
+        z_half_deltas.append((Zp - Zm) / 2.0)
+        r_half_deltas.append((Rp - Rm) / 2.0)
+
+    expected_sigma_Z = sum(d * d for d in z_half_deltas) ** 0.5
+    expected_sigma_R = sum(d * d for d in r_half_deltas) ** 0.5
+
+    result = stereo_matching.estimate_point_sigma_mm_jacobian(app, 0, sigma_px)
+    assert result is not None
+    sigma_Z, sigma_R = result
+    assert sigma_Z == pytest.approx(expected_sigma_Z, rel=1e-9)
+    assert sigma_R == pytest.approx(expected_sigma_R, rel=1e-9)
+
+
+def test_estimate_point_sigma_mm_jacobian_returns_positive_finite_values(
+    make_fake_app, synthetic_cal, known_point_pixels
+):
+    """A well-conditioned point pair should produce a positive, finite
+    depth/range uncertainty estimate rather than None, NaN, or infinity."""
+    app = make_fake_app(
+        cal=synthetic_cal,
+        ptsL=[(known_point_pixels["xL"], known_point_pixels["yL"])],
+        ptsR=[(known_point_pixels["xR"], known_point_pixels["yR"])],
+    )
+    result = stereo_matching.estimate_point_sigma_mm_jacobian(app, 0, sigma_px=1.0)
+    assert result is not None
+    sZ, sR = result
+    assert sZ > 0 and math.isfinite(sZ)
+    assert sR > 0 and math.isfinite(sR)
+
+
+def test_estimate_point_sigma_mm_jacobian_grows_with_click_uncertainty(
+    make_fake_app, synthetic_cal, known_point_pixels
+):
+    """A larger assumed click uncertainty should produce a larger (or
+    equal) depth sigma estimate — sanity check on the direction of the
+    relationship, not an exact value."""
+
+    app = make_fake_app(
+        cal=synthetic_cal,
+        ptsL=[(known_point_pixels["xL"], known_point_pixels["yL"])],
+        ptsR=[(known_point_pixels["xR"], known_point_pixels["yR"])],
+    )
+    small_sigma, _ = stereo_matching.estimate_point_sigma_mm_jacobian(app, 0, sigma_px=0.5)
+    large_sigma, _ = stereo_matching.estimate_point_sigma_mm_jacobian(app, 0, sigma_px=5.0)
+    assert large_sigma > small_sigma
+
+
 def test_estimate_segment_sigma_len_mm_matches_known_baseline_length(
     make_fake_app, synthetic_cal
 ):
@@ -284,6 +364,35 @@ def test_estimate_segment_sigma_len_mm_matches_known_baseline_length(
     )
 
     result = stereo_matching.estimate_segment_sigma_len_mm(app, 0, 1, sigma_px=1.0)
+    assert result is not None
+    length, sigma_length = result
+    assert length == pytest.approx(expected_length, abs=1e-2)
+    assert sigma_length > 0
+
+
+def test_estimate_segment_sigma_len_mm_jacobian_matches_known_baseline_length(
+    make_fake_app, synthetic_cal
+):
+    """Two known 3D points a known distance apart should triangulate to
+    (approximately) that same segment length, same baseline-length check
+    as the sample-standard-deviation version above."""
+
+    X0, Y0, Z0 = 0.0, 0.0, 2000.0
+    X1, Y1, Z1 = 100.0, 0.0, 2000.0
+    expected_length = 100.0
+
+    xL0, yL0 = _project(synthetic_cal["PL"], X0, Y0, Z0)
+    xR0, yR0 = _project(synthetic_cal["PR"], X0, Y0, Z0)
+    xL1, yL1 = _project(synthetic_cal["PL"], X1, Y1, Z1)
+    xR1, yR1 = _project(synthetic_cal["PR"], X1, Y1, Z1)
+
+    app = make_fake_app(
+        cal=synthetic_cal,
+        ptsL=[(xL0, yL0), (xL1, yL1)],
+        ptsR=[(xR0, yR0), (xR1, yR1)],
+    )
+
+    result = stereo_matching.estimate_segment_sigma_len_mm_jacobian(app, 0, 1, sigma_px=1.0)
     assert result is not None
     length, sigma_length = result
     assert length == pytest.approx(expected_length, abs=1e-2)

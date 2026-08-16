@@ -39,7 +39,7 @@ def test_save_project_writes_current_app_state(sizeamatic_app, monkeypatch, tmp_
     app.ptsL = [(1.0, 2.0)]
     app.ptsR = [(3.0, 4.0)]
 
-    fake_row = ("left.mp4", "7", "00:00:00.233", "", "", "Point", "0", "1.0", "2.0", "3.0", "4.0", "5.0", "6.0", "7.0", "7.5", "8.0", "9.0")
+    fake_row = ("left.mp4", "7", "00:00:00.233", "", "", "Point", "0", "1.0", "2.0", "3.0", "4.0", "5.0", "6.0", "7.0", "7.5", "8.0", "9.0", "8.1", "9.1")
     app.measurement_window.update_window([fake_row], None)
     app.measurement_window.record_current_measurement()
 
@@ -400,7 +400,7 @@ def test_open_project_restores_last_recorded_frame_points_and_log(
         "ptsR": [[95.0, 50.0]],
     }
     header_line = "\t".join(measurement_window.RESULT_HEADERS[c] for c in measurement_window.RESULT_COLUMNS)
-    recorded_row = ("left.mp4", "40", "00:00:01.333", "2026-08-12 14:32:05.000", "1", "Point", "0", "100.0", "50.0", "0.0", "0.0", "5.0", "0.0", "0.5", "0.3", "1.0", "2.0")
+    recorded_row = ("left.mp4", "40", "00:00:01.333", "2026-08-12 14:32:05.000", "1", "Point", "0", "100.0", "50.0", "0.0", "0.0", "5.0", "0.0", "0.5", "0.3", "1.0", "2.0", "1.1", "2.1")
     log_text = header_line + "\n" + "\t".join(recorded_row)
 
     err = project_io.save_project(

@@ -11,8 +11,10 @@ Contents:
     - Projection of reconstructed 3D points back into image coordinates.
     - Reprojection RMS error calculations.
     - Object-space stereo ray residual calculations.
-    - Point depth and range uncertainty estimates.
-    - Segment length and segment uncertainty estimates.
+    - Point depth and range uncertainty estimates (sample-standard-
+      deviation and Jacobian/covariance-propagation variants).
+    - Segment length and segment uncertainty estimates (sample-standard-
+      deviation and Jacobian/covariance-propagation variants).
 
 Design notes:
     Some functions receive the main application object (`app`) so they can
@@ -728,6 +730,202 @@ def estimate_point_sigma_mm(app, index, sigma_px):
 
     # Return the local sensitivity estimates in calibration units.
     return (sZ, sR)
+
+
+def estimate_point_sigma_mm_jacobian(app, index, sigma_px):
+    """Estimate depth/range uncertainty via numerical Jacobian propagation.
+
+    This is a more statistically formal alternative to
+    `estimate_point_sigma_mm` (ROADMAP.md Phase 13), reusing the exact
+    same eight perturbed pixel coordinates from `endpoint_perturbs`
+    rather than a separate calculation. Where `estimate_point_sigma_mm`
+    takes the sample standard deviation of all eight perturbed results
+    together, this instead treats each coordinate's +/- pair as one
+    central-difference partial derivative, then combines the four
+    partial derivatives as an explicit propagated variance assuming
+    independent, identically distributed image-coordinate noise:
+
+        sigma_g^2 = sum_i (dg/dq_i)^2 * sigma_px^2
+
+    `endpoint_perturbs` always perturbs by exactly +/-sigma_px, so the
+    central-difference partial derivative for coordinate q_i is
+    `(g(q_i + sigma_px) - g(q_i - sigma_px)) / (2 * sigma_px)`. Squaring
+    that and multiplying by `sigma_px^2` cancels the `(2 * sigma_px)^2`
+    denominator down to a simple `((g_plus - g_minus) / 2) ** 2` term per
+    coordinate - so this reuses `endpoint_perturbs`'s existing
+    perturbations, just combined arithmetically differently than the
+    sample-standard-deviation version above.
+
+    Args:
+        app: The main application object, used to read clicked point
+            lists and calibration data.
+        index (int): Index of the matched point pair to test.
+        sigma_px (float): Assumed click uncertainty, in image pixels.
+
+    Returns:
+        tuple[float, float] | None: `(sigma_Z, sigma_range)` in
+        calibration units (normally millimeters), or None if the
+        uncertainty estimate cannot be computed safely (baseline
+        triangulation fails, or fewer than 2 of the 4 coordinate pairs
+        triangulate successfully on both sides).
+    """
+
+    # Read the matched left and right clicked points in image pixel coordinates.
+    xL, yL = app.ptsL[index]
+    xR, yR = app.ptsR[index]
+
+    # Make sure the unmodified point pair can be triangulated before estimating
+    # how nearby click perturbations affect the result.
+    P0 = triangulate_from_pixels(app, xL, yL, xR, yR)
+    if P0 is None:
+        return None
+
+    # endpoint_perturbs returns eight perturbations as four consecutive
+    # (+sigma_px, -sigma_px) pairs, one pair per image coordinate
+    # (xL, yL, xR, yR in that order).
+    perturbs = endpoint_perturbs(app, index, sigma_px)
+
+    # Store each coordinate's central-difference half-delta for Z and
+    # range, so their propagated variance can be summed below.
+    z_half_deltas = []
+    r_half_deltas = []
+
+    for k in range(0, len(perturbs), 2):
+        plus_px = perturbs[k]
+        minus_px = perturbs[k + 1]
+
+        Pp = triangulate_from_pixels(app, *plus_px)
+        Pm = triangulate_from_pixels(app, *minus_px)
+
+        # Skip a coordinate pair where either side failed to triangulate,
+        # rather than failing the whole estimate immediately.
+        if Pp is None or Pm is None:
+            continue
+
+        Xp, Yp, Zp = Pp
+        Xm, Ym, Zm = Pm
+        Rp = (Xp * Xp + Yp * Yp + Zp * Zp) ** 0.5
+        Rm = (Xm * Xm + Ym * Ym + Zm * Zm) ** 0.5
+
+        z_half_deltas.append((Zp - Zm) / 2.0)
+        r_half_deltas.append((Rp - Rm) / 2.0)
+
+    # Require at least half the coordinate pairs to have triangulated
+    # successfully on both sides for a minimally meaningful propagation.
+    if len(z_half_deltas) < 2:
+        return None
+
+    sigma_Z = float(np.sqrt(sum(d * d for d in z_half_deltas)))
+    sigma_R = float(np.sqrt(sum(d * d for d in r_half_deltas)))
+
+    return (sigma_Z, sigma_R)
+
+
+def estimate_segment_sigma_len_mm_jacobian(app, i0, i1, sigma_px):
+    """Estimate segment length uncertainty via numerical Jacobian propagation.
+
+    Jacobian/covariance-propagation counterpart to
+    `estimate_segment_sigma_len_mm` (ROADMAP.md Phase 13) - see that
+    function's docstring for the perturbation setup, and
+    `estimate_point_sigma_mm_jacobian`'s docstring for why reusing
+    `endpoint_perturbs`'s existing +/-sigma_px pairs reduces the
+    propagated-variance formula down to a simple sum of squared
+    half-deltas. The two endpoints' eight coordinates (four from each of
+    `i0`/`i1`) are treated as independent, so their propagated variances
+    just add.
+
+    Args:
+        app: The main application object, used to read clicked point
+            lists and calibration data.
+        i0 (int): Index of the first endpoint.
+        i1 (int): Index of the second endpoint.
+        sigma_px (float): Assumed click uncertainty, in image pixels.
+
+    Returns:
+        tuple[float, float] | None: `(length, sigma_length)` in
+        calibration units (normally millimeters), or None if the segment
+        uncertainty cannot be computed safely (invalid indexes, baseline
+        triangulation fails, or fewer than 4 of the 8 coordinate pairs
+        triangulate successfully on both sides).
+    """
+
+    # Reject invalid negative endpoint indexes before reading point lists.
+    if i0 < 0 or i1 < 0:
+        return None
+
+    # Require both endpoint indexes to exist in the left clicked point list.
+    if i0 >= len(app.ptsL) or i1 >= len(app.ptsL):
+        return None
+
+    # Require both endpoint indexes to exist in the right clicked point list.
+    if i0 >= len(app.ptsR) or i1 >= len(app.ptsR):
+        return None
+
+    # Triangulate both endpoints from their matched left/right clicked pixels.
+    P0 = triangulate_from_pixels(app, *app.ptsL[i0], *app.ptsR[i0])
+    P1 = triangulate_from_pixels(app, *app.ptsL[i1], *app.ptsR[i1])
+
+    # If either endpoint cannot be triangulated, the segment length is invalid.
+    if P0 is None or P1 is None:
+        return None
+
+    X0, Y0, Z0 = P0
+    X1, Y1, Z1 = P1
+
+    # Compute the baseline 3D segment length.
+    dX = X1 - X0
+    dY = Y1 - Y0
+    dZ = Z1 - Z0
+    L0 = (dX * dX + dY * dY + dZ * dZ) ** 0.5
+
+    # Store each coordinate's central-difference half-delta in segment
+    # length, across both endpoints' perturbations, so their propagated
+    # variance can be summed below.
+    half_deltas = []
+
+    # Perturb endpoint i0's four coordinates, keeping endpoint i1 fixed at
+    # its baseline 3D point.
+    perturbs0 = endpoint_perturbs(app, i0, sigma_px)
+    for k in range(0, len(perturbs0), 2):
+        P0p = triangulate_from_pixels(app, *perturbs0[k])
+        P0m = triangulate_from_pixels(app, *perturbs0[k + 1])
+        if P0p is None or P0m is None:
+            continue
+
+        X0p, Y0p, Z0p = P0p
+        Lp = ((X1 - X0p) ** 2 + (Y1 - Y0p) ** 2 + (Z1 - Z0p) ** 2) ** 0.5
+
+        X0m, Y0m, Z0m = P0m
+        Lm = ((X1 - X0m) ** 2 + (Y1 - Y0m) ** 2 + (Z1 - Z0m) ** 2) ** 0.5
+
+        half_deltas.append((Lp - Lm) / 2.0)
+
+    # Perturb endpoint i1's four coordinates, keeping endpoint i0 fixed at
+    # its baseline 3D point.
+    perturbs1 = endpoint_perturbs(app, i1, sigma_px)
+    for k in range(0, len(perturbs1), 2):
+        P1p = triangulate_from_pixels(app, *perturbs1[k])
+        P1m = triangulate_from_pixels(app, *perturbs1[k + 1])
+        if P1p is None or P1m is None:
+            continue
+
+        X1p, Y1p, Z1p = P1p
+        Lp = ((X1p - X0) ** 2 + (Y1p - Y0) ** 2 + (Z1p - Z0) ** 2) ** 0.5
+
+        X1m, Y1m, Z1m = P1m
+        Lm = ((X1m - X0) ** 2 + (Y1m - Y0) ** 2 + (Z1m - Z0) ** 2) ** 0.5
+
+        half_deltas.append((Lp - Lm) / 2.0)
+
+    # Require at least half of the eight coordinate pairs to have
+    # triangulated successfully on both sides for a minimally meaningful
+    # propagation.
+    if len(half_deltas) < 4:
+        return None
+
+    sigma_L = float(np.sqrt(sum(d * d for d in half_deltas)))
+
+    return (L0, sigma_L)
 
 
 def estimate_segment_sigma_len_mm(app, i0, i1, sigma_px):

@@ -12,8 +12,8 @@ import measurement_window
 
 # measurement_id (index 4) is always blank coming out of update_window - only
 # record_current_measurement ever stamps a real value in.
-ROW_A = ("left.mp4", "10", "00:00:00.417", "2026-08-12 14:32:05.417", "", "Point", "0", "1.0", "2.0", "3.0", "4.0", "5.00", "6.00", "7.00", "7.50", "8.0", "9.0")
-ROW_B = ("left.mp4", "10", "00:00:00.417", "2026-08-12 14:32:05.417", "", "Segment", "0-1", "1.0", "2.0", "3.0", "4.0", "", "", "", "", "8.0", "")
+ROW_A = ("left.mp4", "10", "00:00:00.417", "2026-08-12 14:32:05.417", "", "Point", "0", "1.0", "2.0", "3.0", "4.0", "5.00", "6.00", "7.00", "7.50", "8.0", "9.0", "8.1", "9.1")
+ROW_B = ("left.mp4", "10", "00:00:00.417", "2026-08-12 14:32:05.417", "", "Segment", "0-1", "1.0", "2.0", "3.0", "4.0", "", "", "", "", "8.0", "", "8.1", "")
 
 ID_INDEX = measurement_window.RESULT_COLUMNS.index("measurement_id")
 

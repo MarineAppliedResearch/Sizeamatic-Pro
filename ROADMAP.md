@@ -771,29 +771,47 @@ Purely additive — doesn't change triangulation or any existing output.
 - [x] Update `ARCHITECTURE.md`
 - [x] Manual proof test with project owner — confirmed working
 
-## Phase 13 — Jacobian/covariance uncertainty propagation `[ ]`
+## Phase 13 — Jacobian/covariance uncertainty propagation `[x]`
 
-Replace the current 8-perturbation sample-standard-deviation uncertainty
-estimate with a proper finite-difference Jacobian / propagated-variance
-estimate, reusing the same clicked-point perturbations already computed —
-putting `SigmaZ`/`SigmaRange`/segment `sigma_L` on formal statistical
-footing instead of a sensitivity indicator. Also motivated by the
-EventMeasure/CAL comparison: SeaGIS derives precision via analytical
-variance propagation, and while Sizeamatic's numerical approach can retain
-its advantage of using the *complete* calibrated stereo geometry rather than
-a simplified analytical model, it should compute a real propagated variance
-rather than just the spread of ad hoc perturbations.
+Add a statistically more formal alternative to the current 8-perturbation
+sample-standard-deviation uncertainty estimate: a finite-difference
+Jacobian / propagated-variance estimate, reusing the same clicked-point
+perturbations already computed — putting `SigmaZ`/`SigmaRange`/segment
+`sigma_L` on formal statistical footing instead of a sensitivity indicator.
+Also motivated by the EventMeasure/CAL comparison: SeaGIS derives precision
+via analytical variance propagation, and while Sizeamatic's numerical
+approach can retain its advantage of using the *complete* calibrated
+stereo geometry rather than a simplified analytical model, it should
+compute a real propagated variance rather than just the spread of ad hoc
+perturbations.
 
-- [ ] **Decision needed up front:** this changes the numeric values shown
+- [x] **Decision needed up front:** this changes the numeric values shown
       for every existing measurement (including ones already recorded in
       saved project files/exported logs) — confirm with project owner
       whether that's acceptable as a straight replacement, or whether
-      old/new should be shown side-by-side for a transition period
-- [ ] Implement Jacobian-based sigma calculation reusing `endpoint_perturbs`
-- [ ] Update `estimate_point_sigma_mm`/`estimate_segment_sigma_len_mm`
-- [ ] Update existing tests that currently assert against the `ddof=1`
-      std-based values
-- [ ] Manual proof test comparing old vs. new numbers on a real measurement
+      old/new should be shown side-by-side for a transition period —
+      **decided: side-by-side.** The old sample-standard-deviation
+      estimators stay as-is; new Jacobian estimators are added alongside
+      rather than replacing them, so nothing about an existing saved
+      measurement's numbers changes.
+- [x] Implement Jacobian-based sigma calculation reusing `endpoint_perturbs`
+      — `stereo_matching.py`'s `estimate_point_sigma_mm_jacobian`/
+      `estimate_segment_sigma_len_mm_jacobian`. Reuses `endpoint_perturbs`'s
+      existing four `(+sigma_px, -sigma_px)` coordinate pairs as central-
+      difference partial derivatives, combined as an explicit propagated
+      variance (`sigma_g^2 = sum_i ((g_plus_i - g_minus_i) / 2) ** 2`)
+      rather than the old sample standard deviation of all perturbations
+      together.
+- [x] ~~Update `estimate_point_sigma_mm`/`estimate_segment_sigma_len_mm`~~ —
+      superseded by the side-by-side decision above: left unchanged, new
+      `_jacobian`-suffixed functions added instead.
+- [x] Add new tests for the Jacobian estimators (9 new tests in
+      `tests/test_stereo_matching.py`, including one that independently
+      re-derives the propagated-variance formula rather than just
+      checking sign/growth), and update existing row-shape tests/fixtures
+      for the two new `sigma1_jac`/`sigma2_jac` columns
+- [x] Manual proof test comparing old vs. new numbers on a real measurement
+      — confirmed working
 
 ## Phase 14 — Investigate 3D bundle-adjustment calibration (research spike) `[ ]`
 
@@ -834,3 +852,15 @@ per view, so it can't just be handed 3-D object points as-is.
 
 Interface with the overall MARE API to record measurement data, etc. Noted
 here so it isn't forgotten, but not to be planned in detail until we reach it.
+
+## Phase 16 — Update the measurement white paper (future, not yet scoped) `[ ]`
+
+Update `docs/Sizeamatic_Pro_Stereo_Length_Measurement_Method.docx (1).pdf`
+(the scientific write-up of Sizeamatic Pro's stereo length measurement
+method) to document the new calculations added in Phases 12-14 — the
+object-space `StereoRayResidual(mm)` metric, the Jacobian/covariance
+uncertainty propagation, and whatever comes out of the 3D
+bundle-adjustment calibration investigation. Noted here so it isn't
+forgotten, but not to be planned in detail (including how a `.docx`/PDF
+source gets edited, given the rest of this project's tooling is
+plain-text/git-based) until we reach it.
