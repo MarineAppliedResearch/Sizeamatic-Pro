@@ -68,6 +68,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStatusBar,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -124,7 +125,7 @@ def get_app_version():
         return "unknown"
 
 
-STARTUP_SPLASH_MIN_SECONDS = 4.0
+STARTUP_SPLASH_MIN_SECONDS = 2.0
 """Minimum time the startup splash (`_show_startup_splash`) stays on
 screen, even if building the app finishes faster than that - so it's
 actually readable rather than a barely-visible flash on a fast machine
@@ -261,11 +262,15 @@ QMenu::item { padding: 8px 28px 8px 16px; border-radius: 4px; }
 QMenu::item:selected { background-color: #2f6fed; }
 QMenu::separator { height: 1px; background: #263351; margin: 6px 10px; }
 QToolBar { background-color: #121a2b; border: none; spacing: 10px; padding: 8px; }
+QToolButton#qt_toolbar_ext_button { background-color: #1a2438; border: 1px solid #263351; border-radius: 5px; }
+QToolButton#qt_toolbar_ext_button:hover { background-color: #22304d; }
 QPushButton { background-color: #1a2438; color: #e8eefc; border: 1px solid #263351; border-radius: 5px; padding: 8px 16px; }
 QPushButton:hover { background-color: #22304d; }
 QPushButton:checked { background-color: #2f6fed; }
 QComboBox, QCheckBox, QSpinBox, QLineEdit { color: #e8eefc; background-color: transparent; }
-QComboBox, QSpinBox, QLineEdit { border: 1px solid #263351; border-radius: 5px; padding: 6px 10px; }
+QComboBox, QSpinBox, QLineEdit { border: 1px solid #263351; border-radius: 5px; }
+QComboBox, QSpinBox { padding: 6px 10px; }
+QLineEdit { padding: 4px 6px; }
 QCheckBox { padding: 4px 8px; spacing: 8px; }
 QCheckBox::indicator { width: 16px; height: 16px; }
 QSlider::groove:horizontal { background: #1a2438; height: 4px; border-radius: 2px; margin: 0 4px; }
@@ -501,6 +506,35 @@ class SizeamaticProApp(QMainWindow):
 
         super().closeEvent(event)
 
+    def resizeEvent(self, event):
+        """Give the toolbar's overflow button an icon once it exists.
+
+        When the window gets too narrow for the toolbar's full content,
+        Qt creates a "..." overflow button on demand (internally named
+        "qt_toolbar_ext_button") that opens a menu of whatever no longer
+        fits - QSS styles its background/border/hover fine (see
+        DARK_QSS), but Qt gives it its own plain black "..." icon
+        *before* this ever runs, so a guard like "only set an icon if
+        it doesn't have one yet" never actually fires - that icon is
+        never null to begin with. Set unconditionally instead so this
+        app's `qtawesome` icon set always wins. `findChild` is cheap
+        and safe to call on every resize - the button doesn't exist at
+        all until the window is actually narrow enough to need one.
+
+        Args:
+            event (QResizeEvent): The resize event.
+
+        Returns:
+            None
+        """
+        super().resizeEvent(event)
+
+        ext_button = self.findChild(QToolButton, "qt_toolbar_ext_button")
+        if ext_button is not None:
+            ext_button.setIcon(qta.icon("fa5s.chevron-down", color=ICON_COLOR))
+            ext_button.setText("")
+            ext_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+
     # -------------------------------------------------------------------------
     # Menu bar
     # -------------------------------------------------------------------------
@@ -658,6 +692,14 @@ class SizeamaticProApp(QMainWindow):
         # "YYYY-MM-DD" out into visibly gapped characters instead of one
         # tight date/time group.
         box_group = QWidget()
+        # A plain QWidget otherwise inherits the app-wide QMainWindow/
+        # QWidget rule's background (#0a0f1a, the darker main-window
+        # color, not the toolbar's #121a2b) - since this one sits on top
+        # of the toolbar rather than the main window, that mismatch showed
+        # through as a visibly wrong-colored box behind the entries inside
+        # it (which are themselves transparent, so they show whatever's
+        # behind *them*: this container, not the toolbar).
+        box_group.setStyleSheet("background-color: transparent;")
         box_layout = QHBoxLayout(box_group)
         box_layout.setContentsMargins(0, 0, 0, 0)
         box_layout.setSpacing(2)
@@ -666,11 +708,11 @@ class SizeamaticProApp(QMainWindow):
             entry = QLineEdit()
             entry.setPlaceholderText(placeholder)
             # Wide enough for the placeholder text plus this QLineEdit's
-            # QSS padding/border (~22px of non-text chrome) with a little
+            # QSS padding/border (~14px of non-text chrome) with a little
             # slack - too tight and Qt silently elides the placeholder to
             # "..." for wider letter combinations (e.g. "MM"/"DD"/"HH")
             # while narrower ones (e.g. "SS") happen to still fit.
-            entry.setFixedWidth(85 if max_len == 4 else 62)
+            entry.setFixedWidth(70 if max_len == 4 else 48)
             entry.setMaxLength(max_len)
             setattr(self, attr_name, entry)
             self.real_time_entries.append(entry)
