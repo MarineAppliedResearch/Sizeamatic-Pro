@@ -14,6 +14,14 @@ explicitly out of scope until a later phase.
   owner wants to review each commit before it happens.
 - Once a commit has been confirmed and made, push it without asking again
   separately.
+- **Never** add a `Co-Authored-By: Claude` (or any other AI co-author)
+  trailer to a commit message — no exceptions, ever, for any commit in
+  this repo.
+- Commit with `git commit -a -s -m "..."` — `-a` stages already-tracked
+  modifications (never use this as a substitute for reviewing untracked
+  files before adding them), `-s` adds the project owner's own
+  `Signed-off-by` trailer (distinct from, and not a substitute for,
+  avoiding the `Co-Authored-By: Claude` trailer above).
 - Don't add ruff/mypy/black or similar lint/format tooling unless explicitly
   asked — see the "Tooling" section in `AGENTS.md` for why.
 - Don't start Phase 4 (testing system) or Phase 5 (restructure) work from
