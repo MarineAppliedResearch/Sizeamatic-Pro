@@ -940,7 +940,143 @@ here proposes removing or changing today's default calibration path.
       `misc/bundle_adjustment_prototype.py` is a new, standalone,
       synthetic-data-only file with no import/call path from the app.
 
-## Phase 15 — 3D bundle-adjustment calibration (build) `[ ]`
+## Phase 15 — Tutorial mode `[ ]`
+
+Guided, in-app, game-style tutorial: a tutorial window with a step
+checklist, each step showing a description (plus an expandable "more
+info" section), with in-app visual guidance (arrows/highlighted or
+"waiting for click" glowing controls) pointing at the real UI element to
+interact with next. Covers the full operational workflow a video
+processor needs before they can start working — loading left/right
+video, loading a calibration, toggling rectified view, syncing/locking
+the two timelines, placing/recording measurements, saving/loading
+projects, and what the Measurement window's columns and row types
+(`Point`/`Segment`/`Total`) and quality/error metrics (`ReprojRMS(px)`,
+`RayResidual(mm)`, `sigma1`/`sigma2`, `sigma1_jac`/`sigma2_jac`) actually
+mean. **This is the next phase to be worked on** (confirmed with the
+project owner ahead of Phases 16-18, which are either hardware-blocked
+or explicitly unscoped).
+
+**Explicitly built to extend later:** this phase covers only the
+*operational workflow* tutorial. A future phase will add a *calculations*
+tutorial track (explaining the measurement math/uncertainty itself, not
+just how to click through the app) — this phase's architecture must
+support more than one track without a rewrite, even though only the
+operational track ships now.
+
+**Step 0 — Mandatory clarifying-question session with the project owner.**
+The project owner explicitly wants to be interrogated extensively before
+any design or implementation work starts, not have decisions assumed on
+their behalf — treat this as a hard gate, not a formality, the same way
+Phase 5/9/10 got dedicated planning rounds before execution. At minimum,
+resolve:
+
+- **Checklist scope.** Confirm/adjust the exact v1 step list. Candidate,
+  drawn from what already exists in the app: load left video → load
+  right video → load calibration → toggle rectified view → the
+  RECTIFIED/NOT RECTIFIED indicator → Lock/resync the two timelines →
+  pan/zoom a pane → place a measurement point pair → Disp/dY/ReprojRMS/
+  RayResidual → place a second point to form a Segment → the Total row
+  and chain-sigma → Record vs. just viewing "current measurement" →
+  editing/deleting a bad recorded row in the Log → Save Project → Open
+  Project → Recent Projects → the real-time sync anchor → the
+  copy-to-clipboard block. What's explicitly out of scope for v1 (e.g.
+  Perform Calibration's *creation* flow, anaglyph preview, playback
+  speed controls)? Strictly linear (step N unlocks step N+1), or freely
+  navigable?
+- **The "glowing button" mechanism.** What should highlighting actually
+  look like, mechanically, in Qt (an overlay border on the real widget, a
+  pulsing animation, an arrow, some combination)? Does advancing to the
+  next step require detecting the real action actually happening (hooking
+  into the real handler - e.g. `on_save_project`, `record_current_
+  measurement`, `on_toggle_view_rectified`), or is a manual "I did this,
+  Next" button acceptable for steps that are hard to detect
+  programmatically? This needs an explicit decision, not an assumption -
+  the two approaches have very different implementation cost.
+- **The tutorial "project."** The project owner's own framing: "a
+  tutorial mode, maybe even a tutorial project, that the user can load."
+  Confirm which of: (a) a small bundled sample stereo video pair +
+  calibration folder shipped with the app (raises size/licensing
+  questions - real footage is currently gitignored under `examples/`,
+  and Phase 9's PyInstaller onefile build already has size/startup
+  tradeoffs to weigh against), (b) synthetic/generated video+calibration
+  produced at tutorial-start time, or (c) no real video needed at all -
+  the tutorial mocks/simulates enough app state to demonstrate each step
+  without real footage.
+- **Window placement.** Docked panel, floating non-modal window (like
+  `MeasurementWindow`/`CalibrationSummaryWindow`), or a full overlay on
+  top of the main window? Reachable any time via a menu (e.g. "Help >
+  Tutorial"), first-launch-only, or both? Does tutorial progress persist
+  across app restarts / get saved in the project file, or does it always
+  start fresh?
+- **Content architecture.** Confirm a content-authoring approach that
+  keeps this phase's operational-workflow tutorial and the future
+  calculations-tutorial track as separate modules within one tutorial
+  engine, not hardcoded together. Plain Python/JSON step definitions
+  (matching this project's existing "no CMS, everything in git"
+  convention) are the default assumption - confirm or adjust.
+- **Scientific-accuracy sign-off.** Does the explanation text for
+  `ReprojRMS`/`RayResidual`/the sigma columns need the project owner's
+  review before shipping, given those are easy to describe incorrectly
+  (see Phase 12/13's own write-ups for how subtle the distinctions are)?
+
+**Later steps** (deliberately not detailed yet - refine once Step 0's
+answers land, the same way Phase 10's steps were refined as work
+progressed):
+
+- [ ] Design the tutorial's step data model (step list, per-step
+      description/more-info text, target-widget reference,
+      completion-detection hook) - keep it decoupled from any specific
+      step's content so the future calculations-tutorial track can reuse
+      the same engine.
+- [ ] Design and build the actual overlay/highlighting mechanism in Qt,
+      per Step 0's decision.
+- [ ] Build the Tutorial window itself (checklist + description +
+      expandable "more info" area), matching this project's existing
+      `QDialog`-based window patterns.
+- [ ] Build/acquire whatever tutorial "project"/sample data Step 0
+      decided on.
+- [ ] Wire real completion-detection hooks into the relevant existing
+      handlers, wherever Step 0 decided that's needed.
+- [ ] Automated tests: `FakeApp`-based tests for the tutorial engine's
+      step-tracking logic, plus real-`QApplication` tests for the
+      overlay/highlight rendering (following the `qapp`/`sizeamatic_app`
+      fixture patterns already in `tests/conftest.py`).
+- [ ] Manual proof-test walkthroughs with the project owner, per
+      `AGENTS.md`'s standing rule - likely more than once given this
+      feature's size, not just once at the end.
+- [ ] **Update `CLAUDE.md`** with a new standing instruction: whenever a
+      future change alters any workflow step, button, menu item, or
+      Measurement-window column/output that the tutorial covers or
+      explains, the tutorial's content/target-widget references must be
+      updated in the same change - treat the tutorial like
+      `ARCHITECTURE.md`: a living doc that goes stale the moment behavior
+      changes out from under it. Draft wording now, finalize once the
+      tutorial's actual module/file structure is known from the steps
+      above:
+
+      > Whenever you change a workflow step, button, menu item, or
+      > Measurement-window column/output that the in-app Tutorial mode
+      > (see `<tutorial module(s), TBD>`) walks a user through or
+      > explains, update the tutorial's step content and target-widget
+      > references in the same change.
+- [ ] Update `ROADMAP.md`/`ARCHITECTURE.md` to describe the new tutorial
+      module(s) once built.
+
+**Non-negotiable process requirements, from the project owner:**
+
+- New branch off `develop`, named `issue-N/short-description` per
+  `AGENTS.md`'s git workflow - ask the project owner for the issue
+  number before naming it if one hasn't been provided.
+- Real automated tests are required, not optional - follow this repo's
+  existing testing conventions.
+- Manual testing/proof-test walkthroughs with the project owner are
+  required before any commit that changes observable app behavior, per
+  `AGENTS.md`'s existing "Manual proof test" section - throughout this
+  phase, not just at the end.
+- The `CLAUDE.md` update above is required, not optional.
+
+## Phase 16 — 3D bundle-adjustment calibration (build) `[ ]`
 
 Build the photogrammetric bundle-adjustment calibration mode investigated
 in Phase 14, now that its math and dependency choice (`scipy`) are
@@ -1032,20 +1168,20 @@ dependency, not just software):
       decide how the new mode is labeled/surfaced in the UI (clearly
       marked advanced/experimental rather than presented as a plain
       alternative), and how Step 6's real-footage validation results feed
-      the Phase 17 white paper update below.
+      the Phase 18 white paper update below.
 
-## Phase 16 — MARE API integration (future, not yet scoped) `[ ]`
+## Phase 17 — MARE API integration (future, not yet scoped) `[ ]`
 
 Interface with the overall MARE API to record measurement data, etc. Noted
 here so it isn't forgotten, but not to be planned in detail until we reach it.
 
-## Phase 17 — Update the measurement white paper (future, not yet scoped) `[ ]`
+## Phase 18 — Update the measurement white paper (future, not yet scoped) `[ ]`
 
 Update `docs/Sizeamatic_Pro_Stereo_Length_Measurement_Method.docx (1).pdf`
 (the scientific write-up of Sizeamatic Pro's stereo length measurement
 method) to document the new calculations added in Phases 12-13 — the
 object-space `StereoRayResidual(mm)` metric and the Jacobian/covariance
-uncertainty propagation — plus, if Phase 15 is completed, the 3D
+uncertainty propagation — plus, if Phase 16 is completed, the 3D
 bundle-adjustment calibration mode and its Step 6 real-footage validation
 results (including an honest account if that step concluded it wasn't
 worth adopting for this project's actual use case). Noted here so it
