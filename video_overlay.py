@@ -551,6 +551,7 @@ class VideoPane(QWidget):
         self.view["off_y"] = (float(pos.y()) - float(dy)) - float(iy) * scale_new
 
         self.app.render_current_frames()
+        self.app.tutorial_window.notify_action("pan_or_zoom")
 
     def mousePressEvent(self, event):
         """Start point placement, point drag, panning, or point refinement.
@@ -632,6 +633,7 @@ class VideoPane(QWidget):
             # Cheap redisplay only - no re-decode, matches the original's
             # `_redisplay_current_frames` optimization for pan drags.
             self.app.redisplay_current_frames()
+            self.app.tutorial_window.notify_action("pan_or_zoom")
             return
 
         if self.drag_active and self.drag_index is not None:
@@ -671,9 +673,18 @@ class VideoPane(QWidget):
             None
         """
         if event.button() == Qt.MouseButton.LeftButton and self.drag_active:
+            dragged_index = self.drag_index
             self.drag_active = False
             self.drag_index = None
             self.app.on_points_changed()
+            # Tutorial completion detection for "correct the auto-placed
+            # right point" - only the right pane's drags teach that step
+            # (dragging a left point isn't what those steps cover), and
+            # only the first two points have a dedicated step at all;
+            # a third point's drag just reports an action name nothing
+            # matches, a harmless no-op.
+            if self.which == "R" and dragged_index is not None:
+                self.app.tutorial_window.notify_action(f"adjust_right_point_{dragged_index + 1}")
 
         elif event.button() == Qt.MouseButton.MiddleButton and self.pan_active:
             self.pan_active = False
@@ -707,3 +718,9 @@ class VideoPane(QWidget):
                     pts[index] = refined
 
             self.app.on_points_changed()
+            # Same tutorial completion detection as the plain-drag branch
+            # above - the scanline "refine" gesture is the other way the
+            # tutorial's "correct the right point" steps expect this to
+            # be done.
+            if self.which == "R" and index is not None:
+                self.app.tutorial_window.notify_action(f"adjust_right_point_{index + 1}")

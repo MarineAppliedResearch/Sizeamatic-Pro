@@ -87,6 +87,17 @@ def _make_fake_app(**kwargs):
         def get(self):
             return self._value
 
+    class _FakeTutorialWindow:
+        """Minimal stand-in for `tutorial_window.TutorialController` -
+        just records every `notify_action` call so a test can assert on
+        it, without needing a real Tutorial run behind it."""
+
+        def __init__(self):
+            self.notified_actions = []
+
+        def notify_action(self, action_name):
+            self.notified_actions.append(action_name)
+
     class _FakeApp:
         pass
 
@@ -107,6 +118,7 @@ def _make_fake_app(**kwargs):
     app.on_points_changed = lambda: None
     app.redisplay_current_frames = lambda: None
     app.render_current_frames = lambda: None
+    app.tutorial_window = _FakeTutorialWindow()
 
     for key, value in kwargs.items():
         setattr(app, key, value)
@@ -255,6 +267,53 @@ def test_drag_moves_an_existing_point(qapp):
     assert pane.drag_index is None
 
 
+def test_dragging_the_first_right_point_notifies_adjust_right_point_1(qapp):
+    """Correcting the first auto-placed right point by dragging it should
+    report "adjust_right_point_1" - the tutorial step teaching exactly
+    that. Dragging a LEFT point must not report anything (that's not
+    what those steps cover)."""
+
+    app = _make_fake_app(metaR={"width": 640, "height": 480}, ptsR=[(100.0, 50.0)])
+    pane = _make_pane(qapp, app, which="R")
+
+    pane.mousePressEvent(_FakeMouseEvent(100, 50))
+    pane.mouseMoveEvent(_FakeMouseEvent(120, 60))
+    pane.mouseReleaseEvent(_FakeMouseEvent(120, 60))
+
+    assert app.tutorial_window.notified_actions == ["adjust_right_point_1"]
+
+
+def test_dragging_the_second_right_point_notifies_adjust_right_point_2(qapp):
+    """Correcting the *second* auto-placed right point (the Segment's
+    second point) should report "adjust_right_point_2", distinct from
+    the first point's action - each has its own tutorial step."""
+
+    app = _make_fake_app(
+        metaR={"width": 640, "height": 480}, ptsR=[(100.0, 50.0), (200.0, 60.0)]
+    )
+    pane = _make_pane(qapp, app, which="R")
+
+    pane.mousePressEvent(_FakeMouseEvent(200, 60))
+    pane.mouseMoveEvent(_FakeMouseEvent(220, 70))
+    pane.mouseReleaseEvent(_FakeMouseEvent(220, 70))
+
+    assert app.tutorial_window.notified_actions == ["adjust_right_point_2"]
+
+
+def test_left_click_drag_on_the_left_pane_does_not_notify_adjust_right_point(qapp):
+    """Dragging a point on the LEFT pane isn't "correcting the right
+    point" - it shouldn't report any adjust_right_point_* action."""
+
+    app = _make_fake_app(metaL={"width": 640, "height": 480}, ptsL=[(100.0, 50.0)])
+    pane = _make_pane(qapp, app, which="L")
+
+    pane.mousePressEvent(_FakeMouseEvent(100, 50))
+    pane.mouseMoveEvent(_FakeMouseEvent(120, 60))
+    pane.mouseReleaseEvent(_FakeMouseEvent(120, 60))
+
+    assert app.tutorial_window.notified_actions == []
+
+
 def test_multiple_clicks_build_a_connected_chain_up_to_the_point_cap(qapp):
     """Clicking empty space repeatedly should keep appending points (a
     connected chain, not just a single pair) up to `max_points_per_pane`,
@@ -291,3 +350,76 @@ def test_nearest_handle_index_without_a_handle_returns_none(qapp):
 
     idx = pane._nearest_handle_index(9999, 9999)
     assert idx is None
+
+
+class _FakeWheelEvent:
+    """Minimal stand-in for a PySide6 `QWheelEvent` - exposes only
+    `.position()`/`.angleDelta()`, the only methods `wheelEvent` reads."""
+
+    def __init__(self, x, y, delta_y=120):
+        """Store the event's position and vertical scroll delta.
+
+        Args:
+            x (float): Local X coordinate, in pane screen pixels.
+            y (float): Local Y coordinate, in pane screen pixels.
+            delta_y (int): Positive scrolls "up" (zoom in), negative
+                scrolls "down" (zoom out) - matches Qt's own convention.
+
+        Returns:
+            None
+        """
+        self._pos = QPointF(x, y)
+        self._delta_y = delta_y
+
+    def position(self):
+        """Return this event's local position.
+
+        Returns:
+            QPointF: The stored position.
+        """
+        return self._pos
+
+    def angleDelta(self):
+        """Return an object whose `.y()` is this event's scroll delta.
+
+        Returns:
+            _FakeWheelEvent: `self` - `y()` below reads `_delta_y`
+            directly, so this doubles as its own angleDelta result.
+        """
+        return self
+
+    def y(self):
+        """Return the stored vertical scroll delta.
+
+        Returns:
+            int: `delta_y` as given to `__init__`.
+        """
+        return self._delta_y
+
+
+def test_wheel_zoom_notifies_the_tutorial_of_pan_or_zoom(qapp):
+    """Zooming with the scroll wheel should report the "pan_or_zoom"
+    tutorial completion action - real-hook detection for that step,
+    since pan/zoom has no single discrete handler to hook instead."""
+
+    app = _make_fake_app(metaL={"width": 640, "height": 480})
+    pane = _make_pane(qapp, app)
+
+    pane.wheelEvent(_FakeWheelEvent(320, 240, delta_y=120))
+
+    assert "pan_or_zoom" in app.tutorial_window.notified_actions
+
+
+def test_middle_drag_pan_notifies_the_tutorial_of_pan_or_zoom(qapp):
+    """Panning (middle-drag) should report the same "pan_or_zoom"
+    tutorial completion action as zooming does - either one teaches
+    the step."""
+
+    app = _make_fake_app(metaL={"width": 640, "height": 480})
+    pane = _make_pane(qapp, app)
+    pane.pan_active = True
+    pane.pan_last_pos = (100, 100)
+
+    pane.mouseMoveEvent(_FakeMouseEvent(120, 110))
+
+    assert "pan_or_zoom" in app.tutorial_window.notified_actions

@@ -93,6 +93,31 @@ def test_record_current_measurement_appends_header_once_and_stamps_a_new_id_each
     win._on_close()
 
 
+def test_record_current_measurement_notifies_the_tutorial(qapp, make_fake_app):
+    """Recording a measurement should report the "record_measurement"
+    tutorial completion action (ROADMAP.md Phase 15) - real-hook
+    detection for that step, alongside the existing
+    `_on_measurement_recorded` project-snapshot notification."""
+
+    notified = []
+
+    class _FakeTutorialWindow:
+        def notify_action(self, action_name):
+            notified.append(action_name)
+
+    app = make_fake_app(
+        click_sigma_px=1.5, _on_measurement_recorded=lambda: None, tutorial_window=_FakeTutorialWindow()
+    )
+    win = measurement_window.MeasurementWindow(app)
+
+    win.update_window([ROW_A], None)
+    win.record_current_measurement()
+
+    assert notified == ["record_measurement"]
+
+    win._on_close()
+
+
 def test_record_current_measurement_shares_one_id_across_all_rows_in_one_click(qapp, make_fake_app):
     """Every row recorded from the same Record click (e.g. a Point row
     and its Segment row) should share one measurement ID, so a whole bad

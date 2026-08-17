@@ -940,7 +940,7 @@ here proposes removing or changing today's default calibration path.
       `misc/bundle_adjustment_prototype.py` is a new, standalone,
       synthetic-data-only file with no import/call path from the app.
 
-## Phase 15 — Tutorial mode `[ ]`
+## Phase 15 — Tutorial mode `[~]`
 
 Guided, in-app, game-style tutorial: a tutorial window with a step
 checklist, each step showing a description (plus an expandable "more
@@ -964,80 +964,123 @@ just how to click through the app) — this phase's architecture must
 support more than one track without a rewrite, even though only the
 operational track ships now.
 
-**Step 0 — Mandatory clarifying-question session with the project owner.**
+**Step 0 — Mandatory clarifying-question session with the project owner `[x]`.**
 The project owner explicitly wants to be interrogated extensively before
 any design or implementation work starts, not have decisions assumed on
 their behalf — treat this as a hard gate, not a formality, the same way
-Phase 5/9/10 got dedicated planning rounds before execution. At minimum,
-resolve:
+Phase 5/9/10 got dedicated planning rounds before execution. Resolved
+after reading the living docs plus hands-on reading of `main.py`,
+`video_overlay.py`, `measurement_window.py`, `calibration_io.py`,
+`project_io.py`, `recent_projects.py`, `qt_helpers.py`, and
+`stereo_matching.py`'s metric docstrings (not from documentation alone):
 
-- **Checklist scope.** Confirm/adjust the exact v1 step list. Candidate,
-  drawn from what already exists in the app: load left video → load
-  right video → load calibration → toggle rectified view → the
-  RECTIFIED/NOT RECTIFIED indicator → Lock/resync the two timelines →
-  pan/zoom a pane → place a measurement point pair → Disp/dY/ReprojRMS/
-  RayResidual → place a second point to form a Segment → the Total row
-  and chain-sigma → Record vs. just viewing "current measurement" →
+- **Checklist scope — confirmed**, with four additions caught while
+  reading the actual handler/widget code rather than assumed from
+  `ROADMAP.md`'s own candidate list alone: load left video → load right
+  video → load calibration → toggle rectified view → the RECTIFIED/NOT
+  RECTIFIED indicator → Lock/resync the two timelines → pan/zoom a pane
+  (+ Reset Pan/Zoom) → Clear Points → place a measurement point pair (+
+  dragging an existing point to reposition it, + right-click-drag
+  "refine" once a point has a mate in both panes) → Disp/dY/ReprojRMS/
+  RayResidual → place additional points to form a Segment/chain (up to
+  `MAX_POINTS_PER_PANE` = 20, not just a fixed pair) → the Total row and
+  chain-sigma → Record vs. just viewing "current measurement" →
   editing/deleting a bad recorded row in the Log → Save Project → Open
-  Project → Recent Projects → the real-time sync anchor → the
-  copy-to-clipboard block. What's explicitly out of scope for v1 (e.g.
-  Perform Calibration's *creation* flow, anaglyph preview, playback
-  speed controls)? Strictly linear (step N unlocks step N+1), or freely
-  navigable?
-- **The "glowing button" mechanism.** What should highlighting actually
-  look like, mechanically, in Qt (an overlay border on the real widget, a
-  pulsing animation, an arrow, some combination)? Does advancing to the
-  next step require detecting the real action actually happening (hooking
-  into the real handler - e.g. `on_save_project`, `record_current_
-  measurement`, `on_toggle_view_rectified`), or is a manual "I did this,
-  Next" button acceptable for steps that are hard to detect
-  programmatically? This needs an explicit decision, not an assumption -
-  the two approaches have very different implementation cost.
-- **The tutorial "project."** The project owner's own framing: "a
-  tutorial mode, maybe even a tutorial project, that the user can load."
-  Confirm which of: (a) a small bundled sample stereo video pair +
-  calibration folder shipped with the app (raises size/licensing
-  questions - real footage is currently gitignored under `examples/`,
-  and Phase 9's PyInstaller onefile build already has size/startup
-  tradeoffs to weigh against), (b) synthetic/generated video+calibration
-  produced at tutorial-start time, or (c) no real video needed at all -
-  the tutorial mocks/simulates enough app state to demonstrate each step
-  without real footage.
-- **Window placement.** Docked panel, floating non-modal window (like
-  `MeasurementWindow`/`CalibrationSummaryWindow`), or a full overlay on
-  top of the main window? Reachable any time via a menu (e.g. "Help >
-  Tutorial"), first-launch-only, or both? Does tutorial progress persist
-  across app restarts / get saved in the project file, or does it always
-  start fresh?
-- **Content architecture.** Confirm a content-authoring approach that
-  keeps this phase's operational-workflow tutorial and the future
-  calculations-tutorial track as separate modules within one tutorial
-  engine, not hardcoded together. Plain Python/JSON step definitions
-  (matching this project's existing "no CMS, everything in git"
-  convention) are the default assumption - confirm or adjust.
-- **Scientific-accuracy sign-off.** Does the explanation text for
-  `ReprojRMS`/`RayResidual`/the sigma columns need the project owner's
-  review before shipping, given those are easy to describe incorrectly
-  (see Phase 12/13's own write-ups for how subtle the distinctions are)?
+  Project → Recent Projects → the real-time sync anchor (read off the
+  tutorial video's own simulated on-screen clock - see the tutorial
+  "project" decision below) → the copy-to-clipboard block. **Out of
+  scope for v1:** Perform Calibration's *creation* flow, Anaglyph 3D
+  preview, playback speed controls, and Generate Calibration Target (all
+  separate/advanced workflows, not day-to-day measurement work).
+  **Navigation: linear, with a skip/jump escape hatch** - default
+  forward progression, not a hard step-to-step lock.
+- **The "glowing button" mechanism — decided, and validated live**
+  against a throwaway prototype (not committed) reusing the real
+  `SizeamaticProApp` shell (real menu bar/toolbar/dark theme/video
+  panes, no video/calibration loaded): a translucent overlay dims the
+  whole window except a rounded-rect cutout around the real target
+  widget, with a pulsing colored border animated on that cutout. Two
+  real bugs were found and fixed live while iterating with the project
+  owner: the box didn't track the window being *moved* (only resized) -
+  instance-patching `moveEvent` on someone else's class doesn't reliably
+  fire in PySide6, a proper `QObject` event filter does; and the app's
+  global bold-11pt stylesheet (`DARK_QSS`, applied app-wide) overflowed
+  a compact info box's text before its fonts were overridden explicitly.
+  **Real finding, not assumed up front:** an already-open `QMenu` is its
+  own always-on-top popup window that paints above any of this app's own
+  child-widget overlays, so highlighting an item *inside* an open menu
+  would need a second, independently-top-level overlay - **decided not
+  to build that**; menu-triggered steps highlight only the closed
+  top-level menu-bar entry (e.g. "File"), and the step's own description
+  text names the exact item to click (e.g. "Load Left Video…").
+  **Completion detection: real hooks by default**, not a planned
+  hooked/manual split - this codebase's already-clean one-handler-per-
+  action style makes a real hook cheap for nearly every step
+  (`on_toggle_view_rectified`, `on_save_project`, `record_current_
+  measurement`, `on_clear_points`, even point-placement/drag/pan/refine
+  via existing state already surfaced in `on_points_changed`/
+  `mouseReleaseEvent`/the `view` dict's defaults) - manual "I did this,
+  Next" only as a named exception per step, if one turns out to need it
+  once actually built.
+- **The tutorial "project" — decided: (b) synthetic/generated
+  video+calibration**, produced at tutorial-start time (not a bundled
+  real clip, and not a fully mocked/no-video experience). Must include a
+  burned-in simulated on-screen clock/timestamp in the generated video
+  frames (mimicking a real camera's overlay clock), so the real-time-
+  sync step has something concrete to read and type into the six
+  year/month/day/hour/minute/second boxes and verify against the
+  calculated "Actual Time" readout.
+- **Window placement — decided:** floating, non-modal window (matching
+  `MeasurementWindow`/`CalibrationSummaryWindow`'s pattern, not docked or
+  a full-window overlay), reachable any time via a menu (e.g. "Help >
+  Tutorial"), not first-launch-only. Progress always starts fresh - no
+  persistence across app restarts or in the project file. Includes
+  **both** a full step checklist (all steps listed, with completion
+  marks) **and** a compact current-step bubble (description + expandable
+  "Details" section, anchored near the highlighted control) - the bubble
+  half was validated live in the prototype above, with bold/compact
+  fonts per the project owner's feedback (explicitly overriding the
+  app-wide bold-11pt default down to ~8-9pt within the tutorial's own
+  widgets); the checklist panel itself still needs its own mockup pass
+  (see "Later steps" below).
+- **Content architecture — confirmed:** plain Python/JSON step
+  definitions, kept as a module separate from the future calculations-
+  tutorial track, sharing one tutorial engine.
+- **Scientific-accuracy sign-off — confirmed required:** draft the
+  `ReprojRMS`/`RayResidual`/sigma-column explanation text, but the
+  project owner reviews and signs off before this phase closes (see
+  Phase 12/13's own write-ups for how subtle these distinctions are).
 
-**Later steps** (deliberately not detailed yet - refine once Step 0's
-answers land, the same way Phase 10's steps were refined as work
-progressed):
+**Later steps:**
 
+- [~] **Iteratively prototype the visual design with the project owner
+      before building the real engine** - the project owner's explicit
+      request, ahead of any data-model/engine work below. A throwaway,
+      uncommitted script (reusing the real `SizeamaticProApp` shell, no
+      video/calibration loaded) already validated the highlight-overlay
+      mechanism and a first pass at the current-step bubble this
+      session, with real bugs found and fixed live (window-move
+      tracking, font sizing/overflow, the open-menu limitation noted
+      above, a "Details" section redesigned from a one-line toggle into
+      a real bordered/headed panel per feedback). **Still needed:** mock
+      up and review the separate full step checklist panel (all steps,
+      completion marks) alongside the bubble, before any of this becomes
+      real app code.
 - [ ] Design the tutorial's step data model (step list, per-step
-      description/more-info text, target-widget reference,
+      description/details text, target-widget reference,
       completion-detection hook) - keep it decoupled from any specific
       step's content so the future calculations-tutorial track can reuse
       the same engine.
-- [ ] Design and build the actual overlay/highlighting mechanism in Qt,
-      per Step 0's decision.
-- [ ] Build the Tutorial window itself (checklist + description +
-      expandable "more info" area), matching this project's existing
-      `QDialog`-based window patterns.
-- [ ] Build/acquire whatever tutorial "project"/sample data Step 0
-      decided on.
+- [ ] Build the real (non-throwaway) overlay/highlighting mechanism and
+      Tutorial window (checklist + current-step bubble + expandable
+      Details) as real app modules, based on the validated prototype -
+      matching this project's existing `QDialog`-based window patterns.
+- [ ] Build the synthetic tutorial video/calibration generator, including
+      the burned-in simulated clock.
 - [ ] Wire real completion-detection hooks into the relevant existing
-      handlers, wherever Step 0 decided that's needed.
+      handlers.
+- [ ] Draft the `ReprojRMS`/`RayResidual`/sigma-column explanation text
+      for the project owner's scientific-accuracy review/sign-off.
 - [ ] Automated tests: `FakeApp`-based tests for the tutorial engine's
       step-tracking logic, plus real-`QApplication` tests for the
       overlay/highlight rendering (following the `qapp`/`sizeamatic_app`
@@ -1065,9 +1108,11 @@ progressed):
 
 **Non-negotiable process requirements, from the project owner:**
 
-- New branch off `develop`, named `issue-N/short-description` per
-  `AGENTS.md`'s git workflow - ask the project owner for the issue
-  number before naming it if one hasn't been provided.
+- Tied to issue #16. Branch stays `phase-15/tutorial-mode-planning`
+  (already branched off `develop`, previously holding only this phase's
+  planning entry) for real implementation too - the project owner's
+  explicit choice not to rename/switch to an `issue-16/...` branch
+  despite `AGENTS.md`'s usual `issue-N/short-description` convention.
 - Real automated tests are required, not optional - follow this repo's
   existing testing conventions.
 - Manual testing/proof-test walkthroughs with the project owner are

@@ -215,6 +215,12 @@ class MeasurementWindow:
         """The `QLabel` backing the error/status line, or None if the
         window hasn't been built yet."""
 
+        self.record_button = None
+        """The "Record" `QPushButton`, or None if the window hasn't been
+        built yet - stored on `self` (not just a local variable in
+        `ensure_window`) so ROADMAP.md Phase 15's Tutorial mode can
+        highlight it directly."""
+
         self._last_rows = []
         """The most recently displayed measurement's rows (same shape
         `update_window` received), kept so `record_current_measurement`
@@ -254,6 +260,7 @@ class MeasurementWindow:
         self.copy_text = None
         self.log_text = None
         self.error_label = None
+        self.record_button = None
         self._log_has_header = False
         self._next_measurement_id = 1
 
@@ -321,9 +328,9 @@ class MeasurementWindow:
 
         # Explicit action, not auto-logged on every recalculation — see this
         # module's "Design notes" and ROADMAP.md Phase 7.
-        record_button = QPushButton("Record")
-        record_button.clicked.connect(self.record_current_measurement)
-        log_header.addWidget(record_button)
+        self.record_button = QPushButton("Record")
+        self.record_button.clicked.connect(self.record_current_measurement)
+        log_header.addWidget(self.record_button)
         outer.addLayout(log_header)
 
         # Deliberately left editable (never read-only) — see this module's
@@ -423,7 +430,9 @@ class MeasurementWindow:
 
         Notifies `self.app._on_measurement_recorded()` afterward so the
         app can snapshot enough state (which frame, which clicked points)
-        to restore this exact measurement later from a project file.
+        to restore this exact measurement later from a project file, and
+        `self.app.tutorial_window.notify_action("record_measurement")`
+        for ROADMAP.md Phase 15's Tutorial mode completion detection.
 
         Returns:
             None
@@ -447,6 +456,7 @@ class MeasurementWindow:
         self._next_measurement_id += 1
 
         self.app._on_measurement_recorded()
+        self.app.tutorial_window.notify_action("record_measurement")
 
     def get_log_text(self):
         """Return the Log's exact current text content, for saving to a project file.
