@@ -105,6 +105,31 @@ class FakeVar:
         self._value = value
 
 
+class _NoOpTutorialWindow:
+    """No-op stand-in for `tutorial_window.TutorialController`.
+
+    ROADMAP.md Phase 15's completion-detection hooks call
+    `self.app.tutorial_window.notify_action(...)` unconditionally from
+    several real handlers (`on_load_left_video`, `record_current_
+    measurement`, etc.), whether or not a tutorial is actually running -
+    this lets those calls succeed against a `FakeApp`/`FakeAppWidget`
+    without every test needing its own tutorial-related stub. A test
+    that specifically wants to assert on tutorial notifications should
+    pass its own `tutorial_window=...` via `make_fake_app`'s kwargs
+    instead of relying on this default.
+    """
+
+    def notify_action(self, action_name):
+        """Do nothing - see this class's docstring.
+
+        Args:
+            action_name (str): Ignored.
+
+        Returns:
+            None
+        """
+
+
 class FakeApp:
     """Minimal stand-in for `main.SizeamaticProApp`.
 
@@ -112,6 +137,9 @@ class FakeApp:
     attributes a given test assigns onto it via `make_fake_app`, so
     testing app-parameter functions doesn't require a real Tk root.
     """
+
+    tutorial_window = _NoOpTutorialWindow()
+    """Shared, stateless no-op default - see `_NoOpTutorialWindow`."""
 
     def _set_status_mid(self, text):
         """No-op stand-in for the real status bar update, so calls to it
@@ -201,6 +229,7 @@ class FakeAppWidget(QWidget):
 
     _set_status_mid = FakeApp._set_status_mid
     _app_window_title = FakeApp._app_window_title
+    tutorial_window = FakeApp.tutorial_window
 
 
 @pytest.fixture

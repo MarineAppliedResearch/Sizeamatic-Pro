@@ -27,3 +27,12 @@ explicitly out of scope until a later phase.
 - Don't start Phase 4 (testing system) or Phase 5 (restructure) work from
   `ROADMAP.md` unless explicitly asked, even if it seems like a natural next
   step while doing earlier-phase work.
+- Whenever you change a workflow step, button, menu item, or Measurement-
+  window column/output that the in-app Tutorial mode (`tutorial_engine.py`,
+  `tutorial_content_operational.py`, `tutorial_window.py`,
+  `tutorial_fixtures.py`) walks a user through or explains, update the
+  tutorial's step content (`tutorial_content_operational.py`'s
+  `description`/`details` text) and target-widget references (`target`
+  tuples) in the same change — treat the tutorial like `ARCHITECTURE.md`: a
+  living doc that goes stale the moment the behavior it describes changes
+  out from under it.

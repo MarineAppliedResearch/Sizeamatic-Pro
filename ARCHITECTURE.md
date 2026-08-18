@@ -111,10 +111,88 @@ objects held open for the app's lifetime), playback/timeline/slider logic
 rendering, and zoom/pan state all bundled together, wiring the classes
 above together via composition (`self.cal_summary_window`,
 `self.measurement_window`, `self.anaglyph_preview`, `self.video_overlay`,
-`self.perform_calibration_window`, `self.generate_calibration_target_window`).
+`self.perform_calibration_window`, `self.generate_calibration_target_window`,
+`self.tutorial_window` - see "Tutorial mode" below).
 Whether/how to split `main.py`'s own remaining concerns further is still
 an open, deliberately deferred design question — see `ROADMAP.md` Phase
 5's scope note; nothing since has revisited it.
+
+## Tutorial mode (ROADMAP.md Phase 15)
+
+Four new modules, all at the repo root (no subpackages used anywhere in
+this project), splitting the same way the rest of the codebase does:
+pure logic with no Qt dependency vs. real Qt widgets.
+
+- **`tutorial_engine.py`** — pure step-tracking data model, no Qt import
+  at all (matches `stereo_matching.py`/`calibration_io.py`/
+  `project_io.py`'s "pure functions/classes, no GUI code" convention).
+  `TutorialStep` holds one step's static content (`step_id`, `title`,
+  `description`, `details`, a `(host, kind, ref)` `target` tuple naming
+  which real widget to highlight and on which window, and a
+  `completion_action` key). `Tutorial` tracks an ordered list of steps
+  plus runtime progress (`current_index`, `done`) - `advance()` (linear
+  default), `jump_to(index)` (the checklist's skip/jump escape hatch,
+  no locking), and `mark_action_done(action_name)` (the real
+  completion-detection entry point every wired-up handler calls into,
+  via `TutorialController.notify_action`). Deliberately decoupled from
+  any specific track's *content*, per Phase 15's "explicitly built to
+  extend later" requirement - a future calculations-tutorial track
+  reuses this exact engine, unmodified, with its own step list.
+- **`tutorial_content_operational.py`** — the actual v1 "Getting
+  Started" step list: a plain Python list of `TutorialStep(...)` calls
+  covering the operational workflow (load video/calibration, view/sync,
+  place/record measurements, save/load projects). Kept as its own
+  module, separate from a future `tutorial_content_calculations.py`, so
+  both content sets plug into `tutorial_engine.Tutorial` unmodified. The
+  `point_quality_metrics`/`total_row_and_chain_sigma` steps' explanation
+  text (covering `ReprojRMS(px)`/`RayResidual(mm)`/sigma columns) went
+  through the project owner's scientific-accuracy sign-off before this
+  phase closed, per Phase 12/13's precedent for how subtle those
+  distinctions are.
+- **`tutorial_window.py`** — the Qt-facing half: `TutorialController`
+  (`app.tutorial_window`, same ownership pattern as
+  `app.measurement_window` etc.) owns a `tutorial_engine.Tutorial` built
+  from `tutorial_content_operational.STEPS`, plus every widget below,
+  and is the single object real handlers call into
+  (`notify_action(action_name)`). `HighlightOverlay` dims a host window
+  except a pulsing-bordered cutout around the current step's target
+  widget - one instance per host window (the main app, and lazily the
+  measurement window once it exists), since an overlay is a child
+  widget of one specific top-level window. `DraggablePanel` is the
+  shared base for `TutorialStepBubble` (the roaming current-step panel:
+  title/description/expandable Details/Next button) and `ChecklistPanel`
+  (the fixed-corner, scrollable full step list with completion marks) -
+  both floating, non-modal, `Tool | FramelessWindowHint |
+  WindowStaysOnTopHint` windows with custom drag-to-move (no native
+  title bar) and their own "x", which postpones the whole tutorial
+  (`TutorialController._postpone`) rather than dismissing either panel
+  independently - clicking Help > Start Tutorial… again resumes exactly
+  where it left off. `WindowTracker` is a `QObject` event filter
+  (`installEventFilter`) that catches the main window's Move/Resize/
+  WindowStateChange - instance-patching `moveEvent` directly on someone
+  else's class doesn't reliably fire in PySide6.
+- **`tutorial_fixtures.py`** — the synthetic tutorial video+calibration
+  generator, pure logic, no Qt. Builds a small rectified stereo rig
+  (mirroring `tests/conftest.py`'s `synthetic_cal` fixture's approach)
+  and renders a short left/right MP4 pair directly from that rig's own
+  `PL`/`PR` projection matrices, with a burned-in on-screen clock and a
+  separate burned-in frame counter. The two videos are deliberately
+  generated out of sync with each other
+  (`TUTORIAL_SYNC_OFFSET_FRAMES`), so the tutorial's Lock/Resync step
+  has a real offset to find and correct, not a pair that already lines
+  up by construction. The calibration's rectification maps apply a mild
+  inward crop (`TUTORIAL_RECTIFICATION_ZOOM`) rather than a pure
+  identity grid, purely so toggling "Show Rectified" visibly
+  zooms/crops like a real calibration's rectified view does - marker
+  positions are drawn through the inverse of that same crop
+  (`_to_raw_pixel`) so a click on the displayed marker still
+  triangulates to the exact real position it was rendered from,
+  regardless of which view mode it's clicked in.
+  `TutorialController.start()` generates these fixtures but
+  deliberately does NOT load them automatically - the user still goes
+  through the real File > Load Left/Right Video…/Calibration > Load
+  Calibration… actions themselves, so the tutorial's early "load" steps
+  are genuine practice, not a shortcut past them.
 
 ## Other first-party scripts
 

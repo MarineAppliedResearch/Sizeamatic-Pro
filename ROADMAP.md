@@ -940,7 +940,218 @@ here proposes removing or changing today's default calibration path.
       `misc/bundle_adjustment_prototype.py` is a new, standalone,
       synthetic-data-only file with no import/call path from the app.
 
-## Phase 15 — 3D bundle-adjustment calibration (build) `[ ]`
+## Phase 15 — Tutorial mode `[x]`
+
+**Scope note:** closes with the v1 "Getting Started" operational-workflow
+tutorial built, tested, and manually confirmed working across several
+proof-test rounds with the project owner — engine, content, real Qt
+window, and synthetic fixtures all real app modules (see
+`ARCHITECTURE.md`'s "Tutorial mode" section), 65 new automated tests
+across the four modules, `CLAUDE.md`'s staleness instruction in place,
+and the docs site updated. The future calculations-tutorial track this
+phase was explicitly built to extend into (a second content module
+reusing `tutorial_engine.py` unmodified) is not scoped or started here —
+noted as a natural next step whenever there's appetite for it, the same
+kind of explicit, not-silently-dropped deferral prior phases have closed
+with, not an open-ended commitment.
+
+Guided, in-app, game-style tutorial: a tutorial window with a step
+checklist, each step showing a description (plus an expandable "more
+info" section), with in-app visual guidance (arrows/highlighted or
+"waiting for click" glowing controls) pointing at the real UI element to
+interact with next. Covers the full operational workflow a video
+processor needs before they can start working — loading left/right
+video, loading a calibration, toggling rectified view, syncing/locking
+the two timelines, placing/recording measurements, saving/loading
+projects, and what the Measurement window's columns and row types
+(`Point`/`Segment`/`Total`) and quality/error metrics (`ReprojRMS(px)`,
+`RayResidual(mm)`, `sigma1`/`sigma2`, `sigma1_jac`/`sigma2_jac`) actually
+mean. **This is the next phase to be worked on** (confirmed with the
+project owner ahead of Phases 16-18, which are either hardware-blocked
+or explicitly unscoped).
+
+**Explicitly built to extend later:** this phase covers only the
+*operational workflow* tutorial. A future phase will add a *calculations*
+tutorial track (explaining the measurement math/uncertainty itself, not
+just how to click through the app) — this phase's architecture must
+support more than one track without a rewrite, even though only the
+operational track ships now.
+
+**Step 0 — Mandatory clarifying-question session with the project owner `[x]`.**
+The project owner explicitly wants to be interrogated extensively before
+any design or implementation work starts, not have decisions assumed on
+their behalf — treat this as a hard gate, not a formality, the same way
+Phase 5/9/10 got dedicated planning rounds before execution. Resolved
+after reading the living docs plus hands-on reading of `main.py`,
+`video_overlay.py`, `measurement_window.py`, `calibration_io.py`,
+`project_io.py`, `recent_projects.py`, `qt_helpers.py`, and
+`stereo_matching.py`'s metric docstrings (not from documentation alone):
+
+- **Checklist scope — confirmed**, with four additions caught while
+  reading the actual handler/widget code rather than assumed from
+  `ROADMAP.md`'s own candidate list alone: load left video → load right
+  video → load calibration → toggle rectified view → the RECTIFIED/NOT
+  RECTIFIED indicator → Lock/resync the two timelines → pan/zoom a pane
+  (+ Reset Pan/Zoom) → Clear Points → place a measurement point pair (+
+  dragging an existing point to reposition it, + right-click-drag
+  "refine" once a point has a mate in both panes) → Disp/dY/ReprojRMS/
+  RayResidual → place additional points to form a Segment/chain (up to
+  `MAX_POINTS_PER_PANE` = 20, not just a fixed pair) → the Total row and
+  chain-sigma → Record vs. just viewing "current measurement" →
+  editing/deleting a bad recorded row in the Log → Save Project → Open
+  Project → Recent Projects → the real-time sync anchor (read off the
+  tutorial video's own simulated on-screen clock - see the tutorial
+  "project" decision below) → the copy-to-clipboard block. **Out of
+  scope for v1:** Perform Calibration's *creation* flow, Anaglyph 3D
+  preview, playback speed controls, and Generate Calibration Target (all
+  separate/advanced workflows, not day-to-day measurement work).
+  **Navigation: linear, with a skip/jump escape hatch** - default
+  forward progression, not a hard step-to-step lock.
+- **The "glowing button" mechanism — decided, and validated live**
+  against a throwaway prototype (not committed) reusing the real
+  `SizeamaticProApp` shell (real menu bar/toolbar/dark theme/video
+  panes, no video/calibration loaded): a translucent overlay dims the
+  whole window except a rounded-rect cutout around the real target
+  widget, with a pulsing colored border animated on that cutout. Two
+  real bugs were found and fixed live while iterating with the project
+  owner: the box didn't track the window being *moved* (only resized) -
+  instance-patching `moveEvent` on someone else's class doesn't reliably
+  fire in PySide6, a proper `QObject` event filter does; and the app's
+  global bold-11pt stylesheet (`DARK_QSS`, applied app-wide) overflowed
+  a compact info box's text before its fonts were overridden explicitly.
+  **Real finding, not assumed up front:** an already-open `QMenu` is its
+  own always-on-top popup window that paints above any of this app's own
+  child-widget overlays, so highlighting an item *inside* an open menu
+  would need a second, independently-top-level overlay - **decided not
+  to build that**; menu-triggered steps highlight only the closed
+  top-level menu-bar entry (e.g. "File"), and the step's own description
+  text names the exact item to click (e.g. "Load Left Video…").
+  **Completion detection: real hooks by default**, not a planned
+  hooked/manual split - this codebase's already-clean one-handler-per-
+  action style makes a real hook cheap for nearly every step
+  (`on_toggle_view_rectified`, `on_save_project`, `record_current_
+  measurement`, `on_clear_points`, even point-placement/drag/pan/refine
+  via existing state already surfaced in `on_points_changed`/
+  `mouseReleaseEvent`/the `view` dict's defaults) - manual "I did this,
+  Next" only as a named exception per step, if one turns out to need it
+  once actually built.
+- **The tutorial "project" — decided: (b) synthetic/generated
+  video+calibration**, produced at tutorial-start time (not a bundled
+  real clip, and not a fully mocked/no-video experience). Must include a
+  burned-in simulated on-screen clock/timestamp in the generated video
+  frames (mimicking a real camera's overlay clock), so the real-time-
+  sync step has something concrete to read and type into the six
+  year/month/day/hour/minute/second boxes and verify against the
+  calculated "Actual Time" readout.
+- **Window placement — decided:** floating, non-modal window (matching
+  `MeasurementWindow`/`CalibrationSummaryWindow`'s pattern, not docked or
+  a full-window overlay), reachable any time via a menu (e.g. "Help >
+  Tutorial"), not first-launch-only. Progress always starts fresh - no
+  persistence across app restarts or in the project file. Includes
+  **both** a full step checklist (all steps listed, with completion
+  marks) **and** a compact current-step bubble (description + expandable
+  "Details" section, anchored near the highlighted control) - the bubble
+  half was validated live in the prototype above, with bold/compact
+  fonts per the project owner's feedback (explicitly overriding the
+  app-wide bold-11pt default down to ~8-9pt within the tutorial's own
+  widgets); the checklist panel itself still needs its own mockup pass
+  (see "Later steps" below).
+- **Content architecture — confirmed:** plain Python/JSON step
+  definitions, kept as a module separate from the future calculations-
+  tutorial track, sharing one tutorial engine.
+- **Scientific-accuracy sign-off — confirmed required:** draft the
+  `ReprojRMS`/`RayResidual`/sigma-column explanation text, but the
+  project owner reviews and signs off before this phase closes (see
+  Phase 12/13's own write-ups for how subtle these distinctions are).
+
+**Later steps:**
+
+- [x] **Iteratively prototype the visual design with the project owner
+      before building the real engine** - the project owner's explicit
+      request, ahead of any data-model/engine work below. A throwaway,
+      uncommitted script (reusing the real `SizeamaticProApp` shell, no
+      video/calibration loaded) validated the highlight-overlay
+      mechanism, the current-step bubble, and the full step checklist
+      panel together, with real bugs found and fixed live (window-move
+      tracking, font sizing/overflow, the open-menu limitation noted
+      above, a "Details" section redesigned from a one-line toggle into
+      a real bordered/headed panel per feedback). That validated design
+      is what the real modules below are built from.
+- [x] Design the tutorial's step data model (step list, per-step
+      description/details text, target-widget reference,
+      completion-detection hook) - keep it decoupled from any specific
+      step's content so the future calculations-tutorial track can reuse
+      the same engine. Built as `tutorial_engine.py`
+      (`TutorialStep`/`Tutorial`, no Qt dependency) with the actual v1
+      content in the separate `tutorial_content_operational.py` - see
+      `ARCHITECTURE.md`'s "Tutorial mode" section.
+- [x] Build the real (non-throwaway) overlay/highlighting mechanism and
+      Tutorial window (checklist + current-step bubble + expandable
+      Details) as real app modules, based on the validated prototype -
+      matching this project's existing `QDialog`-based window patterns.
+      Built as `tutorial_window.py` (`TutorialController`,
+      `HighlightOverlay`, `DraggablePanel`/`TutorialStepBubble`/
+      `ChecklistPanel`, `WindowTracker`). Also added, beyond the
+      original prototype scope: postpone/resume via either panel's own
+      "x" (rather than independent per-panel dismissal), and
+      measurement-window steps raising/focusing that window if it's not
+      already in front.
+- [x] Build the synthetic tutorial video/calibration generator, including
+      the burned-in simulated clock. Built as `tutorial_fixtures.py` -
+      also burns in a separate frame counter (for the Lock/Resync step)
+      and deliberately desyncs the left/right videos by
+      `TUTORIAL_SYNC_OFFSET_FRAMES`, and applies a mild inward-crop
+      rectification map (`TUTORIAL_RECTIFICATION_ZOOM`) so toggling Show
+      Rectified visibly changes the video, both added after manual
+      testing showed the initial identity-remap/pre-synced version
+      didn't actually exercise those steps.
+- [x] Wire real completion-detection hooks into the relevant existing
+      handlers - `notify_action(...)` calls added across `main.py`,
+      `video_overlay.py`, and `measurement_window.py`.
+- [x] Draft the `ReprojRMS`/`RayResidual`/sigma-column explanation text
+      for the project owner's scientific-accuracy review/sign-off -
+      reviewed and approved 2026-08-17 (see
+      `tutorial_content_operational.py`'s module docstring).
+- [x] Automated tests: `FakeApp`-based tests for the tutorial engine's
+      step-tracking logic, plus real-`QApplication` tests for the
+      overlay/highlight rendering (following the `qapp`/`sizeamatic_app`
+      fixture patterns already in `tests/conftest.py`) - including real
+      end-to-end tests that construct actual `QMouseEvent`s and drive
+      `video_overlay.py`'s handlers directly, per the project owner's
+      explicit request to catch regressions a logic-only test would miss.
+- [x] Manual proof-test walkthroughs with the project owner, per
+      `AGENTS.md`'s standing rule - done across several rounds as the
+      feature was built, not just once at the end; real bugs found and
+      fixed at each round (measurement-window step targeting, a stuck
+      Lock/Resync step, window focus for measurement steps, pre-synced/
+      identity-remap fixtures not exercising their steps, a toolbar-
+      overflow highlighting bug, and a premature-completion engine bug).
+- [x] **Update `CLAUDE.md`** with a new standing instruction: whenever a
+      future change alters any workflow step, button, menu item, or
+      Measurement-window column/output that the tutorial covers or
+      explains, the tutorial's content/target-widget references must be
+      updated in the same change - treat the tutorial like
+      `ARCHITECTURE.md`: a living doc that goes stale the moment behavior
+      changes out from under it. Added, with the real module names.
+- [x] Update `ROADMAP.md`/`ARCHITECTURE.md` to describe the new tutorial
+      module(s) once built - this update.
+
+**Non-negotiable process requirements, from the project owner:**
+
+- Tied to issue #16. Branch stays `phase-15/tutorial-mode-planning`
+  (already branched off `develop`, previously holding only this phase's
+  planning entry) for real implementation too - the project owner's
+  explicit choice not to rename/switch to an `issue-16/...` branch
+  despite `AGENTS.md`'s usual `issue-N/short-description` convention.
+- Real automated tests are required, not optional - follow this repo's
+  existing testing conventions.
+- Manual testing/proof-test walkthroughs with the project owner are
+  required before any commit that changes observable app behavior, per
+  `AGENTS.md`'s existing "Manual proof test" section - throughout this
+  phase, not just at the end.
+- The `CLAUDE.md` update above is required, not optional.
+
+## Phase 16 — 3D bundle-adjustment calibration (build) `[ ]`
 
 Build the photogrammetric bundle-adjustment calibration mode investigated
 in Phase 14, now that its math and dependency choice (`scipy`) are
@@ -1032,20 +1243,20 @@ dependency, not just software):
       decide how the new mode is labeled/surfaced in the UI (clearly
       marked advanced/experimental rather than presented as a plain
       alternative), and how Step 6's real-footage validation results feed
-      the Phase 17 white paper update below.
+      the Phase 18 white paper update below.
 
-## Phase 16 — MARE API integration (future, not yet scoped) `[ ]`
+## Phase 17 — MARE API integration (future, not yet scoped) `[ ]`
 
 Interface with the overall MARE API to record measurement data, etc. Noted
 here so it isn't forgotten, but not to be planned in detail until we reach it.
 
-## Phase 17 — Update the measurement white paper (future, not yet scoped) `[ ]`
+## Phase 18 — Update the measurement white paper (future, not yet scoped) `[ ]`
 
 Update `docs/Sizeamatic_Pro_Stereo_Length_Measurement_Method.docx (1).pdf`
 (the scientific write-up of Sizeamatic Pro's stereo length measurement
 method) to document the new calculations added in Phases 12-13 — the
 object-space `StereoRayResidual(mm)` metric and the Jacobian/covariance
-uncertainty propagation — plus, if Phase 15 is completed, the 3D
+uncertainty propagation — plus, if Phase 16 is completed, the 3D
 bundle-adjustment calibration mode and its Step 6 real-footage validation
 results (including an honest account if that step concluded it wasn't
 worth adopting for this project's actual use case). Noted here so it

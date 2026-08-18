@@ -8,7 +8,8 @@ import os
 import cv2
 import numpy as np
 import pytest
-from PySide6.QtCore import QPointF, Qt
+from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtGui import QMouseEvent
 
 import main
 import measurement_window
@@ -90,6 +91,219 @@ def test_rectified_indicator_reflects_view_rectified_state(sizeamatic_app):
     assert app.view_rectified.get() is True
     assert app.rectified_indicator.text().strip() == "RECTIFIED"
     assert app.rectified_indicator.property("state") == "rectified"
+
+
+class _RecordingTutorialWindow:
+    """Records every `notify_action` call - a small stand-in used by
+    several ROADMAP.md Phase 15 completion-detection regression tests
+    below, so they assert on the real notification rather than just
+    "didn't crash" (already covered by the default no-op stub in
+    tests/conftest.py's FakeApp). Also needs a real `stop()` - the
+    `sizeamatic_app` fixture's teardown calls `app.close()`, which
+    reaches `closeEvent`'s own `self.tutorial_window.stop()` call."""
+
+    def __init__(self):
+        self.notified_actions = []
+
+    def notify_action(self, action_name):
+        self.notified_actions.append(action_name)
+
+    def stop(self):
+        pass
+
+
+def test_toggle_rectified_on_notifies_the_tutorial_only_when_turning_it_on(sizeamatic_app):
+    """Turning rectified view ON should report the "toggle_rectified"
+    tutorial completion action; turning it back OFF (or being refused
+    for lack of calibration) should not - the tutorial step teaches
+    switching it on, not off."""
+
+    app = sizeamatic_app
+    app.tutorial_window = _RecordingTutorialWindow()
+
+    app.on_toggle_view_rectified(True)  # refused - no calibration loaded
+    assert app.tutorial_window.notified_actions == []
+
+    app.cal = {"w": 640, "h": 480}
+    app.on_toggle_view_rectified(True)
+    assert app.tutorial_window.notified_actions == ["toggle_rectified"]
+
+    app.on_toggle_view_rectified(False)
+    assert app.tutorial_window.notified_actions == ["toggle_rectified"]  # unchanged
+
+
+def test_changing_the_resync_offset_notifies_the_tutorial(sizeamatic_app):
+    """Changing the Offset box should report the "set_resync_offset"
+    tutorial completion action - the real teachable action for the
+    Lock/Resync step, since "Lock L and R" already starts checked by
+    default (so re-checking it fires no signal at all - a real bug this
+    replaces, found during manual proof-testing: the tutorial silently
+    got stuck on that step forever if the user didn't otherwise touch
+    the checkbox)."""
+
+    app = sizeamatic_app
+    app.tutorial_window = _RecordingTutorialWindow()
+
+    app.on_offset_changed(5)
+
+    assert app.tutorial_window.notified_actions == ["set_resync_offset"]
+
+
+def test_clear_points_notifies_the_tutorial(sizeamatic_app):
+    """Clicking Clear Points should report the "clear_points" tutorial
+    completion action."""
+
+    app = sizeamatic_app
+    app.tutorial_window = _RecordingTutorialWindow()
+
+    app.on_clear_points()
+
+    assert app.tutorial_window.notified_actions == ["clear_points"]
+
+
+def test_points_changed_notifies_the_tutorial_for_a_pair_then_a_segment(sizeamatic_app):
+    """Placing a first point pair should report "place_point_pair";
+    adding a second pair should additionally report "place_segment" -
+    both fire off the same on_points_changed hook, gated by point count
+    rather than by which click handler ran."""
+
+    app = sizeamatic_app
+    app.tutorial_window = _RecordingTutorialWindow()
+
+    app.ptsL = [(10.0, 10.0)]
+    app.ptsR = [(12.0, 10.0)]
+    app.on_points_changed()
+    assert app.tutorial_window.notified_actions == ["place_point_pair"]
+
+    app.ptsL.append((20.0, 20.0))
+    app.ptsR.append((22.0, 20.0))
+    app.on_points_changed()
+    # on_points_changed re-reports "place_point_pair" every time len>=1,
+    # not just the first - deduping repeat reports of an already-done
+    # step is tutorial_engine.Tutorial.mark_action_done's job (this bare
+    # recorder intentionally doesn't dedupe, so every real call shows up).
+    assert app.tutorial_window.notified_actions == ["place_point_pair", "place_point_pair", "place_segment"]
+
+
+def test_clicking_a_real_point_in_the_left_pane_notifies_the_tutorial(sizeamatic_app):
+    """End-to-end regression test, not just a direct on_points_changed()
+    call: a real mouse click on the real `pane_left` VideoPane widget
+    should notify the real `app.tutorial_window` via the actual
+    click -> mousePressEvent -> on_points_changed chain a user's click
+    goes through. The test above only proves the hook logic itself is
+    right; this proves the wiring between the real widget and the real
+    app is intact too - the kind of gap a previous manual proof-test
+    round found a real bug through (an unrelated stuck-earlier-step
+    issue that looked, from the outside, like point placement was
+    broken) that a pure logic-level test wouldn't have caught."""
+
+    app = sizeamatic_app
+    app.tutorial_window = _RecordingTutorialWindow()
+    app.metaL = {"width": 640, "height": 480}
+    app.metaR = {"width": 640, "height": 480}
+
+    pane = app.pane_left
+    pane.resize(640, 480)  # 1:1 image-to-screen mapping, matching metaL's own size
+
+    pos = QPointF(100, 50)
+    event = QMouseEvent(
+        QEvent.Type.MouseButtonPress, pos, pos, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier
+    )
+    pane.mousePressEvent(event)
+
+    assert app.ptsL == [(100.0, 50.0)]
+    assert app.ptsR == [(100.0, 50.0)]  # auto-mirrored to the same pixel as a starting guess
+    assert "place_point_pair" in app.tutorial_window.notified_actions
+
+
+def test_dragging_the_right_point_to_correct_it_notifies_the_tutorial_end_to_end(sizeamatic_app):
+    """Same end-to-end approach as the test above, for the "correct the
+    right point" steps: a real click-drag-release on the real
+    `pane_right` widget should notify "adjust_right_point_1" through the
+    real app, not just when called directly on video_overlay.py's own
+    FakeApp-based tests (see test_video_overlay.py for those)."""
+
+    app = sizeamatic_app
+    app.tutorial_window = _RecordingTutorialWindow()
+    app.metaL = {"width": 640, "height": 480}
+    app.metaR = {"width": 640, "height": 480}
+    app.ptsR = [(100.0, 50.0)]
+
+    pane = app.pane_right
+    pane.resize(640, 480)
+
+    press_pos = QPointF(100, 50)
+    press_event = QMouseEvent(
+        QEvent.Type.MouseButtonPress, press_pos, press_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    pane.mousePressEvent(press_event)
+
+    # The point only actually moves on mouseMoveEvent - press+release
+    # alone (no move in between) is a click, not a drag.
+    move_pos = QPointF(120, 60)
+    move_event = QMouseEvent(
+        QEvent.Type.MouseMove, move_pos, move_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    pane.mouseMoveEvent(move_event)
+
+    release_event = QMouseEvent(
+        QEvent.Type.MouseButtonRelease, move_pos, move_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    pane.mouseReleaseEvent(release_event)
+
+    assert app.ptsR == [(120.0, 60.0)]
+    assert "adjust_right_point_1" in app.tutorial_window.notified_actions
+
+
+def test_filling_a_real_time_box_notifies_its_own_tutorial_step(sizeamatic_app):
+    """Each of the six real-time-anchor boxes should report its own
+    distinct tutorial completion action once filled to its max length -
+    each is its own tutorial step (ROADMAP.md Phase 15)."""
+
+    app = sizeamatic_app
+    app.tutorial_window = _RecordingTutorialWindow()
+
+    app.real_time_year_edit.setText("2026")
+    assert app.tutorial_window.notified_actions == ["enter_time_year"]
+
+    app.real_time_month_edit.setText("08")
+    assert app.tutorial_window.notified_actions == ["enter_time_year", "enter_time_month"]
+
+
+def test_filling_the_last_real_time_box_notifies_without_a_next_box_to_focus(sizeamatic_app):
+    """The seconds box has no "next" box - it should still report its
+    own completion action even though there's nothing left to focus."""
+
+    app = sizeamatic_app
+    app.tutorial_window = _RecordingTutorialWindow()
+
+    app.real_time_second_edit.setText("30")
+
+    assert app.tutorial_window.notified_actions == ["enter_time_second"]
+
+
+def test_on_start_tutorial_never_touches_existing_state_or_confirms(sizeamatic_app, monkeypatch):
+    """start() no longer auto-loads anything - the user still loads the
+    generated sample files themselves through the real menu actions
+    (per the project owner's explicit correction) - so on_start_tutorial
+    has nothing to silently replace and should just call start()
+    directly, without any confirmation dialog."""
+
+    app = sizeamatic_app
+    app.left_video_path = "some_real_video.mp4"
+
+    questions_asked = []
+    monkeypatch.setattr("main.QMessageBox.question", staticmethod(lambda *a, **kw: questions_asked.append(1)))
+    started = []
+    app.tutorial_window.start = lambda: started.append(1)
+
+    app.on_start_tutorial()
+
+    assert questions_asked == []
+    assert started == [1]
 
 
 def test_on_save_project_records_it_in_recent_projects(sizeamatic_app, monkeypatch, tmp_path):
