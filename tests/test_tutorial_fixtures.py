@@ -10,6 +10,7 @@ import tempfile
 
 import cv2
 import numpy as np
+import pytest
 
 import calibration_io
 import tutorial_fixtures
@@ -47,22 +48,34 @@ def test_generate_tutorial_calibration_matches_a_given_video_resolution(tmp_path
     assert cal is not None
 
 
-def test_generate_tutorial_calibration_maps_are_the_identity_grid(tmp_path):
-    """The rectification maps should be a plain identity grid (pixel (x,
-    y) maps to itself) - see this module's "Design notes" for why: the
-    synthetic video is rendered already-rectified, so remapping through
-    these grids must leave a frame completely unchanged."""
+def test_generate_tutorial_calibration_maps_crop_in_toward_center(tmp_path):
+    """The rectification maps should crop in slightly toward the image
+    center (not a plain identity grid) - see this module's "Design
+    notes" for why: a pure identity grid would make "Show Rectified"
+    a visual no-op, unlike a real calibration's rectified view, which
+    always crops in a little after undistorting."""
 
     folder = str(tmp_path / "calibration")
     tutorial_fixtures.generate_tutorial_calibration(folder)
     cal, _error = calibration_io.load_calibration_bundle(folder)
 
-    frame = np.random.randint(0, 255, (tutorial_fixtures.TUTORIAL_VIDEO_HEIGHT, tutorial_fixtures.TUTORIAL_VIDEO_WIDTH, 3)).astype(
-        "uint8"
-    )
-    remapped = cv2.remap(frame, cal["mapLx"], cal["mapLy"], interpolation=cv2.INTER_LINEAR)
+    w, h = tutorial_fixtures.TUTORIAL_VIDEO_WIDTH, tutorial_fixtures.TUTORIAL_VIDEO_HEIGHT
+    cx, cy = w / 2.0, h / 2.0
 
-    assert (remapped == frame).all()
+    # The corner should sample a source point pulled toward center by
+    # exactly TUTORIAL_RECTIFICATION_ZOOM, not the corner itself.
+    expected_x = cx + (0.0 - cx) * tutorial_fixtures.TUTORIAL_RECTIFICATION_ZOOM
+    expected_y = cy + (0.0 - cy) * tutorial_fixtures.TUTORIAL_RECTIFICATION_ZOOM
+    assert cal["mapLx"][0, 0] == pytest.approx(expected_x, abs=0.5)
+    assert cal["mapLy"][0, 0] == pytest.approx(expected_y, abs=0.5)
+
+    # The exact center pixel is unaffected by a scale-from-center crop.
+    assert cal["mapLx"][int(cy), int(cx)] == pytest.approx(cx, abs=0.5)
+    assert cal["mapLy"][int(cy), int(cx)] == pytest.approx(cy, abs=0.5)
+
+    frame = np.random.randint(0, 255, (h, w, 3)).astype("uint8")
+    remapped = cv2.remap(frame, cal["mapLx"], cal["mapLy"], interpolation=cv2.INTER_LINEAR)
+    assert not (remapped == frame).all()
 
 
 def test_generate_tutorial_videos_produces_playable_correctly_shaped_videos(tmp_path):

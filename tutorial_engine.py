@@ -144,6 +144,18 @@ class Tutorial:
         around via the checklist doesn't lose track of what's actually
         been completed."""
 
+        self._advanced_from = set()
+        """Indices we've already moved forward from - either via
+        `advance()` or a real hook firing while that step was current.
+        Distinguishes "this step's action already legitimately moved us
+        on once" (re-firing it later, e.g. after jumping back, shouldn't
+        re-advance - see `test_mark_action_done_is_idempotent_for_an_
+        already_done_step`) from "this step's `done` flag only got set
+        early by an out-of-order action while some other step was
+        current" (the step has never actually been left yet, so its
+        real action firing while it's finally current for the first
+        time must still advance - see `mark_action_done`)."""
+
     # -------------------------------------------------------------------------
     # Read-only queries
     # -------------------------------------------------------------------------
@@ -203,6 +215,7 @@ class Tutorial:
         # "Next" fallback (Step 0's named exception, not the default)
         # still record progress the same way a real hook would.
         self.done[self.current_index] = True
+        self._advanced_from.add(self.current_index)
         if self.current_index < len(self.steps) - 1:
             self.current_index += 1
 
@@ -243,11 +256,24 @@ class Tutorial:
         records it correctly rather than only ever trusting linear
         order.
 
-        If the *current* step is among those completed, this also
-        auto-advances to the next step - the whole point of real-hook
-        detection is that finishing a step should visibly move the
-        tutorial forward without the user needing to separately click
-        "Next".
+        If the *current* step's own action is the one that fires, this
+        also auto-advances to the next step - the whole point of
+        real-hook detection is that finishing a step should visibly
+        move the tutorial forward without the user needing to
+        separately click "Next". This still advances even if the
+        current step's `done` flag was already True: two steps later in
+        the list can share a completion action's *shape* being
+        satisfied early - e.g. a stray click elsewhere already counted
+        toward "a point pair exists" while a different, earlier step
+        was current. Refusing to advance because the flag was already
+        set would leave the tutorial stuck showing a step whose real
+        action the user is about to correctly perform, waiting on a
+        signal that already fired out of order and will never fire
+        again. Re-firing the *same* action after genuinely already
+        having been advanced past this exact step once (tracked in
+        `_advanced_from`, not `done`) does NOT re-advance a second time
+        - that's the real idempotency guarantee re-doing an action
+        should have.
 
         Args:
             action_name (str): The action-name key that just fired
@@ -268,11 +294,14 @@ class Tutorial:
                 self.done[index] = True
                 newly_done.append(index)
 
-        # Only auto-advance if the step we were actually looking at is
-        # one of the ones that just completed - completing some other,
-        # not-currently-shown step (via the jump escape hatch) shouldn't
-        # yank the view away from whatever the user is currently reading.
-        if self.current_index in newly_done and self.current_index < len(self.steps) - 1:
+        current_step = self.steps[self.current_index]
+        if (
+            current_step.completion_action == action_name
+            and self.current_index not in self._advanced_from
+            and self.current_index < len(self.steps) - 1
+        ):
+            self.done[self.current_index] = True
+            self._advanced_from.add(self.current_index)
             self.current_index += 1
 
         return newly_done

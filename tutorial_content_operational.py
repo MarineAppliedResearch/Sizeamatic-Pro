@@ -70,7 +70,7 @@ STEPS = [
     TutorialStep(
         step_id="enter_time_month",
         title="Enter the Month",
-        description="Type the 2-digit month into the MM box.",
+        description="Read the 2-digit month from this tutorial video's on-screen clock and type it into the MM box.",
         details="Same pattern as the year box - once 2 digits are entered, focus moves to the next box automatically.",
         target=("main", "widget", "real_time_month_edit"),
         completion_action="enter_time_month",
@@ -78,7 +78,7 @@ STEPS = [
     TutorialStep(
         step_id="enter_time_day",
         title="Enter the Day",
-        description="Type the 2-digit day into the DD box.",
+        description="Read the 2-digit day from this tutorial video's on-screen clock and type it into the DD box.",
         details="Same pattern as the year box - once 2 digits are entered, focus moves to the next box automatically.",
         target=("main", "widget", "real_time_day_edit"),
         completion_action="enter_time_day",
@@ -86,7 +86,7 @@ STEPS = [
     TutorialStep(
         step_id="enter_time_hour",
         title="Enter the Hour",
-        description="Type the 2-digit hour into the HH box.",
+        description="Read the 2-digit hour from this tutorial video's on-screen clock and type it into the HH box.",
         details="24-hour time, matching whatever the video's on-screen clock shows.",
         target=("main", "widget", "real_time_hour_edit"),
         completion_action="enter_time_hour",
@@ -94,7 +94,7 @@ STEPS = [
     TutorialStep(
         step_id="enter_time_minute",
         title="Enter the Minute",
-        description="Type the 2-digit minute into the MM box.",
+        description="Read the 2-digit minute from this tutorial video's on-screen clock and type it into the MM box.",
         details="Same pattern as the other boxes - 2 digits, then focus auto-advances.",
         target=("main", "widget", "real_time_minute_edit"),
         completion_action="enter_time_minute",
@@ -102,7 +102,7 @@ STEPS = [
     TutorialStep(
         step_id="enter_time_second",
         title="Enter the Second",
-        description="Type the 2-digit second into the SS box.",
+        description="Read the 2-digit second from this tutorial video's on-screen clock and type it into the SS box.",
         details="The last of the six boxes - once it's filled, the next step covers actually anchoring the time you entered.",
         target=("main", "widget", "real_time_second_edit"),
         completion_action="enter_time_second",
@@ -115,7 +115,9 @@ STEPS = [
             "This anchors the video's frame numbers to a real-world date and time - once "
             "set, the Frame/Video Time/Actual Time readout below the video panes keeps "
             "calculating forward and backward from that anchor as you scrub, and every "
-            "recorded measurement also carries that calculated real-world time."
+            "recorded measurement also carries that calculated real-world time. If the "
+            "window is narrow enough that the toolbar hides this button behind a \">>\" "
+            "arrow, click that arrow first to reveal it."
         ),
         target=("main", "widget", "btn_set_time_sync"),
         completion_action="set_real_time_sync",

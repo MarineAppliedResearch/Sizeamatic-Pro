@@ -198,6 +198,38 @@ def test_mark_action_done_is_idempotent_for_an_already_done_step():
     assert tutorial.current_index == 0  # no further auto-advance triggered
 
 
+def test_mark_action_done_still_advances_a_step_completed_early_out_of_order():
+    """A real regression: if some other step's action call already
+    satisfied a *later* step's completion_action while a different step
+    was still current (e.g. a stray click that happens to match a later
+    step's action), `done` gets set for that later step immediately -
+    but the tutorial should still visibly advance once it's actually
+    reached as the current step and its action fires again for real,
+    not sit stuck forever waiting on a signal that will never re-fire."""
+
+    steps = _make_steps(3)
+    tutorial = tutorial_engine.Tutorial(steps)
+
+    # step1's action fires early, while step0 is still current - this
+    # happens to satisfy step1's completion_action, but step0 hasn't
+    # advanced yet so the view doesn't move.
+    newly_done = tutorial.mark_action_done("step1")
+    assert newly_done == [1]
+    assert tutorial.current_index == 0
+    assert tutorial.done == [False, True, False]
+
+    # step0's own action now fires for real - advances to step1 as normal.
+    tutorial.mark_action_done("step0")
+    assert tutorial.current_index == 1
+
+    # step1 is current, and already marked done from the early call
+    # above - its action firing again (this time for real, while it's
+    # actually being shown) must still advance the view.
+    newly_done = tutorial.mark_action_done("step1")
+    assert newly_done == []  # already done - nothing newly credited
+    assert tutorial.current_index == 2  # but the view still moved forward
+
+
 def test_is_finished_is_true_only_once_every_step_is_done():
     """`is_finished` should stay False until every single step has been
     completed, not just the current one."""

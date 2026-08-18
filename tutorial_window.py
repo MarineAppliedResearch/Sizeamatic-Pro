@@ -65,6 +65,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
+    QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -85,6 +87,37 @@ RECTIFIED_GLOW_COLOR = QColor("#2f6fed")
 """The highlight overlay's pulsing border color - matches this app's
 existing accent blue (`main.py`'s `DARK_QSS` selection/focus color),
 not a new color introduced just for the tutorial."""
+
+
+def _visible_toolbar_fallback(widget):
+    """Find a visible stand-in to highlight for a widget hidden behind a
+    toolbar's ">>" overflow extension.
+
+    Args:
+        widget (QWidget): A hidden widget, possibly a toolbar child that
+            got collapsed into the overflow because the window is too
+            narrow to show every toolbar item.
+
+    Returns:
+        QWidget | None: The enclosing `QToolBar`'s extension button, if
+        `widget` is inside a toolbar and that button is currently
+        visible - otherwise None, in which case the caller just
+        highlights the original (invisible) widget's rect as before.
+    """
+    ancestor = widget.parent()
+    while ancestor is not None and not isinstance(ancestor, QToolBar):
+        ancestor = ancestor.parent()
+    if ancestor is None:
+        return None
+    # Qt's own internal object name for a QToolBar's overflow button -
+    # there's no public API to fetch it directly. Confirmed against a
+    # real narrow-window overflow (not guessed) - PySide6 names it
+    # "qt_toolbar_ext_button", not the more guessable
+    # "qt_toolbar_extension_button".
+    extension = ancestor.findChild(QToolButton, "qt_toolbar_ext_button")
+    if extension is not None and extension.isVisible():
+        return extension
+    return None
 
 CHECKLIST_VISIBLE_ROWS = 10
 """How many step rows `ChecklistPanel` shows before scrolling - the v1
@@ -1046,8 +1079,18 @@ class TutorialController:
         if self.tutorial is None:
             return
 
+        index_before = self.tutorial.current_index
         newly_done = self.tutorial.mark_action_done(action_name)
-        if newly_done:
+        # Refresh on a current-step advance too, not just on newly_done -
+        # `mark_action_done` can move `current_index` forward even when
+        # `newly_done` comes back empty (the current step's `done` flag
+        # was already set early by an out-of-order action while a
+        # different step was current; see its docstring). Gating the
+        # refresh on `newly_done` alone would silently advance the
+        # engine's internal state without ever updating what's on
+        # screen - exactly the "did the right thing but nothing visibly
+        # happened" bug this call exists to prevent.
+        if newly_done or self.tutorial.current_index != index_before:
             self._refresh_display()
 
     # -------------------------------------------------------------------------
@@ -1215,6 +1258,17 @@ class TutorialController:
         widget = getattr(attr_source, ref, None)
         if widget is None:
             return None, None
+        if not widget.isVisible():
+            # A narrow window can collapse trailing toolbar widgets (e.g.
+            # "Set Time Sync", built last in `_build_real_time_sync_group`)
+            # behind a ">>" extension button - the widget still exists as
+            # a hidden child at that point, so highlighting it directly
+            # would compute a meaningless rect. Fall back to the
+            # toolbar's own extension button so there's still something
+            # real to point at; the user opens it, the widget becomes
+            # visible again inside the popup, and the real click still
+            # fires the same completion hook either way.
+            widget = _visible_toolbar_fallback(widget) or widget
         rect = widget.rect()
         rect.moveTopLeft(widget.mapTo(host_window, rect.topLeft()))
         return host_window, rect

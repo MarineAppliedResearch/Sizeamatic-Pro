@@ -30,14 +30,18 @@ Contents:
     - `generate_tutorial_videos` - renders the left/right MP4 pair.
 
 Design notes:
-    The calibration's rectification maps are the identity grid (each
-    pixel maps to itself) - the synthetic video is rendered directly
-    from the rig's own rectified projection matrices (`PL`/`PR`), so
-    there's no actual lens distortion or misalignment to correct for.
-    Toggling "Show Rectified" therefore doesn't visibly change the
-    tutorial video (nothing to warp), which is fine for what this
-    fixture needs to teach - the workflow of turning it on, not a
-    visible before/after.
+    The synthetic video is rendered directly from the rig's own
+    rectified projection matrices (`PL`/`PR`), so there's no actual lens
+    distortion or misalignment for the rectification maps to correct.
+    A pure identity grid would be the literal truth of that, but it
+    would also make toggling "Show Rectified" a visual no-op - unlike
+    every real calibration, which crops in slightly around its valid
+    ROI after undistorting. `TUTORIAL_RECTIFICATION_ZOOM` bakes in that
+    same mild inward crop artificially, purely so the tutorial's
+    "Switch to Rectified View" step looks and feels like flipping it on
+    with a real calibration - a small, deliberate cosmetic embellishment
+    on top of the otherwise-accurate synthetic rig, not a claim that
+    this rig has real distortion to correct.
 
     The rendered scene is two small markers connected by a line, at a
     fixed real-world separation, drifting in a slow circle over time
@@ -91,6 +95,11 @@ TUTORIAL_CLOCK_START = datetime.datetime(2026, 6, 1, 9, 0, 0)
 real-time-sync tutorial steps always ask for (and can be typed back)
 the same date/time regardless of which frame the user happens to anchor
 from partway through the video."""
+
+TUTORIAL_RECTIFICATION_ZOOM = 0.92
+"""How far the rectification maps crop in toward center, purely for the
+visible "zooms in a little and cuts off the edges" look a real
+calibration's rectified view has - see this module's "Design notes"."""
 
 TUTORIAL_SYNC_OFFSET_FRAMES = 15
 """The right video is deliberately generated out of sync with the left
@@ -151,12 +160,44 @@ def _project(P, X, Y, Z):
     return float(p[0] / p[2]), float(p[1] / p[2])
 
 
+def _to_raw_pixel(u, v):
+    """Map a point's true (rectified-space) pixel position to where it
+    must be drawn in the RAW video so that applying the calibration's
+    rectification maps reconstructs that exact position.
+
+    `PL`/`PR` describe the rectified pixel space - the one this app's
+    triangulation math actually assumes (see `README.md`'s "Measurement
+    notes"), and the one the tutorial's own steps teach the user to
+    measure in. Drawing markers straight at their `_project(...)`
+    position would only be correct in the raw (un-rectified) video if
+    the rectification maps were the identity - since they now crop in
+    by `TUTORIAL_RECTIFICATION_ZOOM` instead (see this module's "Design
+    notes"), the raw video has to draw each marker at the *inverse* of
+    that crop so a click on the rectified marker still triangulates to
+    the exact real position it was rendered from.
+
+    Args:
+        u (float): The point's true pixel X position, in rectified
+            space (straight out of `_project`).
+        v (float): The point's true pixel Y position, in rectified
+            space.
+
+    Returns:
+        tuple[float, float]: The `(u, v)` position to actually draw in
+        the raw video.
+    """
+    raw_u = TUTORIAL_CX + (u - TUTORIAL_CX) * TUTORIAL_RECTIFICATION_ZOOM
+    raw_v = TUTORIAL_CY + (v - TUTORIAL_CY) * TUTORIAL_RECTIFICATION_ZOOM
+    return raw_u, raw_v
+
+
 def generate_tutorial_calibration(folder):
     """Write a self-consistent synthetic calibration bundle to `folder`.
 
     Writes exactly the four files `calibration_io.load_calibration_bundle`
-    expects, matching every key it reads. The rectification maps are the
-    identity grid - see this module's "Design notes" for why.
+    expects, matching every key it reads. The rectification maps crop in
+    toward center by `TUTORIAL_RECTIFICATION_ZOOM` - see this module's
+    "Design notes" for why.
 
     Args:
         folder (str): Path to write the four calibration NPZ files into
@@ -219,8 +260,16 @@ def generate_tutorial_calibration(folder):
     roi = np.array([0, 0, w, h], dtype=np.int32)
     np.savez(os.path.join(folder, "calibration_rectification.npz"), PL=PL, PR=PR, Q=Q, RL=RL, RR=RR, roiL=roi, roiR=roi)
 
-    # Identity remap grids - see this module's "Design notes".
-    grid_x, grid_y = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+    # A mild inward-crop grid, not a pure identity one - see this
+    # module's "Design notes" for why. Each output pixel samples a
+    # source pixel pulled `TUTORIAL_RECTIFICATION_ZOOM` of the way in
+    # toward the image center, so remapping visibly crops in and
+    # magnifies, exactly like a real calibration's rectified view does.
+    xs = np.arange(w, dtype=np.float32)
+    ys = np.arange(h, dtype=np.float32)
+    grid_x, grid_y = np.meshgrid(xs, ys)
+    grid_x = (TUTORIAL_CX + (grid_x - TUTORIAL_CX) * TUTORIAL_RECTIFICATION_ZOOM).astype(np.float32)
+    grid_y = (TUTORIAL_CY + (grid_y - TUTORIAL_CY) * TUTORIAL_RECTIFICATION_ZOOM).astype(np.float32)
     np.savez(os.path.join(folder, "calibration_maps.npz"), mapLx=grid_x, mapLy=grid_y, mapRx=grid_x, mapRy=grid_y)
 
 
@@ -252,8 +301,10 @@ def _render_frame(point_a, point_b, scene_index, fps):
     burned-in clock, and a burned-in frame counter.
 
     Args:
-        point_a (tuple[float, float]): First marker's pixel position.
-        point_b (tuple[float, float]): Second marker's pixel position.
+        point_a (tuple[float, float]): First marker's raw-video pixel
+            position (see `_to_raw_pixel`).
+        point_b (tuple[float, float]): Second marker's raw-video pixel
+            position.
         scene_index (int): This frame's *true* scene moment - drives
             both burned-in readouts. Left and right pass their own,
             deliberately different, values here (see
@@ -267,6 +318,14 @@ def _render_frame(point_a, point_b, scene_index, fps):
         3)` `uint8` BGR frame.
     """
     frame = np.full((TUTORIAL_VIDEO_HEIGHT, TUTORIAL_VIDEO_WIDTH, 3), (40, 30, 20), dtype=np.uint8)
+
+    # A static reference border a few pixels in from each edge - the
+    # scene markers alone barely move enough near center to make
+    # "Show Rectified"'s crop-in visible against a flat background;
+    # this border makes the crop obvious, since it runs almost to the
+    # frame's edges and is pulled outside the visible area entirely
+    # once the rectification maps' inward crop is applied.
+    cv2.rectangle(frame, (4, 4), (TUTORIAL_VIDEO_WIDTH - 5, TUTORIAL_VIDEO_HEIGHT - 5), (90, 90, 90), 2, cv2.LINE_AA)
 
     pa = (int(round(point_a[0])), int(round(point_a[1])))
     pb = (int(round(point_b[0])), int(round(point_b[1])))
@@ -332,10 +391,16 @@ def generate_tutorial_videos(left_path, right_path):
             X1_l, X2_l, Y_l, Z_l = _scene_state(scene_index_left, TUTORIAL_VIDEO_FPS)
             X1_r, X2_r, Y_r, Z_r = _scene_state(scene_index_right, TUTORIAL_VIDEO_FPS)
 
-            point_a_left = _project(PL, X1_l, Y_l, Z_l)
-            point_b_left = _project(PL, X2_l, Y_l, Z_l)
-            point_a_right = _project(PR, X1_r, Y_r, Z_r)
-            point_b_right = _project(PR, X2_r, Y_r, Z_r)
+            # Drawn in raw-video pixel space (`_to_raw_pixel`), not the
+            # true `_project(...)` position directly - see that
+            # function's docstring for why: it's the inverse of the
+            # rectification maps' inward crop, so a click on the marker
+            # in RECTIFIED view still triangulates to the exact real
+            # position it was rendered from.
+            point_a_left = _to_raw_pixel(*_project(PL, X1_l, Y_l, Z_l))
+            point_b_left = _to_raw_pixel(*_project(PL, X2_l, Y_l, Z_l))
+            point_a_right = _to_raw_pixel(*_project(PR, X1_r, Y_r, Z_r))
+            point_b_right = _to_raw_pixel(*_project(PR, X2_r, Y_r, Z_r))
 
             writer_l.write(_render_frame(point_a_left, point_b_left, scene_index_left, TUTORIAL_VIDEO_FPS))
             writer_r.write(_render_frame(point_a_right, point_b_right, scene_index_right, TUTORIAL_VIDEO_FPS))

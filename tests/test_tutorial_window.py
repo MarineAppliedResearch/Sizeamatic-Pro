@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QMouseEvent
-from PySide6.QtWidgets import QPushButton
+from PySide6.QtWidgets import QPushButton, QToolBar, QToolButton
 
 import tutorial_engine
 import tutorial_fixtures
@@ -494,6 +494,37 @@ def test_controller_notify_action_completes_the_current_step_and_advances(sizeam
     controller.stop()
 
 
+def test_controller_notify_action_refreshes_the_display_even_when_already_credited(sizeamatic_app, monkeypatch):
+    """Regression test for a real bug found during manual proof-testing:
+    if step1's action happened to fire early while step0 was still
+    current (e.g. a stray click matching a later step's action), step1
+    gets credited (`done`) immediately - but the bubble was still
+    showing step0, so nothing looked different. Once step0 completes
+    for real and the view moves to step1, step1's action firing again
+    (genuinely, this time while it's actually shown) must still visibly
+    advance the bubble - not silently do nothing just because `done`
+    was already True from the earlier, out-of-order call."""
+
+    sizeamatic_app.show()
+    monkeypatch.setattr("tutorial_window.STEPS", _make_steps(3))
+    controller = tutorial_window.TutorialController(sizeamatic_app)
+    controller.start()
+
+    controller.notify_action("step1")  # fires early, while step0 is current
+    assert controller.tutorial.current_index == 0
+    assert controller.bubble.title_label.text() == "Title 0"
+
+    controller.notify_action("step0")  # real advance to step1
+    assert controller.tutorial.current_index == 1
+    assert controller.bubble.title_label.text() == "Title 1"
+
+    controller.notify_action("step1")  # the real action, step1 now current
+    assert controller.tutorial.current_index == 2
+    assert controller.bubble.title_label.text() == "Title 2"
+
+    controller.stop()
+
+
 def test_controller_next_button_advances_the_bubble_to_the_next_step(sizeamatic_app, monkeypatch):
     """The bubble's Next button should drive the same advance() path a
     real completion hook would, for steps that need the manual fallback."""
@@ -586,6 +617,57 @@ def test_resolve_target_rect_for_measurement_window_widgets_once_it_exists(sizea
         host_window, rect = controller._resolve_target_rect(("measurement_window", "widget", ref))
         assert host_window is sizeamatic_app.measurement_window.win, ref
         assert rect is not None, ref
+
+
+def test_resolve_target_rect_falls_back_to_the_toolbar_extension_button_when_hidden(sizeamatic_app, qapp):
+    """Regression test: a narrow window can collapse a trailing toolbar
+    widget (e.g. "Set Time Sync", built last) behind a ">>" overflow
+    extension button - the widget still technically exists but
+    `isVisible()` is False and its geometry is meaningless to highlight
+    (confirmed live: a hidden `QPushButton`'s `.rect()` keeps whatever
+    stale size it last had, nothing like a real button's geometry).
+    `_resolve_target_rect` should fall back to the toolbar's own real,
+    visible extension button instead of pointing at that stale rect.
+    Narrows the real window rather than faking a widget, since Qt's
+    layout is what actually decides which widgets get collapsed."""
+
+    sizeamatic_app.resize(300, 400)
+    sizeamatic_app.show()
+    qapp.processEvents()
+
+    real_widget = sizeamatic_app.btn_set_time_sync
+    assert not real_widget.isVisible()  # precondition: genuinely collapsed into overflow
+
+    toolbar = real_widget.parent()
+    while not isinstance(toolbar, QToolBar):
+        toolbar = toolbar.parent()
+    extension = toolbar.findChild(QToolButton, "qt_toolbar_ext_button")
+    assert extension is not None and extension.isVisible()  # precondition
+
+    controller = tutorial_window.TutorialController(sizeamatic_app)
+    host_window, rect = controller._resolve_target_rect(("main", "widget", "btn_set_time_sync"))
+
+    assert host_window is sizeamatic_app
+    expected = extension.rect()
+    expected.moveTopLeft(extension.mapTo(sizeamatic_app, expected.topLeft()))
+    assert rect == expected
+
+
+def test_resolve_target_rect_uses_the_hidden_widget_when_no_toolbar_extension_is_visible(sizeamatic_app):
+    """If a widget is hidden for some other reason (not toolbar
+    overflow, so the extension button isn't actually showing), there's
+    no better fallback - resolving should just return that widget's own
+    rect rather than raising."""
+
+    sizeamatic_app.show()
+    controller = tutorial_window.TutorialController(sizeamatic_app)
+
+    sizeamatic_app.btn_clear_points.setVisible(False)
+
+    host_window, rect = controller._resolve_target_rect(("main", "widget", "btn_clear_points"))
+
+    assert host_window is sizeamatic_app
+    assert rect is not None
 
 
 def test_refresh_display_raises_and_activates_the_measurement_window_for_its_steps(sizeamatic_app, monkeypatch):
