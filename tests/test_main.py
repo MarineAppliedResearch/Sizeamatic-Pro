@@ -161,28 +161,31 @@ def test_clear_points_notifies_the_tutorial(sizeamatic_app):
     assert app.tutorial_window.notified_actions == ["clear_points"]
 
 
-def test_points_changed_notifies_the_tutorial_for_a_pair_then_a_segment(sizeamatic_app):
-    """Placing a first point pair should report "place_point_pair";
-    adding a second pair should additionally report "place_segment" -
-    both fire off the same on_points_changed hook, gated by point count
-    rather than by which click handler ran."""
+def test_points_changed_notifies_the_tutorial_per_side_and_count(sizeamatic_app):
+    """Each side's point count is reported independently (no more
+    auto-mirroring tying the two sides together) - placing a left point
+    reports "place_left_point_1" regardless of the right side, and so on
+    for each of the four count thresholds."""
 
     app = sizeamatic_app
     app.tutorial_window = _RecordingTutorialWindow()
 
     app.ptsL = [(10.0, 10.0)]
+    app.on_points_changed()
+    assert app.tutorial_window.notified_actions == ["place_left_point_1"]
+
     app.ptsR = [(12.0, 10.0)]
     app.on_points_changed()
-    assert app.tutorial_window.notified_actions == ["place_point_pair"]
+    assert app.tutorial_window.notified_actions == [
+        "place_left_point_1", "place_left_point_1", "place_right_point_1",
+    ]
 
     app.ptsL.append((20.0, 20.0))
     app.ptsR.append((22.0, 20.0))
     app.on_points_changed()
-    # on_points_changed re-reports "place_point_pair" every time len>=1,
-    # not just the first - deduping repeat reports of an already-done
-    # step is tutorial_engine.Tutorial.mark_action_done's job (this bare
-    # recorder intentionally doesn't dedupe, so every real call shows up).
-    assert app.tutorial_window.notified_actions == ["place_point_pair", "place_point_pair", "place_segment"]
+    assert app.tutorial_window.notified_actions[-4:] == [
+        "place_left_point_1", "place_right_point_1", "place_left_point_2", "place_right_point_2",
+    ]
 
 
 def test_clicking_a_real_point_in_the_left_pane_notifies_the_tutorial(sizeamatic_app):
@@ -190,12 +193,8 @@ def test_clicking_a_real_point_in_the_left_pane_notifies_the_tutorial(sizeamatic
     call: a real mouse click on the real `pane_left` VideoPane widget
     should notify the real `app.tutorial_window` via the actual
     click -> mousePressEvent -> on_points_changed chain a user's click
-    goes through. The test above only proves the hook logic itself is
-    right; this proves the wiring between the real widget and the real
-    app is intact too - the kind of gap a previous manual proof-test
-    round found a real bug through (an unrelated stuck-earlier-step
-    issue that looked, from the outside, like point placement was
-    broken) that a pure logic-level test wouldn't have caught."""
+    goes through - proves the wiring between the real widget and the
+    real app is intact, not just the hook logic in isolation."""
 
     app = sizeamatic_app
     app.tutorial_window = _RecordingTutorialWindow()
@@ -212,50 +211,32 @@ def test_clicking_a_real_point_in_the_left_pane_notifies_the_tutorial(sizeamatic
     pane.mousePressEvent(event)
 
     assert app.ptsL == [(100.0, 50.0)]
-    assert app.ptsR == [(100.0, 50.0)]  # auto-mirrored to the same pixel as a starting guess
-    assert "place_point_pair" in app.tutorial_window.notified_actions
+    assert app.ptsR == []  # no more auto-mirroring
+    assert "place_left_point_1" in app.tutorial_window.notified_actions
 
 
-def test_dragging_the_right_point_to_correct_it_notifies_the_tutorial_end_to_end(sizeamatic_app):
-    """Same end-to-end approach as the test above, for the "correct the
-    right point" steps: a real click-drag-release on the real
-    `pane_right` widget should notify "adjust_right_point_1" through the
-    real app, not just when called directly on video_overlay.py's own
-    FakeApp-based tests (see test_video_overlay.py for those)."""
+def test_clicking_a_real_point_in_the_right_pane_notifies_the_tutorial(sizeamatic_app):
+    """Same end-to-end approach as the test above, for the RIGHT pane -
+    a real click (not a drag) is now how a user places the matching
+    point, since there's no auto-placed mate to drag anymore."""
 
     app = sizeamatic_app
     app.tutorial_window = _RecordingTutorialWindow()
     app.metaL = {"width": 640, "height": 480}
     app.metaR = {"width": 640, "height": 480}
-    app.ptsR = [(100.0, 50.0)]
 
     pane = app.pane_right
     pane.resize(640, 480)
 
-    press_pos = QPointF(100, 50)
-    press_event = QMouseEvent(
-        QEvent.Type.MouseButtonPress, press_pos, press_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
-        Qt.KeyboardModifier.NoModifier,
+    pos = QPointF(100, 50)
+    event = QMouseEvent(
+        QEvent.Type.MouseButtonPress, pos, pos, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier
     )
-    pane.mousePressEvent(press_event)
+    pane.mousePressEvent(event)
 
-    # The point only actually moves on mouseMoveEvent - press+release
-    # alone (no move in between) is a click, not a drag.
-    move_pos = QPointF(120, 60)
-    move_event = QMouseEvent(
-        QEvent.Type.MouseMove, move_pos, move_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
-        Qt.KeyboardModifier.NoModifier,
-    )
-    pane.mouseMoveEvent(move_event)
-
-    release_event = QMouseEvent(
-        QEvent.Type.MouseButtonRelease, move_pos, move_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton,
-        Qt.KeyboardModifier.NoModifier,
-    )
-    pane.mouseReleaseEvent(release_event)
-
-    assert app.ptsR == [(120.0, 60.0)]
-    assert "adjust_right_point_1" in app.tutorial_window.notified_actions
+    assert app.ptsR == [(100.0, 50.0)]
+    assert app.ptsL == []
+    assert "place_right_point_1" in app.tutorial_window.notified_actions
 
 
 def test_filling_a_real_time_box_notifies_its_own_tutorial_step(sizeamatic_app):
@@ -956,6 +937,46 @@ def test_measurement_chain_produces_point_segment_and_total_rows(
     total_row = rows[-1]
     assert total_row[6] == ""  # no label on the Total row
     assert float(total_row[10]) == pytest.approx(known_chain_pixels["total_length_mm"], abs=0.05)
+
+
+def test_clearing_points_clears_a_stale_results_table(sizeamatic_app, synthetic_cal, known_point_pixels):
+    """Regression test: every early-return branch in
+    `_update_measurement_status_stub` used to skip refreshing the
+    measurement window entirely, so clicking Clear Points (or landing on
+    a mismatched point count) left the Results table showing the
+    previous, now-stale measurement instead of clearing to empty."""
+
+    app = sizeamatic_app
+    app.view_rectified.set(True)
+    app.cal = dict(synthetic_cal)
+    app.ptsL = [(known_point_pixels["xL"], known_point_pixels["yL"])]
+    app.ptsR = [(known_point_pixels["xR"], known_point_pixels["yR"])]
+    app._update_measurement_status_stub()
+
+    assert app.measurement_window.results_table.rowCount() == 1  # precondition: a real row exists
+
+    app.on_clear_points()
+
+    assert app.measurement_window.results_table.rowCount() == 0
+
+
+def test_a_mismatched_point_count_also_clears_a_stale_results_table(sizeamatic_app, synthetic_cal, known_point_pixels):
+    """Same regression as above, for the "one side has a point, the
+    other doesn't yet" case introduced by removing auto-mirroring."""
+
+    app = sizeamatic_app
+    app.view_rectified.set(True)
+    app.cal = dict(synthetic_cal)
+    app.ptsL = [(known_point_pixels["xL"], known_point_pixels["yL"])]
+    app.ptsR = [(known_point_pixels["xR"], known_point_pixels["yR"])]
+    app._update_measurement_status_stub()
+
+    assert app.measurement_window.results_table.rowCount() == 1
+
+    app.ptsL.append((known_point_pixels["xL"] + 10, known_point_pixels["yL"]))
+    app._update_measurement_status_stub()
+
+    assert app.measurement_window.results_table.rowCount() == 0
 
 
 class _FakeMouseEvent:

@@ -219,30 +219,19 @@ def test_draw_pane_uses_orange_overlay_color_when_not_rectified(qapp):
     assert image.pixelColor(100, 50).name() == video_overlay.CENTER_DOT_COLOR.name()
 
 
-def test_left_click_on_new_point_places_mate_at_same_image_pixel(qapp):
-    """Placing the first point on one pane should immediately place its
-    mate on the opposite pane at the exact same image pixel coordinates
-    (ROADMAP.md Phase 7's usability quiz: the previous scanline-matcher
-    guess was found unhelpful in practice, and was replaced with this
-    simpler default — the user drags it into place manually, or
-    right-click-drags it to invoke the matcher explicitly instead).
+def test_left_click_on_new_point_does_not_place_a_mate_on_the_other_pane(qapp):
+    """Placing a point on one pane should NOT auto-place a matching point
+    on the opposite pane (ROADMAP.md Phase 16's usability feedback: users
+    wanted to click both sides themselves - left, left, left, then right,
+    right, right - rather than fixing an auto-guessed mate every time)."""
 
-    Deliberately doesn't depend on calibration being loaded at all — no
-    stereo matching is attempted for this initial placement anymore.
-    """
-
-    app = _make_fake_app(
-        metaL={"width": 640, "height": 480},
-        metaR={"width": 640, "height": 480},
-        cal=None,  # should have no effect on this initial placement now
-    )
+    app = _make_fake_app(metaL={"width": 640, "height": 480}, metaR={"width": 640, "height": 480})
     pane = _make_pane(qapp, app)
 
     pane.mousePressEvent(_FakeMouseEvent(100, 50))
 
-    assert len(app.ptsL) == 1
-    assert len(app.ptsR) == 1
-    assert app.ptsR[0] == app.ptsL[0] == (100.0, 50.0)
+    assert app.ptsL == [(100.0, 50.0)]
+    assert app.ptsR == []
 
 
 def test_drag_moves_an_existing_point(qapp):
@@ -265,53 +254,6 @@ def test_drag_moves_an_existing_point(qapp):
     pane.mouseReleaseEvent(_FakeMouseEvent(200, 150))
     assert pane.drag_active is False
     assert pane.drag_index is None
-
-
-def test_dragging_the_first_right_point_notifies_adjust_right_point_1(qapp):
-    """Correcting the first auto-placed right point by dragging it should
-    report "adjust_right_point_1" - the tutorial step teaching exactly
-    that. Dragging a LEFT point must not report anything (that's not
-    what those steps cover)."""
-
-    app = _make_fake_app(metaR={"width": 640, "height": 480}, ptsR=[(100.0, 50.0)])
-    pane = _make_pane(qapp, app, which="R")
-
-    pane.mousePressEvent(_FakeMouseEvent(100, 50))
-    pane.mouseMoveEvent(_FakeMouseEvent(120, 60))
-    pane.mouseReleaseEvent(_FakeMouseEvent(120, 60))
-
-    assert app.tutorial_window.notified_actions == ["adjust_right_point_1"]
-
-
-def test_dragging_the_second_right_point_notifies_adjust_right_point_2(qapp):
-    """Correcting the *second* auto-placed right point (the Segment's
-    second point) should report "adjust_right_point_2", distinct from
-    the first point's action - each has its own tutorial step."""
-
-    app = _make_fake_app(
-        metaR={"width": 640, "height": 480}, ptsR=[(100.0, 50.0), (200.0, 60.0)]
-    )
-    pane = _make_pane(qapp, app, which="R")
-
-    pane.mousePressEvent(_FakeMouseEvent(200, 60))
-    pane.mouseMoveEvent(_FakeMouseEvent(220, 70))
-    pane.mouseReleaseEvent(_FakeMouseEvent(220, 70))
-
-    assert app.tutorial_window.notified_actions == ["adjust_right_point_2"]
-
-
-def test_left_click_drag_on_the_left_pane_does_not_notify_adjust_right_point(qapp):
-    """Dragging a point on the LEFT pane isn't "correcting the right
-    point" - it shouldn't report any adjust_right_point_* action."""
-
-    app = _make_fake_app(metaL={"width": 640, "height": 480}, ptsL=[(100.0, 50.0)])
-    pane = _make_pane(qapp, app, which="L")
-
-    pane.mousePressEvent(_FakeMouseEvent(100, 50))
-    pane.mouseMoveEvent(_FakeMouseEvent(120, 60))
-    pane.mouseReleaseEvent(_FakeMouseEvent(120, 60))
-
-    assert app.tutorial_window.notified_actions == []
 
 
 def test_multiple_clicks_build_a_connected_chain_up_to_the_point_cap(qapp):

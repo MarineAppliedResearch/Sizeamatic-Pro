@@ -588,16 +588,6 @@ class VideoPane(QWidget):
             ix, iy = self.screen_to_image(pos.x(), pos.y())
             pts.append((ix, iy))
 
-            # Give the opposite pane an initial mate guess of the exact
-            # same pixel position if it doesn't already have a point at
-            # this index - deliberate: the scanline matcher is only used
-            # for *refining* an existing placement, not for guessing the
-            # very first one.
-            other_pts = self.app.ptsR if self.which == "L" else self.app.ptsL
-            new_index = len(pts) - 1
-            if new_index >= len(other_pts):
-                other_pts.append((ix, iy))
-
             self.app.on_points_changed()
 
         elif event.button() == Qt.MouseButton.MiddleButton:
@@ -654,6 +644,12 @@ class VideoPane(QWidget):
     def mouseReleaseEvent(self, event):
         """End an active pan, point drag, or trigger scanline refinement.
 
+        Tutorial completion detection for point placement happens in
+        `main.py`'s `on_points_changed` (called from every branch below
+        that changes `pts`/`other_pts`), not here - it's checked by
+        count rather than tied to a specific gesture, so it fires the
+        same way whether a point got there by a fresh click or a drag.
+
         The right-button release triggers scanline refinement only if
         the press actually started a refine drag (on a point with a
         matched mate); if the right-button press instead started
@@ -673,18 +669,9 @@ class VideoPane(QWidget):
             None
         """
         if event.button() == Qt.MouseButton.LeftButton and self.drag_active:
-            dragged_index = self.drag_index
             self.drag_active = False
             self.drag_index = None
             self.app.on_points_changed()
-            # Tutorial completion detection for "correct the auto-placed
-            # right point" - only the right pane's drags teach that step
-            # (dragging a left point isn't what those steps cover), and
-            # only the first two points have a dedicated step at all;
-            # a third point's drag just reports an action name nothing
-            # matches, a harmless no-op.
-            if self.which == "R" and dragged_index is not None:
-                self.app.tutorial_window.notify_action(f"adjust_right_point_{dragged_index + 1}")
 
         elif event.button() == Qt.MouseButton.MiddleButton and self.pan_active:
             self.pan_active = False
@@ -718,9 +705,3 @@ class VideoPane(QWidget):
                     pts[index] = refined
 
             self.app.on_points_changed()
-            # Same tutorial completion detection as the plain-drag branch
-            # above - the scanline "refine" gesture is the other way the
-            # tutorial's "correct the right point" steps expect this to
-            # be done.
-            if self.which == "R" and index is not None:
-                self.app.tutorial_window.notify_action(f"adjust_right_point_{index + 1}")

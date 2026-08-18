@@ -206,26 +206,22 @@ STEPS = [
         step_id="place_left_point_1",
         title="Place a Point in the Left Video",
         description="Left-click a point in the LEFT video pane.",
-        details=(
-            "Sizeamatic Pro automatically places a matching point in the right pane at "
-            "the same pixel position as a starting guess - you'll fix its exact position "
-            "in the next step."
-        ),
+        details="Click directly on the exact feature you want to measure from - there's nothing to fix afterward, so place it carefully the first time.",
         target=("main", "widget", "pane_left"),
-        completion_action="place_point_pair",
+        completion_action="place_left_point_1",
     ),
     TutorialStep(
-        step_id="adjust_right_point_1",
-        title="Correct the Right Point",
-        description="Drag the auto-placed point in the RIGHT pane onto the exact matching feature.",
+        step_id="place_right_point_1",
+        title="Place the Matching Point in the Right Video",
+        description="Left-click the SAME real-world feature in the RIGHT video pane.",
         details=(
-            "The initial position is only a guess at the same pixel as your left click - "
-            "dragging it onto the true matching feature is what makes the measurement "
-            "accurate. Right-click-drag it instead to have Sizeamatic Pro search nearby "
-            "for a better match automatically."
+            "This is what pairs the two clicks into one measurable 3D point - click as "
+            "precisely as you can on the exact same feature you clicked in the left pane. "
+            "You can still drag a placed point afterward to nudge it, or right-click-drag "
+            "it to have Sizeamatic Pro search nearby for a better match automatically."
         ),
         target=("main", "widget", "pane_right"),
-        completion_action="adjust_right_point_1",
+        completion_action="place_right_point_1",
     ),
     TutorialStep(
         step_id="point_quality_metrics",
@@ -257,15 +253,15 @@ STEPS = [
             "Segment row, summed into one Total row."
         ),
         target=("main", "widget", "pane_left"),
-        completion_action="place_segment",
+        completion_action="place_left_point_2",
     ),
     TutorialStep(
-        step_id="adjust_right_point_2",
-        title="Correct the Second Right Point",
-        description="Drag the second auto-placed point in the RIGHT pane onto its matching feature.",
-        details="Same idea as the first point - the auto-placed guess needs to be corrected onto the real matching feature before the Segment is accurate.",
+        step_id="place_right_point_2",
+        title="Add the Matching Second Point (Right)",
+        description="Left-click the SAME feature in the RIGHT pane to complete the Segment.",
+        details="Same idea as the first point pair - clicking the same real-world feature in both panes is what makes this Segment's length accurate.",
         target=("main", "widget", "pane_right"),
-        completion_action="adjust_right_point_2",
+        completion_action="place_right_point_2",
     ),
     TutorialStep(
         step_id="total_row_and_chain_sigma",

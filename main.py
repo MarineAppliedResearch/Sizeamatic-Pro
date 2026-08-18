@@ -1408,16 +1408,18 @@ class SizeamaticProApp(QMainWindow):
         self.pane_right.update()
         self._update_measurement_status_stub()
 
-        # Tutorial completion detection for the point-placement steps -
-        # checked by count rather than hooked into the click handler
-        # itself, since "a point pair exists" is the actual thing being
-        # taught, regardless of whether it got there by a fresh click or
-        # a drag. Both checks fire on every call; `mark_action_done` is
-        # idempotent, so reaching 2+ points calls both harmlessly.
-        if len(self.ptsL) >= 1 and len(self.ptsR) >= 1:
-            self.tutorial_window.notify_action("place_point_pair")
-        if len(self.ptsL) >= 2 and len(self.ptsR) >= 2:
-            self.tutorial_window.notify_action("place_segment")
+        # Tutorial completion detection, checked by count so it fires the
+        # same way for a click or a drag. Each side is independent (no
+        # more auto-mirroring) - all four checks run every call, harmless
+        # since mark_action_done is idempotent.
+        if len(self.ptsL) >= 1:
+            self.tutorial_window.notify_action("place_left_point_1")
+        if len(self.ptsR) >= 1:
+            self.tutorial_window.notify_action("place_right_point_1")
+        if len(self.ptsL) >= 2:
+            self.tutorial_window.notify_action("place_left_point_2")
+        if len(self.ptsR) >= 2:
+            self.tutorial_window.notify_action("place_right_point_2")
 
     def _current_measurement_context(self):
         """Build the video/frame/timestamp identifying info for the
@@ -1486,18 +1488,23 @@ class SizeamaticProApp(QMainWindow):
         # Quick gating messages stay in the status bar.
         if l_count == 0 and r_count == 0:
             self._set_status_right("")
+            self._refresh_measurement_window([], "No points placed")
             return
 
         if l_count != r_count:
-            self._set_status_right(f"Point pair incomplete: L={l_count} R={r_count}")
+            message = f"Point pair incomplete: L={l_count} R={r_count}"
+            self._set_status_right(message)
+            self._refresh_measurement_window([], message)
             return
 
         if not self.view_rectified.get():
             self._set_status_right("Enable rectified view to measure")
+            self._refresh_measurement_window([], "Enable rectified view to measure")
             return
 
         if self.cal is None:
             self._set_status_right("Load calibration to measure")
+            self._refresh_measurement_window([], "Load calibration to measure")
             return
 
         n = min(l_count, r_count)
@@ -1515,7 +1522,9 @@ class SizeamaticProApp(QMainWindow):
 
         # If we got nothing, show the error and return.
         if len(pts3d) == 0:
-            self._set_status_right(err_msg if err_msg else "No valid points")
+            message = err_msg if err_msg else "No valid points"
+            self._set_status_right(message)
+            self._refresh_measurement_window([], message)
             return
 
         # Video/frame/timestamp context, shared by every row this call produces.
@@ -1659,6 +1668,27 @@ class SizeamaticProApp(QMainWindow):
 
         # Update popup window (creates it on first valid measurement).
         self.measurement_window.update_window(rows, err_msg)
+
+    def _refresh_measurement_window(self, rows, message):
+        """Refresh an already-open measurement window with "nothing to
+        show" state, without forcing it open.
+
+        Used by every early-return branch in `_update_measurement_status_stub`
+        (points cleared, mismatched counts, view/calibration not ready, no
+        valid points) - the window should stop showing stale results from
+        a previous measurement the moment that's no longer true, but a
+        user who has never placed a measurement yet shouldn't see it pop
+        open just because they clicked Clear Points.
+
+        Args:
+            rows (list[tuple]): Result rows to show - normally empty here.
+            message (str): Error/status line to show in the window.
+
+        Returns:
+            None
+        """
+        if self.measurement_window.win is not None:
+            self.measurement_window.update_window(rows, message)
 
     def _on_measurement_recorded(self):
         """Snapshot enough state to restore this exact measurement later.
