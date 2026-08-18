@@ -155,6 +155,7 @@ class ClosableDialog(QDialog):
         """
         super().__init__(None, Qt.WindowType.Window)
         self._on_close = on_close
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         enable_dark_title_bar(self)
 
     def closeEvent(self, event):

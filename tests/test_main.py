@@ -595,7 +595,11 @@ def test_open_project_restores_last_recorded_frame_points_and_log(
         "ptsR": [[95.0, 50.0]],
     }
     header_line = "\t".join(measurement_window.RESULT_HEADERS[c] for c in measurement_window.RESULT_COLUMNS)
-    recorded_row = ("left.mp4", "40", "00:00:01.333", "2026-08-12 14:32:05.000", "1", "Point", "0", "100.0", "50.0", "0.0", "0.0", "5.0", "0.0", "0.5", "0.3", "1.0", "2.0", "1.1", "2.1")
+    recorded_row = (
+        "left.mp4", "40", "00:00:01.333", "2026-08-12 14:32:05.000", "1", "Point", "0",
+        "100.0", "50.0", "0.0", "0.0", "5.0", "0.0", "0.5", "0.3", "1.0", "2.0", "1.1", "2.1",
+        "0.0", "", "", "0.3",
+    )
     log_text = header_line + "\n" + "\t".join(recorded_row)
 
     err = project_io.save_project(

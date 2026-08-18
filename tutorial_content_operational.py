@@ -294,9 +294,9 @@ STEPS = [
     TutorialStep(
         step_id="edit_log",
         title="Fixing a Bad Recorded Row",
-        description="Try it now: click into the Log, change one of the recorded values, or delete a whole row.",
-        details="There's no separate undo/delete button by design - editing the Log's text is itself the fix/delete mechanism, so you have full control over exactly what stays in it.",
-        target=("measurement_window", "widget", "log_text"),
+        description="Try it now: double-click a Log cell to edit its value, or select a row and press Delete to remove it.",
+        details="Deleting asks for confirmation first (select one or more rows, press Delete or right-click → Delete Row(s)) - editing a cell's value directly needs no confirmation, so you have full control over exactly what stays in the Log.",
+        target=("measurement_window", "widget", "log_table"),
         completion_action=None,
     ),
     # ---- Saving and reopening projects ----
@@ -327,10 +327,10 @@ STEPS = [
     TutorialStep(
         step_id="copy_to_clipboard",
         title="Copy Measurements to the Clipboard",
-        description="Select the text in the Copy box and copy it - it pastes directly into a spreadsheet as one tab-separated block.",
-        details="The Copy box always mirrors the current measurement's results table exactly, header row included, so a paste into Excel/Sheets/a text file lines up as real columns without any reformatting.",
-        target=("measurement_window", "widget", "copy_text"),
-        completion_action=None,
+        description="Click Copy to Clipboard on the Results table - it pastes directly into a spreadsheet as one tab-separated block.",
+        details="Copies exactly whatever columns are currently visible (Simple or Advanced View), header row included, so a paste into Excel/Sheets/a text file lines up as real columns without any reformatting. Export to CSV, right next to it, saves the same data straight to a file instead.",
+        target=("measurement_window", "widget", "results_copy_button"),
+        completion_action="copy_to_clipboard",
     ),
 ]
 """The ordered v1 "Getting Started" step list, handed to

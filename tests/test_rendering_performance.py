@@ -37,47 +37,54 @@ def test_rectified_rendering_framerate(qapp):
     import main
 
     app = main.SizeamaticProApp()
+    try:
+        # Load left/right videos the same way on_load_left_video/
+        # on_load_right_video do, without the file-picker dialog.
+        app.capL, app.metaL = app._open_video_capture(LEFT_VIDEO)
+        app.capR, app.metaR = app._open_video_capture(RIGHT_VIDEO)
+        assert app.capL is not None, "Failed to open left example video"
+        assert app.capR is not None, "Failed to open right example video"
 
-    # Load left/right videos the same way on_load_left_video/
-    # on_load_right_video do, without the file-picker dialog.
-    app.capL, app.metaL = app._open_video_capture(LEFT_VIDEO)
-    app.capR, app.metaR = app._open_video_capture(RIGHT_VIDEO)
-    assert app.capL is not None, "Failed to open left example video"
-    assert app.capR is not None, "Failed to open right example video"
+        app._update_slider_ranges()
 
-    app._update_slider_ranges()
+        # Load the real calibration fixture and enable rectified view.
+        cal, err = calibration_io.load_calibration_bundle(
+            APRIL_CALIBRATION_DIR, app.metaL, app.metaR
+        )
+        assert err is None, f"Calibration failed to load: {err}"
+        app.cal = cal
+        app.view_rectified.set(True)
 
-    # Load the real calibration fixture and enable rectified view.
-    cal, err = calibration_io.load_calibration_bundle(
-        APRIL_CALIBRATION_DIR, app.metaL, app.metaR
-    )
-    assert err is None, f"Calibration failed to load: {err}"
-    app.cal = cal
-    app.view_rectified.set(True)
+        # Render a batch of frames (both panes, rectified) and time it.
+        max_index = min(app.left_frame_max, app.right_frame_max, FRAMES_TO_RENDER - 1)
 
-    # Render a batch of frames (both panes, rectified) and time it.
-    max_index = min(app.left_frame_max, app.right_frame_max, FRAMES_TO_RENDER - 1)
+        t0 = time.perf_counter()
+        for i in range(max_index + 1):
+            app.left_frame_index = i
+            app.right_frame_index = i
+            app.render_current_frames()
+        elapsed = time.perf_counter() - t0
 
-    t0 = time.perf_counter()
-    for i in range(max_index + 1):
-        app.left_frame_index = i
-        app.right_frame_index = i
-        app.render_current_frames()
-    elapsed = time.perf_counter() - t0
+        frames_rendered = max_index + 1
+        fps = frames_rendered / elapsed
 
-    frames_rendered = max_index + 1
-    fps = frames_rendered / elapsed
+        print(
+            f"\nRendered {frames_rendered} rectified frame pairs in "
+            f"{elapsed:.2f}s ({fps:.1f} fps)"
+        )
 
-    print(
-        f"\nRendered {frames_rendered} rectified frame pairs in "
-        f"{elapsed:.2f}s ({fps:.1f} fps)"
-    )
-
-    # A generous floor, not a tight performance budget - this is a
-    # regression guard against something becoming badly broken (e.g. the
-    # old PNG/base64 render path coming back), not a strict performance
-    # gate, since actual achievable fps depends on the machine running it.
-    assert fps > 5.0, (
-        f"Rectified rendering achieved only {fps:.1f} fps, which is "
-        "suspiciously close to the old, pre-Pillow-fix performance."
-    )
+        # A generous floor, not a tight performance budget - this is a
+        # regression guard against something becoming badly broken (e.g. the
+        # old PNG/base64 render path coming back), not a strict performance
+        # gate, since actual achievable fps depends on the machine running it.
+        assert fps > 5.0, (
+            f"Rectified rendering achieved only {fps:.1f} fps, which is "
+            "suspiciously close to the old, pre-Pillow-fix performance."
+        )
+    finally:
+        # This test builds a real SizeamaticProApp directly (not via the
+        # sizeamatic_app fixture, which closes its own automatically) -
+        # leaving it open leaks a real window for the rest of the test
+        # session, which showed up as cumulative resource pressure once
+        # enough other tests ran afterward.
+        app.close()

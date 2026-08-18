@@ -333,6 +333,7 @@ QStatusBar { color: #8ea2c6; padding: 4px 10px; }
 QLabel { background-color: transparent; padding: 2px 4px; }
 QLabel#rectifiedIndicator[state="rectified"] { color: #2fbf71; }
 QLabel#rectifiedIndicator[state="not_rectified"] { color: #ef5350; }
+QHeaderView::section { background-color: #121a2b; padding: 6px 10px; border: none; border-right: 1px solid #263351; }
 """
 
 
@@ -1536,6 +1537,9 @@ class SizeamaticProApp(QMainWindow):
 
         rows = []
         sigma_px = float(self.click_sigma_px)
+        # Each point's raw ray_residual_mm (or None), parallel to pts3d -
+        # the segment loop below averages a pair of these for "error".
+        point_ray_residuals = []
 
         # Build one "Point" row per clicked point pair.
         for i, (X, Y, Z) in enumerate(pts3d):
@@ -1551,6 +1555,7 @@ class SizeamaticProApp(QMainWindow):
             # different quantity from erms above, not a duplicate; see
             # stereo_matching.ray_residual_mm's docstring.
             ray_residual = stereo_matching.stereo_ray_residual_mm(self, i)
+            point_ray_residuals.append(ray_residual)
             ray_residual_str = f"{ray_residual:.2f}" if ray_residual is not None else ""
 
             # Assumption-based uncertainty in mm (sample-standard-deviation
@@ -1588,12 +1593,15 @@ class SizeamaticProApp(QMainWindow):
             # Compute rectified Y mismatch between left and right clicks.
             dy = yR - yL
 
+            # Trailing 4: range=R, angle=(not calculated yet), length=(N/A
+            # for a Point), error=ray_residual.
             rows.append((
                 video_col, frame_col, time_col, actual_time_col, "",
                 "Point", str(i),
                 f"{X:.1f}", f"{Y:.1f}", f"{Z:.1f}", f"{R:.1f}",
                 f"{disp:.2f}", f"{dy:.2f}", erms_str, ray_residual_str, sZ_str, sR_str,
                 sZ_jac_str, sR_jac_str,
+                f"{R:.1f}", "", "", ray_residual_str,
             ))
 
         # Build one "Segment" row per consecutive point pair (the chain is a
@@ -1604,6 +1612,8 @@ class SizeamaticProApp(QMainWindow):
         have_total_sigma = True
         total_var_jac_mm2 = 0.0
         have_total_sigma_jac = True
+        total_error_var_mm2 = 0.0
+        have_total_error = True
 
         if len(pts3d) >= 2:
             for i in range(1, len(pts3d)):
@@ -1639,11 +1649,28 @@ class SizeamaticProApp(QMainWindow):
                     sL_jac_str = f"{sL_jac:.1f}"
                     total_var_jac_mm2 += sL_jac * sL_jac
 
+                # This segment's "error" is the average of its two
+                # endpoints' ray_residual - there's no separate per-
+                # segment ray-residual diagnostic to draw from instead.
+                r0 = point_ray_residuals[i - 1]
+                r1 = point_ray_residuals[i]
+                if r0 is not None and r1 is not None:
+                    seg_error = (r0 + r1) / 2.0
+                    error_str = f"{seg_error:.2f}"
+                    total_error_var_mm2 += seg_error * seg_error
+                else:
+                    error_str = ""
+                    have_total_error = False
+
+                # Trailing 4: range=(N/A for a Segment - it has two ends,
+                # not one distance from the camera), angle=(not
+                # calculated yet), length=L, error=averaged ray_residual.
                 rows.append((
                     video_col, frame_col, time_col, actual_time_col, "",
                     "Segment", f"{i-1}-{i}",
                     f"{dX:.1f}", f"{dY:.1f}", f"{dZ:.1f}", f"{L:.1f}",
                     "", "", "", "", sL_str, "", sL_jac_str, "",
+                    "", "", f"{L:.1f}", error_str,
                 ))
 
             # Total: sum of the connected chain's segment lengths. Segment
@@ -1653,11 +1680,15 @@ class SizeamaticProApp(QMainWindow):
             # of the two sigma estimators.
             total_sigma_str = f"{total_var_mm2 ** 0.5:.1f}" if have_total_sigma else ""
             total_sigma_jac_str = f"{total_var_jac_mm2 ** 0.5:.1f}" if have_total_sigma_jac else ""
+            # Total's error is the same quadrature-sum treatment as its
+            # sigma, applied to each segment's averaged-ray-residual error.
+            total_error_str = f"{total_error_var_mm2 ** 0.5:.2f}" if have_total_error else ""
             rows.append((
                 video_col, frame_col, time_col, actual_time_col, "",
                 "Total", "",
                 "", "", "", f"{total_len_mm:.1f}",
                 "", "", "", "", total_sigma_str, "", total_sigma_jac_str, "",
+                "", "", f"{total_len_mm:.1f}", total_error_str,
             ))
 
             self._set_status_right(

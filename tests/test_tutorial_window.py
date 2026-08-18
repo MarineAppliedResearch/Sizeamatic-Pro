@@ -613,7 +613,7 @@ def test_resolve_target_rect_for_measurement_window_widgets_once_it_exists(sizea
     sizeamatic_app.measurement_window.ensure_window()
     controller = tutorial_window.TutorialController(sizeamatic_app)
 
-    for ref in ("results_table", "record_button", "log_text", "copy_text"):
+    for ref in ("results_table", "record_button", "log_table"):
         host_window, rect = controller._resolve_target_rect(("measurement_window", "widget", ref))
         assert host_window is sizeamatic_app.measurement_window.win, ref
         assert rect is not None, ref

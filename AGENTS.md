@@ -297,6 +297,21 @@ myself with a script" as a substitute for the project owner's own
 hands-on confirmation. If several changes have piled up before this step
 happened, walk through all of them, not just the most recent one.
 
+## Tutorial mode maintenance
+
+`tutorial_engine.py`/`tutorial_content_operational.py`/`tutorial_window.py`/
+`tutorial_fixtures.py` (ROADMAP.md Phase 15) walk a user through the app's
+real workflow step by step, targeting real widgets by name. Treat this
+tutorial like `ARCHITECTURE.md`: a living doc that goes stale the moment
+the behavior it describes changes out from under it. Whenever a change
+alters or removes a workflow step, button, menu item, or Measurement-
+window column/output that the tutorial covers or explains, update the
+tutorial's step content and target-widget references in the *same*
+change — not as a follow-up. If a change breaks a step's premise entirely
+(e.g. a gesture the tutorial teaches no longer exists), rewrite that
+step's wording and completion hook rather than leaving it technically
+functional but describing something that no longer happens.
+
 ## Git workflow
 
 - **Branching model:** we loosely follow the Git branching model described in

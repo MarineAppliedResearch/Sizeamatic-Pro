@@ -47,10 +47,19 @@ def run_smoke_test(duration_ms: int = 1000, app: "QApplication | None" = None) -
     window = SizeamaticProApp()
     window.show()
 
-    # Schedule the same close path a real window-close would trigger, so
-    # this also exercises closeEvent (including anaglyph/capture cleanup,
-    # video capture release).
-    QTimer.singleShot(duration_ms, window.close)
+    def _finish():
+        # Exercises the real close path first (closeEvent's anaglyph/
+        # capture cleanup, video capture release), then quits explicitly
+        # rather than relying on Qt's quit-on-last-window-closed - when
+        # reusing a shared QApplication (the pytest wrapper's qapp
+        # fixture), other real top-level windows built by earlier tests
+        # in the same process can still count as "open" even if this is
+        # the only one this test itself created, which would otherwise
+        # leave app.exec() blocked forever.
+        window.close()
+        app.quit()
+
+    QTimer.singleShot(duration_ms, _finish)
 
     app.exec()
 
