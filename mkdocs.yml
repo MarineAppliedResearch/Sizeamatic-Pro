@@ -24,6 +24,10 @@ watch:
   - create_app_icon.py
   - prepare_splash_image.py
   - build_version_info.py
+  - tutorial_engine.py
+  - tutorial_content_operational.py
+  - tutorial_window.py
+  - tutorial_fixtures.py
 
 theme:
   name: readthedocs
@@ -48,6 +52,10 @@ nav:
       - create_app_icon.py: reference/create_app_icon.md
       - prepare_splash_image.py: reference/prepare_splash_image.md
       - build_version_info.py: reference/build_version_info.md
+      - tutorial_engine.py: reference/tutorial_engine.md
+      - tutorial_content_operational.py: reference/tutorial_content_operational.md
+      - tutorial_window.py: reference/tutorial_window.md
+      - tutorial_fixtures.py: reference/tutorial_fixtures.md
 
 plugins:
   - search

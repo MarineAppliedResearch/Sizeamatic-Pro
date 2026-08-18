@@ -83,6 +83,7 @@ import prepare_splash_image
 import project_io
 import recent_projects
 import stereo_matching
+import tutorial_window
 import video_overlay
 from qt_helpers import enable_dark_title_bar, pil_image_to_qpixmap
 
@@ -523,6 +524,14 @@ class SizeamaticProApp(QMainWindow):
         printing a checkerboard/ChArUco calibration board. See
         `generate_calibration_target.GenerateCalibrationTargetWindow`."""
 
+        self.tutorial_window = tutorial_window.TutorialController(self)
+        """Owns the in-app Tutorial mode's overlay/current-step bubble/
+        checklist and the active `tutorial_engine.Tutorial` run, if any
+        (ROADMAP.md Phase 15). See `tutorial_window.TutorialController`.
+        Every handler below that completes a tutorial step calls
+        `self.tutorial_window.notify_action(...)` unconditionally - safe
+        to call even when no tutorial is running."""
+
         self._build_menu()
         self._build_toolbar()
         self._build_central_widget()
@@ -566,6 +575,11 @@ class SizeamaticProApp(QMainWindow):
             if sub_window.win is not None:
                 sub_window.win.close()
 
+        # The tutorial's bubble/checklist/overlay(s) are also independent
+        # top-level windows, same reasoning as the loop above - `stop()`
+        # is a safe no-op if no tutorial was ever started.
+        self.tutorial_window.stop()
+
         super().closeEvent(event)
 
     def resizeEvent(self, event):
@@ -602,7 +616,7 @@ class SizeamaticProApp(QMainWindow):
     # -------------------------------------------------------------------------
 
     def _build_menu(self):
-        """Build the File/View/Calibration menus.
+        """Build the File/View/Calibration/Help menus.
 
         Returns:
             None
@@ -642,6 +656,11 @@ class SizeamaticProApp(QMainWindow):
         calibration_menu.addSeparator()
         calibration_menu.addAction("Perform Calibration…", self.on_perform_calibration)
         calibration_menu.addAction("Generate Calibration Target…", self.on_generate_calibration_target)
+
+        # New in ROADMAP.md Phase 15 - reachable any time, not just on
+        # first launch, per that phase's Step 0 decision.
+        help_menu = menubar.addMenu("Help")
+        help_menu.addAction("Start Tutorial…", self.on_start_tutorial)
 
     # -------------------------------------------------------------------------
     # Toolbar
@@ -730,12 +749,12 @@ class SizeamaticProApp(QMainWindow):
             None
         """
         box_specs = [
-            ("real_time_year_edit", 4, "YYYY"),
-            ("real_time_month_edit", 2, "MM"),
-            ("real_time_day_edit", 2, "DD"),
-            ("real_time_hour_edit", 2, "HH"),
-            ("real_time_minute_edit", 2, "MM"),
-            ("real_time_second_edit", 2, "SS"),
+            ("real_time_year_edit", 4, "YYYY", "enter_time_year"),
+            ("real_time_month_edit", 2, "MM", "enter_time_month"),
+            ("real_time_day_edit", 2, "DD", "enter_time_day"),
+            ("real_time_hour_edit", 2, "HH", "enter_time_hour"),
+            ("real_time_minute_edit", 2, "MM", "enter_time_minute"),
+            ("real_time_second_edit", 2, "SS", "enter_time_second"),
         ]
         # Separator text drawn between consecutive boxes (index i sits
         # between box i and box i+1) - one shorter than the number of boxes.
@@ -766,7 +785,7 @@ class SizeamaticProApp(QMainWindow):
         box_layout.setContentsMargins(0, 0, 0, 0)
         box_layout.setSpacing(2)
 
-        for i, (attr_name, max_len, placeholder) in enumerate(box_specs):
+        for i, (attr_name, max_len, placeholder, _action_name) in enumerate(box_specs):
             entry = QLineEdit()
             entry.setPlaceholderText(placeholder)
             # Wide enough for the placeholder text plus this QLineEdit's
@@ -787,11 +806,16 @@ class SizeamaticProApp(QMainWindow):
 
         # Auto-advance to the next box once this one looks full - purely a
         # focus convenience, not validation (nothing is checked/applied here).
+        # Also reports the matching tutorial completion action once a box
+        # is full, box-by-box, for ROADMAP.md Phase 15's per-field steps.
         for i, entry in enumerate(self.real_time_entries):
             max_len = box_specs[i][1]
+            action_name = box_specs[i][3]
             next_entry = self.real_time_entries[i + 1] if i + 1 < len(self.real_time_entries) else None
             entry.textChanged.connect(
-                lambda _text, e=entry, n=next_entry, m=max_len: self._advance_real_time_focus(e, n, m)
+                lambda _text, e=entry, n=next_entry, m=max_len, a=action_name: self._advance_real_time_focus(
+                    e, n, m, a
+                )
             )
 
         self.btn_set_time_sync = QPushButton("Set Time Sync")
@@ -805,12 +829,15 @@ class SizeamaticProApp(QMainWindow):
         self.time_sync_indicator.setStyleSheet("color: #2fbf71;")
         toolbar.addWidget(self.time_sync_indicator)
 
-    def _advance_real_time_focus(self, entry, next_entry, max_len):
-        """Move focus to the next real-time-anchor box once this one looks full.
+    def _advance_real_time_focus(self, entry, next_entry, max_len, action_name):
+        """Move focus to the next real-time-anchor box once this one looks
+        full, and report the matching tutorial completion action.
 
-        Purely a typing convenience - does not validate or apply
-        anything; that only happens when "Set Time Sync" is pressed
-        (`on_real_time_entered`).
+        Purely a typing convenience as far as the app's own state goes -
+        does not validate or apply anything; that only happens when
+        "Set Time Sync" is pressed (`on_real_time_entered`). The tutorial
+        notification is real completion detection, though (ROADMAP.md
+        Phase 15) - each of the six boxes is its own step.
 
         Args:
             entry (QLineEdit): The box that was just typed into.
@@ -818,11 +845,18 @@ class SizeamaticProApp(QMainWindow):
                 None if this is the last one (seconds).
             max_len (int): How many characters this box is expected to
                 hold (e.g. 4 for year, 2 for the rest) before advancing.
+            action_name (str): The tutorial completion action this box
+                reports once full (e.g. `"enter_time_year"`).
 
         Returns:
             None
         """
-        if next_entry is not None and len(entry.text()) >= max_len:
+        if len(entry.text()) < max_len:
+            return
+
+        self.tutorial_window.notify_action(action_name)
+
+        if next_entry is not None:
             next_entry.setFocus()
             next_entry.selectAll()
 
@@ -1018,6 +1052,33 @@ class SizeamaticProApp(QMainWindow):
 
         return cap, {"fps": fps, "width": width, "height": height, "frame_count": frame_count}
 
+    def _tutorial_fixture_dialog_dir(self, kind):
+        """Get the directory a load dialog should default to, if the
+        tutorial's generated sample files are relevant right now.
+
+        The tutorial deliberately doesn't load its generated files
+        automatically - the user still picks them via these same real
+        dialogs - but defaulting to wherever they were generated saves
+        hunting through an arbitrary temp directory for them.
+
+        Args:
+            kind (str): `"left_video"`, `"right_video"`, or
+                `"calibration"`.
+
+        Returns:
+            str: The directory to open the dialog in, or `""` (the
+            dialog's own default) if no tutorial has generated fixtures
+            yet this session.
+        """
+        fixture_paths = self.tutorial_window.fixture_paths
+        if fixture_paths is None:
+            return ""
+        if kind == "left_video":
+            return os.path.dirname(fixture_paths["left_video_path"])
+        if kind == "right_video":
+            return os.path.dirname(fixture_paths["right_video_path"])
+        return fixture_paths["calibration_folder"]
+
     def on_load_left_video(self):
         """Prompt for and load the left video.
 
@@ -1028,7 +1089,9 @@ class SizeamaticProApp(QMainWindow):
         Returns:
             None
         """
-        path, _filter = QFileDialog.getOpenFileName(self, "Load Left Video", "", "MP4 Video (*.mp4);;All Files (*)")
+        path, _filter = QFileDialog.getOpenFileName(
+            self, "Load Left Video", self._tutorial_fixture_dialog_dir("left_video"), "MP4 Video (*.mp4);;All Files (*)"
+        )
         if not path:
             return
         self._load_left_video_from_path(path)
@@ -1068,6 +1131,7 @@ class SizeamaticProApp(QMainWindow):
         self._set_status_mid(
             f"Loaded left video ({meta['width']}×{meta['height']}, fps={meta['fps']:.3f}, frames={meta['frame_count']})"
         )
+        self.tutorial_window.notify_action("load_left_video")
         return True
 
     def on_load_right_video(self):
@@ -1080,7 +1144,9 @@ class SizeamaticProApp(QMainWindow):
         Returns:
             None
         """
-        path, _filter = QFileDialog.getOpenFileName(self, "Load Right Video", "", "MP4 Video (*.mp4);;All Files (*)")
+        path, _filter = QFileDialog.getOpenFileName(
+            self, "Load Right Video", self._tutorial_fixture_dialog_dir("right_video"), "MP4 Video (*.mp4);;All Files (*)"
+        )
         if not path:
             return
         self._load_right_video_from_path(path)
@@ -1118,6 +1184,7 @@ class SizeamaticProApp(QMainWindow):
         self._set_status_mid(
             f"Loaded right video ({meta['width']}×{meta['height']}, fps={meta['fps']:.3f}, frames={meta['frame_count']})"
         )
+        self.tutorial_window.notify_action("load_right_video")
         return True
 
     def on_load_calibration_folder(self):
@@ -1149,7 +1216,7 @@ class SizeamaticProApp(QMainWindow):
             "Select any file inside the calibration folder — expects "
             "calibration_intrinsics.npz, calibration_extrinsics.npz, "
             "calibration_rectification.npz, calibration_maps.npz",
-            "",
+            self._tutorial_fixture_dialog_dir("calibration"),
             "Calibration NPZ (calibration_*.npz);;All Files (*)",
         )
         if not sample_path:
@@ -1196,6 +1263,28 @@ class SizeamaticProApp(QMainWindow):
         """
         self.generate_calibration_target_window.ensure_window()
 
+    def on_start_tutorial(self):
+        """Start (or restart) the in-app Tutorial mode.
+
+        `TutorialController.start` generates a fresh synthetic sample
+        video/calibration set but does not load it - the user still
+        loads it themselves through the real File/Calibration menu
+        actions (see `on_load_left_video`/`on_load_right_video`/
+        `on_load_calibration_folder`, which default their file dialog to
+        wherever the tutorial's generated files are once a tutorial is
+        active), so nothing about clicking this replaces the app's
+        current state by itself. Always begins a completely fresh
+        tutorial run - `TutorialController.start` discards any previous
+        run's progress rather than resuming it, per ROADMAP.md Phase
+        15's Step 0 "no persistence" decision, so clicking this again
+        mid-tutorial is a legitimate way to restart from step 0 rather
+        than an error.
+
+        Returns:
+            None
+        """
+        self.tutorial_window.start()
+
     def _load_calibration_from_folder(self, folder):
         """Load a calibration bundle from an already-known folder path.
 
@@ -1219,6 +1308,7 @@ class SizeamaticProApp(QMainWindow):
         self.calibration_folder = folder
         self._set_status_mid(f"Loaded calibration from {folder}")
         self._refresh_status_left()
+        self.tutorial_window.notify_action("load_calibration")
         return True
 
     # -------------------------------------------------------------------------
@@ -1317,6 +1407,17 @@ class SizeamaticProApp(QMainWindow):
         self.pane_left.update()
         self.pane_right.update()
         self._update_measurement_status_stub()
+
+        # Tutorial completion detection for the point-placement steps -
+        # checked by count rather than hooked into the click handler
+        # itself, since "a point pair exists" is the actual thing being
+        # taught, regardless of whether it got there by a fresh click or
+        # a drag. Both checks fire on every call; `mark_action_done` is
+        # idempotent, so reaching 2+ points calls both harmlessly.
+        if len(self.ptsL) >= 1 and len(self.ptsR) >= 1:
+            self.tutorial_window.notify_action("place_point_pair")
+        if len(self.ptsL) >= 2 and len(self.ptsR) >= 2:
+            self.tutorial_window.notify_action("place_segment")
 
     def _current_measurement_context(self):
         """Build the video/frame/timestamp identifying info for the
@@ -1603,6 +1704,7 @@ class SizeamaticProApp(QMainWindow):
 
         self.on_points_changed()
         self._set_status_mid("Cleared all points")
+        self.tutorial_window.notify_action("clear_points")
 
     def _update_frame_labels(self):
         """Refresh the "Frame: i/max" labels, the shared Frame/Video
@@ -1750,6 +1852,7 @@ class SizeamaticProApp(QMainWindow):
         self._set_status_mid(f"Real time anchored at frame {self.real_time_anchor_frame}")
         self.time_sync_indicator.setText("✓ Synced")
         self._update_frame_labels()
+        self.tutorial_window.notify_action("set_real_time_sync")
 
     def _refresh_real_time_entries(self, frame_index):
         """Update the six real-time anchor boxes to the calculated actual
@@ -1972,6 +2075,8 @@ class SizeamaticProApp(QMainWindow):
         if self.lock_lr and self.capL and self.capR:
             self._jump_frames_locked_with_offset("L", self.left_frame_index)
 
+        self.tutorial_window.notify_action("set_resync_offset")
+
     # -------------------------------------------------------------------------
     # Playback
     # -------------------------------------------------------------------------
@@ -2154,6 +2259,12 @@ class SizeamaticProApp(QMainWindow):
         self.rectified_indicator.style().polish(self.rectified_indicator)
         self.render_current_frames()
 
+        # Only the "switched it on" direction completes the tutorial's
+        # "Switch to Rectified View" step - reaching here with checked
+        # False (or forced off above) isn't that action.
+        if checked:
+            self.tutorial_window.notify_action("toggle_rectified")
+
     def _force_rectified_off(self, message):
         """Force the Show Rectified action back off and show a status message.
 
@@ -2278,6 +2389,7 @@ class SizeamaticProApp(QMainWindow):
         self.current_project_name = os.path.splitext(os.path.basename(path))[0]
         self._refresh_window_title()
         self._set_status_mid("Project saved")
+        self.tutorial_window.notify_action("save_project")
 
     def on_open_project(self):
         """Prompt for a project file and reload the saved video/calibration state.
@@ -2294,7 +2406,8 @@ class SizeamaticProApp(QMainWindow):
         )
         if not path:
             return
-        self._open_project_from_path(path)
+        if self._open_project_from_path(path):
+            self.tutorial_window.notify_action("open_project")
 
     def _open_project_from_path(self, path):
         """Load and apply a project manifest from an already-known path.
@@ -2306,18 +2419,22 @@ class SizeamaticProApp(QMainWindow):
         manual reload would, one per stage, rather than failing the
         whole project load silently. Shared by `on_open_project` (after
         its file dialog) and the File > Recent Projects submenu
-        (`on_open_recent_project`).
+        (`on_open_recent_project`) - each of those, not this shared
+        helper, reports its own distinct tutorial completion action on
+        success, since "Open Project…" and "Recent Projects" are two
+        separate tutorial steps despite sharing this same load logic.
 
         Args:
             path (str): Path to the project file to open.
 
         Returns:
-            None
+            bool: True if the project loaded successfully, False
+            otherwise (with an error dialog already shown).
         """
         project, error = project_io.load_project(path)
         if error is not None:
             QMessageBox.critical(self, "Open Project", error)
-            return
+            return False
 
         if project["left_video_path"]:
             self._load_left_video_from_path(project["left_video_path"])
@@ -2392,6 +2509,7 @@ class SizeamaticProApp(QMainWindow):
         self.current_project_name = os.path.splitext(os.path.basename(path))[0]
         self._refresh_window_title()
         self._set_status_mid("Project opened")
+        return True
 
     def on_open_recent_project(self, path):
         """Open a project path chosen from the File > Recent Projects submenu.
@@ -2403,7 +2521,8 @@ class SizeamaticProApp(QMainWindow):
         Returns:
             None
         """
-        self._open_project_from_path(path)
+        if self._open_project_from_path(path):
+            self.tutorial_window.notify_action("open_recent_project")
 
     def _refresh_recent_projects_menu(self):
         """Rebuild the File > Recent Projects submenu just before it's shown.
