@@ -940,7 +940,20 @@ here proposes removing or changing today's default calibration path.
       `misc/bundle_adjustment_prototype.py` is a new, standalone,
       synthetic-data-only file with no import/call path from the app.
 
-## Phase 15 — Tutorial mode `[~]`
+## Phase 15 — Tutorial mode `[x]`
+
+**Scope note:** closes with the v1 "Getting Started" operational-workflow
+tutorial built, tested, and manually confirmed working across several
+proof-test rounds with the project owner — engine, content, real Qt
+window, and synthetic fixtures all real app modules (see
+`ARCHITECTURE.md`'s "Tutorial mode" section), 65 new automated tests
+across the four modules, `CLAUDE.md`'s staleness instruction in place,
+and the docs site updated. The future calculations-tutorial track this
+phase was explicitly built to extend into (a second content module
+reusing `tutorial_engine.py` unmodified) is not scoped or started here —
+noted as a natural next step whenever there's appetite for it, the same
+kind of explicit, not-silently-dropped deferral prior phases have closed
+with, not an open-ended commitment.
 
 Guided, in-app, game-style tutorial: a tutorial window with a step
 checklist, each step showing a description (plus an expandable "more
@@ -1053,58 +1066,75 @@ after reading the living docs plus hands-on reading of `main.py`,
 
 **Later steps:**
 
-- [~] **Iteratively prototype the visual design with the project owner
+- [x] **Iteratively prototype the visual design with the project owner
       before building the real engine** - the project owner's explicit
       request, ahead of any data-model/engine work below. A throwaway,
       uncommitted script (reusing the real `SizeamaticProApp` shell, no
-      video/calibration loaded) already validated the highlight-overlay
-      mechanism and a first pass at the current-step bubble this
-      session, with real bugs found and fixed live (window-move
+      video/calibration loaded) validated the highlight-overlay
+      mechanism, the current-step bubble, and the full step checklist
+      panel together, with real bugs found and fixed live (window-move
       tracking, font sizing/overflow, the open-menu limitation noted
       above, a "Details" section redesigned from a one-line toggle into
-      a real bordered/headed panel per feedback). **Still needed:** mock
-      up and review the separate full step checklist panel (all steps,
-      completion marks) alongside the bubble, before any of this becomes
-      real app code.
-- [ ] Design the tutorial's step data model (step list, per-step
+      a real bordered/headed panel per feedback). That validated design
+      is what the real modules below are built from.
+- [x] Design the tutorial's step data model (step list, per-step
       description/details text, target-widget reference,
       completion-detection hook) - keep it decoupled from any specific
       step's content so the future calculations-tutorial track can reuse
-      the same engine.
-- [ ] Build the real (non-throwaway) overlay/highlighting mechanism and
+      the same engine. Built as `tutorial_engine.py`
+      (`TutorialStep`/`Tutorial`, no Qt dependency) with the actual v1
+      content in the separate `tutorial_content_operational.py` - see
+      `ARCHITECTURE.md`'s "Tutorial mode" section.
+- [x] Build the real (non-throwaway) overlay/highlighting mechanism and
       Tutorial window (checklist + current-step bubble + expandable
       Details) as real app modules, based on the validated prototype -
       matching this project's existing `QDialog`-based window patterns.
-- [ ] Build the synthetic tutorial video/calibration generator, including
-      the burned-in simulated clock.
-- [ ] Wire real completion-detection hooks into the relevant existing
-      handlers.
-- [ ] Draft the `ReprojRMS`/`RayResidual`/sigma-column explanation text
-      for the project owner's scientific-accuracy review/sign-off.
-- [ ] Automated tests: `FakeApp`-based tests for the tutorial engine's
+      Built as `tutorial_window.py` (`TutorialController`,
+      `HighlightOverlay`, `DraggablePanel`/`TutorialStepBubble`/
+      `ChecklistPanel`, `WindowTracker`). Also added, beyond the
+      original prototype scope: postpone/resume via either panel's own
+      "x" (rather than independent per-panel dismissal), and
+      measurement-window steps raising/focusing that window if it's not
+      already in front.
+- [x] Build the synthetic tutorial video/calibration generator, including
+      the burned-in simulated clock. Built as `tutorial_fixtures.py` -
+      also burns in a separate frame counter (for the Lock/Resync step)
+      and deliberately desyncs the left/right videos by
+      `TUTORIAL_SYNC_OFFSET_FRAMES`, and applies a mild inward-crop
+      rectification map (`TUTORIAL_RECTIFICATION_ZOOM`) so toggling Show
+      Rectified visibly changes the video, both added after manual
+      testing showed the initial identity-remap/pre-synced version
+      didn't actually exercise those steps.
+- [x] Wire real completion-detection hooks into the relevant existing
+      handlers - `notify_action(...)` calls added across `main.py`,
+      `video_overlay.py`, and `measurement_window.py`.
+- [x] Draft the `ReprojRMS`/`RayResidual`/sigma-column explanation text
+      for the project owner's scientific-accuracy review/sign-off -
+      reviewed and approved 2026-08-17 (see
+      `tutorial_content_operational.py`'s module docstring).
+- [x] Automated tests: `FakeApp`-based tests for the tutorial engine's
       step-tracking logic, plus real-`QApplication` tests for the
       overlay/highlight rendering (following the `qapp`/`sizeamatic_app`
-      fixture patterns already in `tests/conftest.py`).
-- [ ] Manual proof-test walkthroughs with the project owner, per
-      `AGENTS.md`'s standing rule - likely more than once given this
-      feature's size, not just once at the end.
-- [ ] **Update `CLAUDE.md`** with a new standing instruction: whenever a
+      fixture patterns already in `tests/conftest.py`) - including real
+      end-to-end tests that construct actual `QMouseEvent`s and drive
+      `video_overlay.py`'s handlers directly, per the project owner's
+      explicit request to catch regressions a logic-only test would miss.
+- [x] Manual proof-test walkthroughs with the project owner, per
+      `AGENTS.md`'s standing rule - done across several rounds as the
+      feature was built, not just once at the end; real bugs found and
+      fixed at each round (measurement-window step targeting, a stuck
+      Lock/Resync step, window focus for measurement steps, pre-synced/
+      identity-remap fixtures not exercising their steps, a toolbar-
+      overflow highlighting bug, and a premature-completion engine bug).
+- [x] **Update `CLAUDE.md`** with a new standing instruction: whenever a
       future change alters any workflow step, button, menu item, or
       Measurement-window column/output that the tutorial covers or
       explains, the tutorial's content/target-widget references must be
       updated in the same change - treat the tutorial like
       `ARCHITECTURE.md`: a living doc that goes stale the moment behavior
-      changes out from under it. Draft wording now, finalize once the
-      tutorial's actual module/file structure is known from the steps
-      above:
-
-      > Whenever you change a workflow step, button, menu item, or
-      > Measurement-window column/output that the in-app Tutorial mode
-      > (see `<tutorial module(s), TBD>`) walks a user through or
-      > explains, update the tutorial's step content and target-widget
-      > references in the same change.
-- [ ] Update `ROADMAP.md`/`ARCHITECTURE.md` to describe the new tutorial
-      module(s) once built.
+      changes out from under it. Added, with the real module names.
+- [x] Update `ROADMAP.md`/`ARCHITECTURE.md` to describe the new tutorial
+      module(s) once built - this update.
 
 **Non-negotiable process requirements, from the project owner:**
 
