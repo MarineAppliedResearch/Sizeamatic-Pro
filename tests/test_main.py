@@ -637,7 +637,7 @@ def test_open_project_restores_last_recorded_frame_points_and_log(
     # actual time should equal the anchor exactly, no elapsed-time math).
     assert app.real_time_anchor_frame == 40
     assert app.real_time_anchor_dt == datetime.datetime(2026, 8, 12, 14, 32, 5)
-    assert "2026-08-12 14:32:05" in app.time_readout_label.text()
+    assert "2026-08-12 14:32:05" in app.actual_time_readout_value.text()
     # The anchor entry boxes should also reflect the restored anchor, not
     # whatever they defaulted to at app startup.
     assert int(app.real_time_year_edit.text()) == 2026
@@ -727,9 +727,8 @@ def test_on_real_time_entered_sets_anchor_and_updates_readout(sizeamatic_app):
     assert app.real_time_anchor_frame == 10
     assert app.real_time_anchor_dt == datetime.datetime(2026, 8, 12, 14, 32, 5)
 
-    readout = app.time_readout_label.text()
-    assert "Frame: 10" in readout
-    assert "2026-08-12 14:32:05" in readout
+    assert app.frame_readout_value.text().startswith("10/")
+    assert "2026-08-12 14:32:05" in app.actual_time_readout_value.text()
 
 
 def test_format_actual_time_calculates_forward_and_backward_from_anchor(sizeamatic_app):

@@ -619,35 +619,47 @@ def test_resolve_target_rect_for_measurement_window_widgets_once_it_exists(sizea
         assert rect is not None, ref
 
 
-def test_resolve_target_rect_falls_back_to_the_toolbar_extension_button_when_hidden(sizeamatic_app, qapp):
+def test_resolve_target_rect_falls_back_to_the_toolbar_extension_button_when_hidden(sizeamatic_app):
     """Regression test: a narrow window can collapse a trailing toolbar
-    widget (e.g. "Set Time Sync", built last) behind a ">>" overflow
-    extension button - the widget still technically exists but
-    `isVisible()` is False and its geometry is meaningless to highlight
-    (confirmed live: a hidden `QPushButton`'s `.rect()` keeps whatever
-    stale size it last had, nothing like a real button's geometry).
-    `_resolve_target_rect` should fall back to the toolbar's own real,
-    visible extension button instead of pointing at that stale rect.
-    Narrows the real window rather than faking a widget, since Qt's
-    layout is what actually decides which widgets get collapsed."""
+    widget behind a ">>" overflow extension button - the widget still
+    technically exists but `isVisible()` is False and its geometry is
+    meaningless to highlight. `_resolve_target_rect` should fall back to
+    the toolbar's own real, visible extension button instead of
+    pointing at that stale rect.
 
-    sizeamatic_app.resize(300, 400)
+    Fakes the extension button rather than narrowing the real window
+    (issue #17 moved several widgets off the toolbar specifically to
+    fix real overflow - the toolbar is now light enough that it no
+    longer overflows at the app's own minimum window width, so this
+    scenario can't be reproduced live anymore; the fallback logic
+    itself still needs covering for whatever does end up overflowing
+    on some future narrower/heavier toolbar)."""
+
     sizeamatic_app.show()
-    qapp.processEvents()
+    controller = tutorial_window.TutorialController(sizeamatic_app)
 
-    real_widget = sizeamatic_app.btn_set_time_sync
-    assert not real_widget.isVisible()  # precondition: genuinely collapsed into overflow
-
+    real_widget = sizeamatic_app.btn_clear_points
     toolbar = real_widget.parent()
     while not isinstance(toolbar, QToolBar):
         toolbar = toolbar.parent()
-    extension = toolbar.findChild(QToolButton, "qt_toolbar_ext_button")
-    assert extension is not None and extension.isVisible()  # precondition
 
-    controller = tutorial_window.TutorialController(sizeamatic_app)
-    host_window, rect = controller._resolve_target_rect(("main", "widget", "btn_set_time_sync"))
+    # Qt's toolbar already has its own real (currently invisible)
+    # extension button as a child - rename it out of the way first so
+    # findChild("qt_toolbar_ext_button") can only match the fake, shown
+    # one below, rather than ambiguously returning Qt's own hidden one.
+    real_extension = toolbar.findChild(QToolButton, "qt_toolbar_ext_button")
+    if real_extension is not None:
+        real_extension.setObjectName("")
+
+    extension = QToolButton(toolbar)
+    extension.setObjectName("qt_toolbar_ext_button")
+    extension.show()
+    real_widget.setVisible(False)
+
+    host_window, rect = controller._resolve_target_rect(("main", "widget", "btn_clear_points"))
 
     assert host_window is sizeamatic_app
+    assert rect is not None
     expected = extension.rect()
     expected.moveTopLeft(extension.mapTo(sizeamatic_app, expected.topLeft()))
     assert rect == expected

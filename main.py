@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -707,30 +708,35 @@ class SizeamaticProApp(QMainWindow):
         self.speed_combo.setCurrentText("1x")
         toolbar.addWidget(self.speed_combo)
 
-        self.lock_checkbox = QCheckBox("  Lock L and R")
-        self.lock_checkbox.setChecked(True)
-        self.lock_checkbox.toggled.connect(self.on_toggle_lock)
-        toolbar.addWidget(self.lock_checkbox)
-
-        toolbar.addWidget(QLabel("  Offset:"))
-        self.offset_spin = QSpinBox()
-        self.offset_spin.setRange(-100000, 100000)
-        self.offset_spin.valueChanged.connect(self.on_offset_changed)
-        toolbar.addWidget(self.offset_spin)
-
         self.btn_clear_points = QPushButton("  Clear Points")
         self.btn_clear_points.setIcon(qta.icon("fa5s.trash", color=ICON_COLOR))
         self.btn_clear_points.clicked.connect(self.on_clear_points)
         toolbar.addWidget(self.btn_clear_points)
+
+        # Reset Pan/Zoom and Record live here too now (issue #17) - in
+        # addition to, not replacing, the existing View menu item and the
+        # Measurement window's own Record button respectively; both call
+        # the identical handler either way, so behavior never diverges.
+        self.btn_reset_pan_zoom = QPushButton("  Reset Pan/Zoom")
+        self.btn_reset_pan_zoom.setIcon(qta.icon("fa5s.compress", color=ICON_COLOR))
+        self.btn_reset_pan_zoom.clicked.connect(self.on_reset_pan_zoom)
+        toolbar.addWidget(self.btn_reset_pan_zoom)
+
+        self.btn_record = QPushButton("  Record")
+        self.btn_record.setIcon(qta.icon("fa5s.circle", color=ICON_COLOR))
+        self.btn_record.setStyleSheet(
+            f"QPushButton {{ background-color: {measurement_window.RECORD_BUTTON_COLOR}; }} "
+            f"QPushButton:hover {{ background-color: #9c3b3b; }}"
+        )
+        self.btn_record.clicked.connect(lambda: self.measurement_window.record_current_measurement())
+        toolbar.addWidget(self.btn_record)
 
         self.rectified_indicator = QLabel("  NOT RECTIFIED  ")
         self.rectified_indicator.setObjectName("rectifiedIndicator")
         self.rectified_indicator.setProperty("state", "not_rectified")
         toolbar.addWidget(self.rectified_indicator)
 
-        self._build_real_time_sync_group(toolbar)
-
-    def _build_real_time_sync_group(self, toolbar):
+    def _build_real_time_sync_group(self, layout):
         """Build the real-world time anchor entry group.
 
         Six separate plain text boxes (year/month/day/hour/minute/
@@ -740,11 +746,14 @@ class SizeamaticProApp(QMainWindow):
         into, matching whatever's burned into the video, not edited
         from a default that has nothing to do with the footage.
         Nothing here is validated/applied until "Set Time Sync" is
-        pressed (`on_real_time_entered`) - direct port of the original's
-        toolbar section of the same name.
+        pressed (`on_real_time_entered`).
 
         Args:
-            toolbar (QToolBar): The toolbar to add this group to.
+            layout (QHBoxLayout): The row layout to add this group to
+                (the sync-controls row between the scrub bars and the
+                Frame/Video Time/Actual Time readout, per issue #17 -
+                previously the toolbar itself, before it got moved off
+                to make room).
 
         Returns:
             None
@@ -768,19 +777,12 @@ class SizeamaticProApp(QMainWindow):
         uniformly without naming each one."""
 
         # A single tight container for the boxes + separators, rather than
-        # adding each one straight to the toolbar - QToolBar's own QSS
-        # `spacing` applies between every item added to it, which otherwise
-        # stacks with the "-"/":" separator labels themselves and spreads
+        # adding each one straight to the row layout - its own `spacing`
+        # applies between every item added to it, which otherwise stacks
+        # with the "-"/":" separator labels themselves and spreads
         # "YYYY-MM-DD" out into visibly gapped characters instead of one
         # tight date/time group.
         box_group = QWidget()
-        # A plain QWidget otherwise inherits the app-wide QMainWindow/
-        # QWidget rule's background (#0a0f1a, the darker main-window
-        # color, not the toolbar's #121a2b) - since this one sits on top
-        # of the toolbar rather than the main window, that mismatch showed
-        # through as a visibly wrong-colored box behind the entries inside
-        # it (which are themselves transparent, so they show whatever's
-        # behind *them*: this container, not the toolbar).
         box_group.setStyleSheet("background-color: transparent;")
         box_layout = QHBoxLayout(box_group)
         box_layout.setContentsMargins(0, 0, 0, 0)
@@ -803,7 +805,7 @@ class SizeamaticProApp(QMainWindow):
             if i < len(separators):
                 box_layout.addWidget(QLabel(separators[i]))
 
-        toolbar.addWidget(box_group)
+        layout.addWidget(box_group)
 
         # Auto-advance to the next box once this one looks full - purely a
         # focus convenience, not validation (nothing is checked/applied here).
@@ -821,14 +823,14 @@ class SizeamaticProApp(QMainWindow):
 
         self.btn_set_time_sync = QPushButton("Set Time Sync")
         self.btn_set_time_sync.clicked.connect(self.on_real_time_entered)
-        toolbar.addWidget(self.btn_set_time_sync)
+        layout.addWidget(self.btn_set_time_sync)
 
         # Synced indicator: a checkmark next to the button, shown by
         # on_real_time_entered once an anchor is actually set; empty
         # until then.
         self.time_sync_indicator = QLabel("")
         self.time_sync_indicator.setStyleSheet("color: #2fbf71;")
-        toolbar.addWidget(self.time_sync_indicator)
+        layout.addWidget(self.time_sync_indicator)
 
     def _advance_real_time_focus(self, entry, next_entry, max_len, action_name):
         """Move focus to the next real-time-anchor box once this one looks
@@ -881,12 +883,97 @@ class SizeamaticProApp(QMainWindow):
         self.pane_left, self.left_slider, self.left_frame_label = self._build_pane_column(splitter, "L")
         self.pane_right, self.right_slider, self.right_frame_label = self._build_pane_column(splitter, "R")
 
-        # Shared Frame/Video Time/Actual Time readout, by the scrub bars
-        # (right below both panes) rather than up in the toolbar - one
-        # shared readout since it's a single anchor, not duplicated per pane.
-        self.time_readout_label = QLabel("")
-        self.time_readout_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        root_layout.addWidget(self.time_readout_label)
+        self._build_sync_controls_row(root_layout)
+        self._build_time_readout_row(root_layout)
+
+    def _build_sync_controls_row(self, root_layout):
+        """Build the Lock/Offset/real-time-sync controls row.
+
+        Moved here from the top toolbar (issue #17) - that toolbar was
+        crowded enough to silently overflow behind an unlabeled ">>"
+        arrow on completely ordinary window widths, hiding this entire
+        group. Sits between the video panes and the Frame/Video Time/
+        Actual Time readout, spanning the full window width like that
+        readout already did, since these are shared/cross-pane controls
+        rather than per-pane ones.
+
+        Args:
+            root_layout (QVBoxLayout): The central widget's root layout.
+
+        Returns:
+            None
+        """
+        row = QHBoxLayout()
+
+        self.lock_checkbox = QCheckBox("  Lock L and R")
+        self.lock_checkbox.setChecked(True)
+        self.lock_checkbox.toggled.connect(self.on_toggle_lock)
+        row.addWidget(self.lock_checkbox)
+
+        row.addWidget(QLabel("  Offset:"))
+        self.offset_spin = QSpinBox()
+        self.offset_spin.setRange(-100000, 100000)
+        self.offset_spin.valueChanged.connect(self.on_offset_changed)
+        row.addWidget(self.offset_spin)
+
+        self._build_real_time_sync_group(row)
+        row.addStretch(1)
+
+        root_layout.addLayout(row)
+
+    def _build_time_readout_row(self, root_layout):
+        """Build the styled Frame/Video Time/Actual Time readout row.
+
+        Three separate small caption+value "chips" instead of one long
+        plain-text line (issue #17) - shared across both panes (one
+        anchor, not duplicated per pane), by the scrub bars rather than
+        up in the toolbar.
+
+        Args:
+            root_layout (QVBoxLayout): The central widget's root layout.
+
+        Returns:
+            None
+        """
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.frame_readout_value = self._build_readout_chip(row, "FRAME")
+        self.video_time_readout_value = self._build_readout_chip(row, "VIDEO TIME")
+        self.actual_time_readout_value = self._build_readout_chip(row, "ACTUAL TIME")
+        row.addStretch(1)
+        root_layout.addLayout(row)
+
+    def _build_readout_chip(self, row, caption):
+        """Build one small caption-over-value "chip" widget.
+
+        Args:
+            row (QHBoxLayout): The readout row to add this chip to.
+            caption (str): The chip's caption (e.g. "FRAME").
+
+        Returns:
+            QLabel: The chip's value label - callers set its text later
+            as the readout updates.
+        """
+        chip = QFrame()
+        chip.setStyleSheet(
+            "QFrame { background-color: #121a2b; border: 1px solid #263351; border-radius: 6px; }"
+        )
+        chip_layout = QVBoxLayout(chip)
+        chip_layout.setContentsMargins(14, 4, 14, 6)
+        chip_layout.setSpacing(0)
+
+        caption_label = QLabel(caption)
+        caption_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        caption_label.setStyleSheet("color: #8ea2c6; font-size: 8pt; font-weight: normal; background: transparent;")
+        chip_layout.addWidget(caption_label)
+
+        value_label = QLabel("")
+        value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        value_label.setStyleSheet("background: transparent;")
+        chip_layout.addWidget(value_label)
+
+        row.addWidget(chip)
+        return value_label
 
     def _build_pane_column(self, parent, which):
         """Build one side's video pane + slider + frame label column.
@@ -997,7 +1084,13 @@ class SizeamaticProApp(QMainWindow):
         return self.capL is not None and self.capR is not None and self.metaL is not None and self.metaR is not None
 
     def _refresh_status_left(self):
-        """Refresh the status bar's left section with file/view/lock state.
+        """Refresh the status bar's left section with view/lock state.
+
+        Keeps the visible text short and glanceable (issue #17 - the
+        status bar previously spelled out the full L/R video and
+        calibration paths, which most users don't need day to day); the
+        full file paths are still one hover away, via this same label's
+        tooltip.
 
         Returns:
             None
@@ -1014,8 +1107,9 @@ class SizeamaticProApp(QMainWindow):
         if self.lock_lr and self._both_videos_loaded():
             offset_txt = f" | Offset: {self.lock_offset_frames:+d}f"
 
-        self.status_left.setText(
-            f"L: {self._short_path(l)} | R: {self._short_path(r)} | Cal: {self._short_path(c)} | View: {view} | {lock}{offset_txt}"
+        self.status_left.setText(f"View: {view} | {lock}{offset_txt}")
+        self.status_left.setToolTip(
+            f"L: {self._short_path(l)} | R: {self._short_path(r)} | Cal: {self._short_path(c)}"
         )
 
     # -------------------------------------------------------------------------
@@ -1787,7 +1881,9 @@ class SizeamaticProApp(QMainWindow):
         # as the real-world time anchor itself.
         video_time = self._format_timestamp(li, self.metaL["fps"] if self.metaL else None)
         actual_time = self._format_actual_time(li)
-        self.time_readout_label.setText(f"Frame: {li}/{lmax} | Video: {video_time} | Actual: {actual_time}")
+        self.frame_readout_value.setText(f"{li}/{lmax}")
+        self.video_time_readout_value.setText(video_time)
+        self.actual_time_readout_value.setText(actual_time)
 
         self._refresh_status_left()
 
