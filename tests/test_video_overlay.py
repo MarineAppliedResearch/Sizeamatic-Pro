@@ -20,7 +20,8 @@ at the expected screen coordinates - the same regression-catching power
 rendering pipeline instead of retained canvas items.
 """
 
-from PySide6.QtCore import QPointF, Qt
+from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtGui import QKeyEvent
 
 import video_overlay
 
@@ -365,3 +366,57 @@ def test_middle_drag_pan_notifies_the_tutorial_of_pan_or_zoom(qapp):
     pane.mouseMoveEvent(_FakeMouseEvent(120, 110))
 
     assert "pan_or_zoom" in app.tutorial_window.notified_actions
+
+
+def test_right_arrow_steps_this_panes_own_timeline_forward(qapp):
+    """Pressing the Right arrow key while a pane has focus should step
+    only that pane's timeline forward by one frame (issue #17) - never
+    the whole app's regular (Lock-respecting) step handler."""
+
+    calls = []
+    app = _make_fake_app(
+        metaL={"width": 640, "height": 480},
+        on_step_forward_single_pane=lambda which: calls.append(("forward", which)),
+        on_step_back_single_pane=lambda which: calls.append(("back", which)),
+    )
+    pane = _make_pane(qapp, app, which="R")
+
+    event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Right, Qt.KeyboardModifier.NoModifier)
+    pane.keyPressEvent(event)
+
+    assert calls == [("forward", "R")]
+
+
+def test_left_arrow_steps_this_panes_own_timeline_back(qapp):
+    """Same as the Right-arrow test, for stepping backward."""
+
+    calls = []
+    app = _make_fake_app(
+        metaL={"width": 640, "height": 480},
+        on_step_forward_single_pane=lambda which: calls.append(("forward", which)),
+        on_step_back_single_pane=lambda which: calls.append(("back", which)),
+    )
+    pane = _make_pane(qapp, app, which="L")
+
+    event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Left, Qt.KeyboardModifier.NoModifier)
+    pane.keyPressEvent(event)
+
+    assert calls == [("back", "L")]
+
+
+def test_an_unrelated_key_does_not_step_any_timeline(qapp):
+    """Any key other than Left/Right should be a no-op here (passed up
+    to the base class), not accidentally trigger a frame step."""
+
+    calls = []
+    app = _make_fake_app(
+        metaL={"width": 640, "height": 480},
+        on_step_forward_single_pane=lambda which: calls.append(("forward", which)),
+        on_step_back_single_pane=lambda which: calls.append(("back", which)),
+    )
+    pane = _make_pane(qapp, app, which="L")
+
+    event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_A, Qt.KeyboardModifier.NoModifier)
+    pane.keyPressEvent(event)
+
+    assert calls == []

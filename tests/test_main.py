@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 import pytest
 from PySide6.QtCore import QEvent, QPointF, Qt
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QKeyEvent, QMouseEvent
 
 import main
 import measurement_window
@@ -824,6 +824,219 @@ def test_offset_changed_realigns_right_timeline_when_locked(sizeamatic_app):
     assert app.lock_offset_frames == 5
     assert int(app.left_frame_index) == 20
     assert int(app.right_frame_index) == 25
+
+
+@pytest.mark.skipif(
+    not (os.path.isfile(LEFT_VIDEO) and os.path.isfile(RIGHT_VIDEO)),
+    reason="Real example videos are gitignored/local-only, not present here.",
+)
+def test_step_single_pane_moves_both_timelines_together_when_locked(sizeamatic_app):
+    """Regression test: stepping a single pane's timeline (issue #17's
+    keyboard shortcut) must respect Lock L and R exactly like every
+    other control does - Lock's whole purpose is that the two timelines
+    never move independently while it's on, so a keyboard shortcut is
+    not a special case that gets to ignore it. A first implementation
+    got this backwards (always moved only the one pane, even locked)
+    before the project owner caught it in manual testing."""
+
+    app = sizeamatic_app
+    app.capL, app.metaL = app._open_video_capture(LEFT_VIDEO)
+    app.capR, app.metaR = app._open_video_capture(RIGHT_VIDEO)
+    app._update_slider_ranges()
+    app.on_toggle_lock(True)  # both at frame 0 right now -> captures offset 0
+    app.left_frame_index = 20
+    app.right_frame_index = 20
+
+    app.on_step_forward_single_pane("R")
+
+    assert int(app.left_frame_index) == 21  # moved too - Lock is on
+    assert int(app.right_frame_index) == 21
+    assert int(app.left_slider.value()) == 21
+    assert int(app.right_slider.value()) == 21
+
+    app.on_step_back_single_pane("L")
+    app.on_step_back_single_pane("L")
+
+    assert int(app.left_frame_index) == 19
+    assert int(app.right_frame_index) == 19  # still moved together
+
+
+def test_step_single_pane_moves_only_that_pane_when_unlocked(sizeamatic_app):
+    """With Lock L and R off, stepping one pane's timeline should leave
+    the other completely untouched - this is what actually makes
+    nudging one side to find/confirm a sync offset possible."""
+
+    app = sizeamatic_app
+    app.capL, app.metaL = app._open_video_capture(LEFT_VIDEO)
+    app.capR, app.metaR = app._open_video_capture(RIGHT_VIDEO)
+    app._update_slider_ranges()
+    app.on_toggle_lock(False)
+    app.left_frame_index = 20
+    app.right_frame_index = 20
+
+    app.on_step_forward_single_pane("R")
+
+    assert int(app.left_frame_index) == 20  # untouched
+    assert int(app.right_frame_index) == 21
+    assert int(app.right_slider.value()) == 21
+
+    app.on_step_back_single_pane("R")
+    app.on_step_back_single_pane("R")
+
+    assert int(app.left_frame_index) == 20  # still untouched
+    assert int(app.right_frame_index) == 19
+
+
+@pytest.mark.skipif(
+    not (os.path.isfile(LEFT_VIDEO) and os.path.isfile(RIGHT_VIDEO)),
+    reason="Real example videos are gitignored/local-only, not present here.",
+)
+def test_step_single_pane_clamps_at_the_start_of_the_video(sizeamatic_app):
+    """Stepping back from frame 0 should clamp at 0, not go negative -
+    same clamping behavior as the regular step handlers."""
+
+    app = sizeamatic_app
+    app.capL, app.metaL = app._open_video_capture(LEFT_VIDEO)
+    app.capR, app.metaR = app._open_video_capture(RIGHT_VIDEO)
+    app._update_slider_ranges()
+    app.left_frame_index = 0
+
+    app.on_step_back_single_pane("L")
+
+    assert int(app.left_frame_index) == 0
+
+
+@pytest.mark.skipif(
+    not (os.path.isfile(LEFT_VIDEO) and os.path.isfile(RIGHT_VIDEO)),
+    reason="Real example videos are gitignored/local-only, not present here.",
+)
+def test_right_arrow_key_on_a_real_pane_steps_only_that_pane_end_to_end(sizeamatic_app):
+    """End-to-end regression test, not just a direct method call: a real
+    Right-arrow key press on the real `pane_right` widget should step
+    only the right timeline forward, via the actual
+    keyPressEvent -> on_step_forward_single_pane chain a user's keypress
+    goes through. Explicitly unlocked (Lock L and R is checked by
+    default), since locked-vs-unlocked behavior is what
+    test_step_single_pane_moves_*_when_* already cover in detail - this
+    test is only proving the real widget-to-handler wiring works."""
+
+    app = sizeamatic_app
+    app.capL, app.metaL = app._open_video_capture(LEFT_VIDEO)
+    app.capR, app.metaR = app._open_video_capture(RIGHT_VIDEO)
+    app._update_slider_ranges()
+    app.on_toggle_lock(False)
+    app.left_frame_index = 10
+    app.right_frame_index = 10
+
+    event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Right, Qt.KeyboardModifier.NoModifier)
+    app.pane_right.keyPressEvent(event)
+
+    assert int(app.left_frame_index) == 10
+    assert int(app.right_frame_index) == 11
+
+
+def test_lock_arrow_shortcuts_are_enabled_only_while_locked(sizeamatic_app):
+    """`_build_lock_arrow_shortcuts`'s two `QShortcut`s must track Lock L
+    and R exactly - enabled while locked, disabled while unlocked. Left
+    enabled while unlocked would silently break per-pane nudging, since a
+    `WindowShortcut` takes priority over a focused pane's own
+    `keyPressEvent` (confirmed live - see `_build_lock_arrow_shortcuts`'s
+    docstring)."""
+
+    app = sizeamatic_app
+
+    assert app.lock_lr is True  # Lock defaults to on at startup
+    assert app.shortcut_step_forward_locked.isEnabled() is True
+    assert app.shortcut_step_back_locked.isEnabled() is True
+
+    app.on_toggle_lock(False)
+    assert app.shortcut_step_forward_locked.isEnabled() is False
+    assert app.shortcut_step_back_locked.isEnabled() is False
+
+    app.on_toggle_lock(True)
+    assert app.shortcut_step_forward_locked.isEnabled() is True
+    assert app.shortcut_step_back_locked.isEnabled() is True
+
+
+@pytest.mark.skipif(
+    not (os.path.isfile(LEFT_VIDEO) and os.path.isfile(RIGHT_VIDEO)),
+    reason="Real example videos are gitignored/local-only, not present here.",
+)
+def test_locked_arrow_key_steps_both_timelines_regardless_of_focus(sizeamatic_app):
+    """Regression test: with Lock L and R checked, arrow keys must step
+    both timelines together no matter what has keyboard focus - not just
+    when a video pane happens to be focused. The project owner reported
+    this didn't work when focus was anywhere else. A plain `keyPressEvent`
+    override on the main window turned out NOT to fix it: `QToolBar`
+    buttons keep keyboard focus by default (confirmed live - a freshly
+    shown window already has one focused) and Qt gives toolbar buttons
+    built-in Left/Right focus-navigation that silently swallows the key
+    before it would ever reach an override on the window. Dispatches a
+    real event via `QApplication.sendEvent` to a real, focused toolbar
+    button - not a direct method call - so this actually proves the fix
+    (a `QShortcut` with `WindowShortcut` context, which Qt consults ahead
+    of normal widget key delivery) works end to end."""
+
+    from PySide6.QtWidgets import QApplication
+
+    app = sizeamatic_app
+    app.capL, app.metaL = app._open_video_capture(LEFT_VIDEO)
+    app.capR, app.metaR = app._open_video_capture(RIGHT_VIDEO)
+    app._update_slider_ranges()
+    app.on_toggle_lock(True)
+    app.left_frame_index = 20
+    app.right_frame_index = 20
+    app.render_current_frames()
+    app._sync_slider_positions()
+
+    app.show()
+    app.btn_to_start.setFocus(Qt.FocusReason.OtherFocusReason)
+    QApplication.processEvents()
+    assert QApplication.focusWidget() is app.btn_to_start  # not a video pane
+
+    event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Right, Qt.KeyboardModifier.NoModifier)
+    QApplication.sendEvent(QApplication.focusWidget(), event)
+    QApplication.processEvents()
+
+    assert int(app.left_frame_index) == 21
+    assert int(app.right_frame_index) == 21
+
+
+@pytest.mark.skipif(
+    not (os.path.isfile(LEFT_VIDEO) and os.path.isfile(RIGHT_VIDEO)),
+    reason="Real example videos are gitignored/local-only, not present here.",
+)
+def test_unlocked_arrow_key_still_only_steps_the_focused_pane_via_real_event_dispatch(sizeamatic_app):
+    """Companion to `test_locked_arrow_key_steps_both_timelines_regardless_of_focus`:
+    confirms the locked-arrow `QShortcut`s being disabled while unlocked
+    (see `test_lock_arrow_shortcuts_are_enabled_only_while_locked`)
+    actually lets a real, dispatched key event reach the focused pane's
+    own `keyPressEvent` again, rather than being silently swallowed by a
+    shortcut that's supposed to be off."""
+
+    from PySide6.QtWidgets import QApplication
+
+    app = sizeamatic_app
+    app.capL, app.metaL = app._open_video_capture(LEFT_VIDEO)
+    app.capR, app.metaR = app._open_video_capture(RIGHT_VIDEO)
+    app._update_slider_ranges()
+    app.on_toggle_lock(False)
+    app.left_frame_index = 20
+    app.right_frame_index = 20
+    app.render_current_frames()
+    app._sync_slider_positions()
+
+    app.show()
+    app.pane_right.setFocus(Qt.FocusReason.MouseFocusReason)
+    QApplication.processEvents()
+    assert QApplication.focusWidget() is app.pane_right
+
+    event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Right, Qt.KeyboardModifier.NoModifier)
+    QApplication.sendEvent(QApplication.focusWidget(), event)
+    QApplication.processEvents()
+
+    assert int(app.left_frame_index) == 20  # untouched - Lock is off
+    assert int(app.right_frame_index) == 21
 
 
 @pytest.mark.skipif(

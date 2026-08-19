@@ -48,7 +48,7 @@ import qtawesome as qta
 from PIL import Image
 
 from PySide6.QtCore import QSize, QTimer, Qt
-from PySide6.QtGui import QAction, QCursor, QIcon, QImage, QPixmap
+from PySide6.QtGui import QAction, QCursor, QIcon, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -538,6 +538,7 @@ class SizeamaticProApp(QMainWindow):
         self._build_toolbar()
         self._build_central_widget()
         self._build_statusbar()
+        self._build_lock_arrow_shortcuts()
 
         self._update_slider_ranges()
         self._refresh_window_title()
@@ -612,6 +613,55 @@ class SizeamaticProApp(QMainWindow):
             ext_button.setIcon(qta.icon("fa5s.chevron-down", color=ICON_COLOR))
             ext_button.setText("")
             ext_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+
+    def _build_lock_arrow_shortcuts(self):
+        """Make locked arrow-key stepping work regardless of what has focus.
+
+        `video_overlay.VideoPane.keyPressEvent` already steps both
+        timelines together on Left/Right when Lock L and R is checked and
+        the pane itself has keyboard focus - but a plain `keyPressEvent`
+        override on this window turned out NOT to be a usable fallback
+        for "focus is somewhere else entirely": toolbar buttons keep
+        keyboard focus by default (confirmed live - a fresh window
+        already has one focused) and Qt's own `QToolBar` gives its
+        buttons built-in Left/Right focus-navigation, which silently
+        swallows the key before it would ever bubble up here. A
+        `QShortcut` with `WindowShortcut` context sidesteps that - Qt's
+        shortcut map is consulted ahead of normal widget key delivery,
+        so it fires even though a toolbar button has focus (confirmed
+        live). That same priority is exactly why it must stay disabled
+        whenever Lock is off: enabled, it would intercept Left/Right
+        before a focused `VideoPane` ever saw them, breaking the
+        pane-scoped "nudge one side" behavior that's the whole point of
+        the unlocked case. `on_toggle_lock` flips `setEnabled` on both
+        to match, so this only ever fires while Lock is actually checked.
+
+        Returns:
+            None
+        """
+        self.shortcut_step_forward_locked = QShortcut(QKeySequence(Qt.Key.Key_Right), self)
+        self.shortcut_step_forward_locked.setContext(Qt.ShortcutContext.WindowShortcut)
+        self.shortcut_step_forward_locked.activated.connect(self.on_step_forward)
+
+        self.shortcut_step_back_locked = QShortcut(QKeySequence(Qt.Key.Key_Left), self)
+        self.shortcut_step_back_locked.setContext(Qt.ShortcutContext.WindowShortcut)
+        self.shortcut_step_back_locked.activated.connect(self.on_step_back)
+
+        self._update_lock_arrow_shortcuts()
+
+    def _update_lock_arrow_shortcuts(self):
+        """Enable the locked-arrow-key shortcuts only while Lock L and R is on.
+
+        See `_build_lock_arrow_shortcuts` for why these must stay
+        disabled while unlocked - a `WindowShortcut` takes priority over
+        a focused `VideoPane`'s own `keyPressEvent`, so leaving them
+        enabled unlocked would break per-pane nudging.
+
+        Returns:
+            None
+        """
+        self.shortcut_step_forward_locked.setEnabled(self.lock_lr)
+        self.shortcut_step_back_locked.setEnabled(self.lock_lr)
 
     # -------------------------------------------------------------------------
     # Menu bar
@@ -2218,6 +2268,7 @@ class SizeamaticProApp(QMainWindow):
             self.offset_spin.blockSignals(False)
         self._update_slider_ranges()
         self._refresh_status_left()
+        self._update_lock_arrow_shortcuts()
 
     def on_offset_changed(self, value):
         """Handle the Offset spin box changing.
@@ -2334,6 +2385,60 @@ class SizeamaticProApp(QMainWindow):
                 self.right_frame_index = self._clamp(self.right_frame_index - 1, 0, self.right_frame_max)
             self.render_current_frames()
             self._sync_slider_positions()
+
+    def on_step_forward_single_pane(self, which):
+        """Step one pane's timeline forward by one frame.
+
+        Respects Lock L and R exactly like the sliders do (`on_left_slider_changed`/
+        `on_right_slider_changed`): when locked, both timelines move
+        together preserving the offset - Lock's whole purpose is that
+        the two timelines never move independently while it's on, and a
+        keyboard shortcut is no exception. Only steps the *given* pane
+        alone when unlocked, which is when nudging one side to find/
+        confirm the right offset actually makes sense.
+
+        Args:
+            which (str): `"L"` or `"R"` - which pane's timeline this
+                step request came from.
+
+        Returns:
+            None
+        """
+        if self.lock_lr and self.capL and self.capR:
+            current = self.left_frame_index if which == "L" else self.right_frame_index
+            self._jump_frames_locked_with_offset(which, current + 1)
+            return
+
+        if which == "L" and self.capL:
+            self.left_frame_index = self._clamp(self.left_frame_index + 1, 0, self.left_frame_max)
+        elif which == "R" and self.capR:
+            self.right_frame_index = self._clamp(self.right_frame_index + 1, 0, self.right_frame_max)
+        self.render_current_frames()
+        self._sync_slider_positions()
+
+    def on_step_back_single_pane(self, which):
+        """Step one pane's timeline back by one frame.
+
+        See `on_step_forward_single_pane` - same Lock L and R handling.
+
+        Args:
+            which (str): `"L"` or `"R"` - which pane's timeline this
+                step request came from.
+
+        Returns:
+            None
+        """
+        if self.lock_lr and self.capL and self.capR:
+            current = self.left_frame_index if which == "L" else self.right_frame_index
+            self._jump_frames_locked_with_offset(which, current - 1)
+            return
+
+        if which == "L" and self.capL:
+            self.left_frame_index = self._clamp(self.left_frame_index - 1, 0, self.left_frame_max)
+        elif which == "R" and self.capR:
+            self.right_frame_index = self._clamp(self.right_frame_index - 1, 0, self.right_frame_max)
+        self.render_current_frames()
+        self._sync_slider_positions()
 
     def on_to_start(self):
         """Jump to frame 0 (or a locked pair at frame 0).

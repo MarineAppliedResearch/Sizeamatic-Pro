@@ -553,6 +553,38 @@ class VideoPane(QWidget):
         self.app.render_current_frames()
         self.app.tutorial_window.notify_action("pan_or_zoom")
 
+    def keyPressEvent(self, event):
+        """Step this pane's own timeline by one frame on Left/Right arrow.
+
+        Scoped to whichever pane actually has keyboard focus (this
+        widget uses `Qt.FocusPolicy.ClickFocus`, set in `__init__`) -
+        typing in the sync-time entry boxes or the Offset spinner steals
+        focus away from both panes, so this never fires while typing
+        there. Respects Lock L and R exactly like the regular transport
+        controls do - see `main.py`'s `on_step_forward_single_pane`/
+        `on_step_back_single_pane` for why this only moves the *other*
+        pane along too when Lock is actually on. When Lock is on but
+        neither pane has focus at all, `main.py`'s
+        `_build_lock_arrow_shortcuts` (a `QShortcut` pair, enabled only
+        while locked) is what still steps both timelines together -
+        this method only needs to cover the per-pane, possibly-unlocked
+        case, and is never reached at all while those shortcuts are
+        enabled (a `WindowShortcut` takes priority over a focused
+        widget's own `keyPressEvent`).
+
+        Args:
+            event (QKeyEvent): The key press event.
+
+        Returns:
+            None
+        """
+        if event.key() == Qt.Key.Key_Right:
+            self.app.on_step_forward_single_pane(self.which)
+        elif event.key() == Qt.Key.Key_Left:
+            self.app.on_step_back_single_pane(self.which)
+        else:
+            super().keyPressEvent(event)
+
     def mousePressEvent(self, event):
         """Start point placement, point drag, panning, or point refinement.
 
