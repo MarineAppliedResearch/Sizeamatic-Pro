@@ -287,6 +287,40 @@ def test_on_start_tutorial_never_touches_existing_state_or_confirms(sizeamatic_a
     assert started == [1]
 
 
+def test_on_open_whitepaper_opens_the_real_pdf(sizeamatic_app, monkeypatch):
+    """Should open the actual whitepaper PDF (present in this repo's
+    docs/ folder) via the OS's own PDF viewer, not render anything
+    in-app - see `on_open_whitepaper`'s docstring for why a menu action
+    is needed at all (Qt tooltips can't contain a clickable link)."""
+
+    app = sizeamatic_app
+    opened_urls = []
+    monkeypatch.setattr("main.QDesktopServices.openUrl", staticmethod(lambda url: opened_urls.append(url)))
+
+    app.on_open_whitepaper()
+
+    assert len(opened_urls) == 1
+    assert opened_urls[0].toLocalFile().endswith("Sizeamatic_Pro_Stereo_Length_Measurement_Method.pdf")
+    assert os.path.isfile(opened_urls[0].toLocalFile())
+
+
+def test_on_open_whitepaper_warns_instead_of_crashing_if_the_file_is_missing(sizeamatic_app, monkeypatch):
+    """A missing whitepaper file (e.g. a broken packaged build) should
+    show a clear warning instead of silently doing nothing or crashing."""
+
+    app = sizeamatic_app
+    monkeypatch.setattr("main.os.path.isfile", lambda path: False)
+    opened_urls = []
+    monkeypatch.setattr("main.QDesktopServices.openUrl", staticmethod(lambda url: opened_urls.append(url)))
+    warnings = []
+    monkeypatch.setattr("main.QMessageBox.warning", staticmethod(lambda *a, **kw: warnings.append(1)))
+
+    app.on_open_whitepaper()
+
+    assert opened_urls == []
+    assert warnings == [1]
+
+
 def test_on_save_project_records_it_in_recent_projects(sizeamatic_app, monkeypatch, tmp_path):
     """Saving a project should add it to the persistent recent-projects
     list, so it shows up in the File > Recent Projects submenu next

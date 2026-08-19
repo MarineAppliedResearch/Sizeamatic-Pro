@@ -35,13 +35,30 @@ listed alongside the original four below:
   fragility that caused finding 1 in `FINDINGS.md` (a nested closure
   needing, but missing, its own `global` declaration).
 - **`measurement_window.py`** — `MeasurementWindow`
-  (`app.measurement_window`). Same conversion. Its results table,
-  "current measurement" copy box, and the (Phase 7) explicit-"Record"
-  accumulating log all share one row format — a single flat table tagged
-  by a `Type` column ("Point"/"Segment"/"Total") with leading
-  Video/Frame/Timestamp columns on every row — defined once as
-  `RESULT_COLUMNS`/`RESULT_HEADERS` at module level so the table, the
-  copy block, and the log can't drift apart from each other.
+  (`app.measurement_window`). Same conversion. Its results table and the
+  (Phase 7) explicit-"Record" accumulating log share one row format — a
+  single flat table tagged by a `Type` column ("Point"/"Segment"/"Total")
+  with leading Video/Frame/Timestamp columns on every row — defined once
+  as `RESULT_COLUMNS`/`RESULT_HEADERS` at module level so the table and
+  the log can't drift apart from each other. (Phase 16) `RESULT_COLUMNS`
+  gained four trailing columns (`range`, `angle`, `length`, `error`),
+  appended rather than inserted so an old saved project's log still
+  restores cleanly (short rows padded with blanks). A **Show Advanced
+  View** toggle switches both tables between the full column set and
+  `SIMPLE_VIEW_COLUMNS` (the subset a non-analyst needs day to day),
+  purely via `QHeaderView.setColumnHidden` — the underlying row data is
+  identical either way. Whole rows are color-coded by `Type`
+  (`TYPE_COLORS`) on both tables. The standalone "current measurement"
+  copy box from earlier phases is gone; each table has its own Copy to
+  Clipboard / Export to CSV buttons instead (`_copy_table_to_clipboard`/
+  `_export_table_csv`/`write_table_rows_csv`) — these respect the
+  Simple/Advanced toggle, unlike the log's own save format below. The
+  Log is a real editable `QTableWidget` (`log_table`), not a text blob —
+  rows delete via the Delete key or a right-click menu, both behind a
+  confirmation dialog. `get_log_text`/`restore_log_text` keep their old
+  tab-separated-string contract exactly (always every column, ignoring
+  the view toggle), so `project_io.py` needed no changes and old-format
+  saved logs still load.
 - **`anaglyph_preview.py`** — `AnaglyphPreview` (`app.anaglyph_preview`).
   Same conversion again — this one also structurally eliminates findings
   2 (an uninitialized module global) and 3 (a bound method can't be
@@ -116,6 +133,32 @@ above together via composition (`self.cal_summary_window`,
 Whether/how to split `main.py`'s own remaining concerns further is still
 an open, deliberately deferred design question — see `ROADMAP.md` Phase
 5's scope note; nothing since has revisited it.
+
+(Phase 16) The toolbar was decluttered: Lock/Offset/real-time-sync
+controls moved out of `_build_toolbar` into their own full-width row
+(`_build_sync_controls_row`, calling `_build_real_time_sync_group` with
+that row's layout rather than the toolbar), and the old single-line
+frame/time readout label was replaced with three styled "chip" widgets
+(`_build_time_readout_row`/`_build_readout_chip` →
+`frame_readout_value`/`video_time_readout_value`/`actual_time_readout_value`).
+Per-pane keyboard frame-stepping (`VideoPane.keyPressEvent` in
+`video_overlay.py`, scoped to whichever pane has focus via
+`Qt.FocusPolicy.ClickFocus`) steps one timeline by one frame on
+Left/Right, routed through `on_step_forward_single_pane`/
+`on_step_back_single_pane` — both respect Lock L and R exactly like
+`on_left_slider_changed`/`on_right_slider_changed` already did, moving
+both timelines together via `_jump_frames_locked_with_offset` when
+locked. Locked stepping also needs to work when *no* pane has focus
+(e.g. a toolbar button does, which it does by default) — a plain
+`keyPressEvent` override on the main window can't catch that, since
+`QToolBar` gives its buttons built-in Left/Right focus-navigation that
+swallows the key first. `_build_lock_arrow_shortcuts` instead installs a
+`QShortcut` pair with `Qt.ShortcutContext.WindowShortcut` (Qt consults
+its shortcut map ahead of normal widget key delivery, bypassing that
+swallowing), enabled only while Lock is checked
+(`_update_lock_arrow_shortcuts`, called from `on_toggle_lock`) — left
+enabled while unlocked, it would intercept Left/Right before a focused
+pane's own `keyPressEvent` ever saw them, breaking per-pane nudging.
 
 ## Tutorial mode (ROADMAP.md Phase 15)
 

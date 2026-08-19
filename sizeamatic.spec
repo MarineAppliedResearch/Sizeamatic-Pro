@@ -52,10 +52,14 @@ a = Analysis(
     # main.py's own startup splash (_show_startup_splash/get_app_version)
     # reads both again at runtime via resource_path, inside the bundle
     # just as it would from the source tree.
+    # docs/Sizeamatic_Pro_Stereo_Length_Measurement_Method.pdf is bundled
+    # because main.py's on_open_whitepaper (ROADMAP.md Phase 16) opens it
+    # again at runtime via resource_path, same as the other entries here.
     datas=[
         ("assets/icon.ico", "assets"),
         ("assets/splash-pro.png", "assets"),
         ("pyproject.toml", "."),
+        ("docs/Sizeamatic_Pro_Stereo_Length_Measurement_Method.pdf", "docs"),
     ],
     hiddenimports=[],
     hookspath=[],

@@ -47,8 +47,8 @@ import cv2
 import qtawesome as qta
 from PIL import Image
 
-from PySide6.QtCore import QSize, QTimer, Qt
-from PySide6.QtGui import QAction, QCursor, QIcon, QImage, QKeySequence, QPixmap, QShortcut
+from PySide6.QtCore import QSize, QTimer, Qt, QUrl
+from PySide6.QtGui import QAction, QCursor, QDesktopServices, QIcon, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -713,6 +713,7 @@ class SizeamaticProApp(QMainWindow):
         # first launch, per that phase's Step 0 decision.
         help_menu = menubar.addMenu("Help")
         help_menu.addAction("Start Tutorial…", self.on_start_tutorial)
+        help_menu.addAction("Open Measurement Method Whitepaper…", self.on_open_whitepaper)
 
     # -------------------------------------------------------------------------
     # Toolbar
@@ -1429,6 +1430,29 @@ class SizeamaticProApp(QMainWindow):
             None
         """
         self.tutorial_window.start()
+
+    def on_open_whitepaper(self):
+        """Open the stereo length measurement method whitepaper PDF.
+
+        Added alongside the Phase 16 Measurement window column tooltips
+        (`measurement_window.py`'s `RESULT_TOOLTIPS`) as the actual
+        reference those tooltips point to - a `QToolTip` can't contain a
+        clickable link (tooltips don't accept mouse events at all), so a
+        real Help menu entry that opens the PDF directly is this app's
+        only way to make that reference actually usable rather than just
+        naming a file path the user has to go find themselves. Uses the
+        OS's own PDF viewer (`QDesktopServices.openUrl`) rather than
+        rendering it in-app - same reasoning as not building a custom
+        video player instead of `cv2.VideoCapture` + Qt widgets.
+
+        Returns:
+            None
+        """
+        path = resource_path("docs/Sizeamatic_Pro_Stereo_Length_Measurement_Method.pdf")
+        if not os.path.isfile(path):
+            QMessageBox.warning(self, "Open Whitepaper", f"Whitepaper file not found:\n{path}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def _load_calibration_from_folder(self, folder):
         """Load a calibration bundle from an already-known folder path.

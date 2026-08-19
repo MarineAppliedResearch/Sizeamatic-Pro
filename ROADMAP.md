@@ -967,7 +967,7 @@ projects, and what the Measurement window's columns and row types
 (`Point`/`Segment`/`Total`) and quality/error metrics (`ReprojRMS(px)`,
 `RayResidual(mm)`, `sigma1`/`sigma2`, `sigma1_jac`/`sigma2_jac`) actually
 mean. **This is the next phase to be worked on** (confirmed with the
-project owner ahead of Phases 16-18, which are either hardware-blocked
+project owner ahead of Phases 17-19, which are either hardware-blocked
 or explicitly unscoped).
 
 **Explicitly built to extend later:** this phase covers only the
@@ -1151,7 +1151,88 @@ after reading the living docs plus hands-on reading of `main.py`,
   phase, not just at the end.
 - The `CLAUDE.md` update above is required, not optional.
 
-## Phase 16 — 3D bundle-adjustment calibration (build) `[ ]`
+## Phase 16 — Usability round 3 (issue #17) `[x]`
+
+A third round of usability feedback, this time relayed by the project owner
+from real users (not just the project owner's own hands-on use, per Phases
+7-8). Split into four ordered steps, same rhythm as prior multi-step phases
+(5/9/10/15): implement, run the full test suite, manual proof-test with the
+project owner, commit, then move to the next step.
+
+**Scope note:** closes with all four usability items shipped and confirmed
+by the project owner, plus the scientific-accuracy sign-off on the new
+column tooltips (2026-08-19) and the Help menu whitepaper link that sign-off
+motivated. The Segment Distance semantics change and real Angle calculation
+are deliberately deferred, not silently dropped — see Phase 20.
+
+**Explicitly out of scope for this phase** (deferred to a future phase once
+this one has shipped and been used for a while): changing what Segment
+"Distance" *means* (the `dZ`-based value stays unchanged) and building the
+real Angle-calculation algorithm (a rotation-around-Y-axis derived from
+Length + endpoint distances) — the Angle column is added now, always blank,
+as a placeholder for that future math. See Phase 20.
+
+- [x] **Point placement** — removed the auto-mirroring guess that used to
+      place a mate point on the opposite pane automatically; users click
+      each pane's point independently now. `_update_measurement_status_stub`'s
+      existing `l_count != r_count` mismatch message became live, correct
+      UX rather than dead code. Tutorial content (`tutorial_content_operational.py`)
+      reworded to match — no more "drag the auto-placed point."
+- [x] **Measurement window redesign** — Simple/Advanced view toggle;
+      real dedicated `range`/`angle`/`length`/`error` columns (appended to
+      `RESULT_COLUMNS`, append-only for backward compatibility with old
+      saved project logs); whole rows color-coded by Type
+      (Point/Segment/Total); the Log became a real editable `QTableWidget`
+      (`log_table`, was a plain text blob) with delete-via-Delete-key-or-
+      right-click, confirmed before deleting; standalone Copy panel
+      replaced with Copy to Clipboard / Export to CSV buttons on both
+      tables; column header tooltips added. The Error tooltip's reference to the
+      full derivation needed a real way to follow it through — Qt
+      tooltips can't contain a clickable link (they don't accept mouse
+      events at all) — so a new Help menu item, "Open Measurement Method
+      Whitepaper…" (`main.py`'s `on_open_whitepaper`), opens
+      `docs/Sizeamatic_Pro_Stereo_Length_Measurement_Method.pdf` directly
+      via the OS's own PDF viewer; bundled into the PyInstaller build
+      (`sizeamatic.spec`) the same way the icon/splash assets already are.
+- [x] **Layout decluttering** — Lock/Offset/real-time-sync controls moved
+      off the main toolbar (into a new dedicated row) since they were
+      confirmed live to silently disappear behind the toolbar's overflow
+      arrow even at generous window widths; Frame/Video Time/Actual Time
+      readout restyled as three separate labeled "chip" widgets; status
+      bar's left segment shortened to a glanceable summary with the full
+      L/R/Cal paths moved to its tooltip; **Reset Pan/Zoom** and
+      **Record** buttons added to the toolbar (Record reuses the
+      Measurement window's existing handler and dark-red styling, not a
+      second implementation).
+- [x] **Per-pane keyboard frame-stepping** — Left/Right arrow keys step
+      whichever video pane has keyboard focus by one frame, for
+      fine-grained sync alignment on long videos. Must respect Lock L and
+      R exactly like every other control (transport buttons, sliders) —
+      an initial version got this backwards (ignored Lock while a pane
+      had focus); fixed, with regression tests
+      (`tests/test_main.py`'s `test_step_single_pane_moves_both_timelines_together_when_locked`/
+      `test_step_single_pane_moves_only_that_pane_when_unlocked`) added
+      specifically so this can't regress silently again. A second,
+      related gap found in manual testing: locked stepping only worked
+      when a video pane itself had keyboard focus, not otherwise — a
+      plain `keyPressEvent` override on the main window did not fix this
+      (toolbar buttons hold keyboard focus by default and Qt's built-in
+      toolbar arrow-key navigation swallows the key first); fixed with a
+      `QShortcut` pair (`main.py`'s `_build_lock_arrow_shortcuts`),
+      enabled only while Lock is checked, since a `WindowShortcut` takes
+      priority over a focused pane's own key handling and would otherwise
+      break unlocked per-pane nudging.
+- [x] Scientific-accuracy sign-off on the new `range`/`angle`/`length`/
+      `error` column header tooltip text — matching the Phase 12/13/15
+      precedent. Confirmed 2026-08-19; the Error tooltip's original
+      draft (referencing the RayResidual column) was revised to instead
+      point at the measurement methodology whitepaper, per the project
+      owner's request — see the whitepaper Help-menu item noted above.
+- [x] Update `ARCHITECTURE.md` to describe the new measurement-window
+      schema/Log-as-table and `main.py`'s new sync-controls-row/time-
+      readout/lock-arrow-shortcut additions.
+
+## Phase 17 — 3D bundle-adjustment calibration (build) `[ ]`
 
 Build the photogrammetric bundle-adjustment calibration mode investigated
 in Phase 14, now that its math and dependency choice (`scipy`) are
@@ -1243,23 +1324,32 @@ dependency, not just software):
       decide how the new mode is labeled/surfaced in the UI (clearly
       marked advanced/experimental rather than presented as a plain
       alternative), and how Step 6's real-footage validation results feed
-      the Phase 18 white paper update below.
+      the Phase 19 white paper update below.
 
-## Phase 17 — MARE API integration (future, not yet scoped) `[ ]`
+## Phase 18 — MARE API integration (future, not yet scoped) `[ ]`
 
 Interface with the overall MARE API to record measurement data, etc. Noted
 here so it isn't forgotten, but not to be planned in detail until we reach it.
 
-## Phase 18 — Update the measurement white paper (future, not yet scoped) `[ ]`
+## Phase 19 — Update the measurement white paper (future, not yet scoped) `[ ]`
 
 Update `docs/Sizeamatic_Pro_Stereo_Length_Measurement_Method.docx (1).pdf`
 (the scientific write-up of Sizeamatic Pro's stereo length measurement
 method) to document the new calculations added in Phases 12-13 — the
 object-space `StereoRayResidual(mm)` metric and the Jacobian/covariance
-uncertainty propagation — plus, if Phase 16 is completed, the 3D
+uncertainty propagation — plus, if Phase 17 is completed, the 3D
 bundle-adjustment calibration mode and its Step 6 real-footage validation
 results (including an honest account if that step concluded it wasn't
 worth adopting for this project's actual use case). Noted here so it
 isn't forgotten, but not to be planned in detail (including how a
 `.docx`/PDF source gets edited, given the rest of this project's tooling
 is plain-text/git-based) until we reach it.
+
+## Phase 20 — Segment Distance semantics + real Angle calculation (future, not yet scoped) `[ ]`
+
+Explicitly deferred out of Phase 16 (Usability round 3): change what
+Segment "Distance" *means* (today's `dZ`-based value stays unchanged until
+this phase), and implement the real Angle-calculation algorithm (a
+rotation-around-Y-axis derived from Length + endpoint distances) — Phase 16
+only added the Angle column as a placeholder, always blank. Noted here so
+it isn't forgotten, but not to be planned in detail until we reach it.

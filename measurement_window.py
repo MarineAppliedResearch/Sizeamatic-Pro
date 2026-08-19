@@ -46,22 +46,25 @@ Design notes:
     ROADMAP.md Phase 16 (usability round 3, issue #17) added: a
     Simple/Advanced view toggle (`SIMPLE_VIEW_COLUMNS`, applied via
     column visibility only - the underlying data and column order never
-    change); five new dedicated columns (`range`/`distance`/`angle`/
-    `length`/`error` - `angle` is always blank this phase, a placeholder
-    for a future phase's real calculation; `error` is `ray_residual_mm`
-    for Point rows, and the average of a Segment's two endpoints'
-    `ray_residual_mm` for Segment/Total rows); the Log converted from a
-    plain-text block to a real editable `QTableWidget` (still
-    user-editable per-cell, rows deleted via Delete/right-click with a
-    confirmation prompt, per the project owner's explicit request); and
-    Copy to Clipboard/Export to CSV buttons replacing the old read-only
-    "Copy (current measurement)" text panel entirely.
+    change); four new dedicated columns (`range`/`angle`/`length`/`error`
+    - see `RESULT_COLUMNS`'s own docstring for why a fifth, `distance`,
+    was added then cut before shipping; `angle` is always blank this
+    phase, a placeholder for a future phase's real calculation; `error`
+    is `ray_residual_mm` for Point rows, and the average of a Segment's
+    two endpoints' `ray_residual_mm` for Segment/Total rows); the Log
+    converted from a plain-text block to a real editable `QTableWidget`
+    (still user-editable per-cell, rows deleted via Delete/right-click
+    with a confirmation prompt, per the project owner's explicit
+    request); and Copy to Clipboard/Export to CSV buttons replacing the
+    old read-only "Copy (current measurement)" text panel entirely.
 
-    **`RESULT_TOOLTIPS`'s text for the five new columns (and Range vs.
-    Distance being genuinely different quantities that now sit side by
-    side) still needs the project owner's scientific-accuracy sign-off,
-    matching the precedent from Phases 12/13/15 - the current text is a
-    reasonable draft, not yet confirmed.**
+    `RESULT_TOOLTIPS`'s text for the four new columns received the
+    project owner's scientific-accuracy sign-off 2026-08-19, matching the
+    precedent from Phases 12/13/15 - the Error tooltip's original draft
+    (referencing the RayResidual column) was revised per that review to
+    instead point at the measurement methodology whitepaper, opened via
+    the new Help menu item `main.py`'s `on_open_whitepaper` adds (a
+    `QToolTip` can't contain a clickable link).
 
 Assumptions:
     - Rows passed into `update_window` are already computed and
@@ -258,15 +261,16 @@ RESULT_TOOLTIPS = {
     "length": "This segment's real-world length, or (on a Total row) the summed length of every connected segment in the chain, in millimeters. Blank on individual Point rows, which don't have a length of their own.",
     "error": (
         "How much you can trust this measurement, in millimeters: for a Point, how well its "
-        "left and right clicks agree with each other (see Ray Residual); for a Segment or "
-        "Total, the average of that across its endpoint(s). Smaller is better - closer to "
-        "zero means your clicks were precise and the measurement is reliable."
+        "left and right clicks agree with each other; for a Segment or Total, the average of "
+        "that across its endpoint(s). Smaller is better - closer to zero means your clicks "
+        "were precise and the measurement is reliable. See the measurement methodology "
+        "whitepaper (Help menu) for the full derivation."
     ),
 }
-"""Header-hover tooltip text for each column. **Text for the four new
+"""Header-hover tooltip text for each column. Text for the four new
 Phase 16 columns (and text reused for existing columns moved into this
-new tooltip surface) still needs the project owner's scientific-accuracy
-sign-off** - see this module's docstring."""
+new tooltip surface) received the project owner's scientific-accuracy
+sign-off 2026-08-19 - see this module's docstring."""
 
 _TYPE_COLUMN_INDEX = RESULT_COLUMNS.index("type")
 
