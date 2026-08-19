@@ -1345,11 +1345,50 @@ isn't forgotten, but not to be planned in detail (including how a
 `.docx`/PDF source gets edited, given the rest of this project's tooling
 is plain-text/git-based) until we reach it.
 
-## Phase 20 — Segment Distance semantics + real Angle calculation (future, not yet scoped) `[ ]`
+## Phase 20 — Segment/Total Distance (Range) semantics + real Angle calculation `[x]`
 
 Explicitly deferred out of Phase 16 (Usability round 3): change what
-Segment "Distance" *means* (today's `dZ`-based value stays unchanged until
-this phase), and implement the real Angle-calculation algorithm (a
-rotation-around-Y-axis derived from Length + endpoint distances) — Phase 16
-only added the Angle column as a placeholder, always blank. Noted here so
-it isn't forgotten, but not to be planned in detail until we reach it.
+"Distance from the camera" means for a Segment/Total row (a Point already
+had this, correctly, as `Range`), and implement the real Angle-calculation
+algorithm Phase 16 only added as an always-blank placeholder column.
+
+**Confirmed with the project owner, then verified directly against this
+app's own whitepaper** (`docs/Sizeamatic_Pro_Stereo_Length_Measurement_Method.pdf`,
+which already lists "objects angled toward or away from the stereo pair"
+as a cause of higher length uncertainty — Angle operationalizes exactly
+that concern) before implementing, given this changes real measurement
+output:
+
+- [x] **Range (Distance from the camera)**, populated for Segment/Total
+      rows for the first time (a Point's own `Range` is unchanged — its
+      own `sqrt(X^2 + Y^2 + Z^2)`): a Segment's is the average of its two
+      endpoints' Range; a Total's is the average across *every* point in
+      the whole connected chain, not just the two outer endpoints — the
+      project owner's explicit choice.
+- [x] **Angle**, real calculation replacing the always-blank placeholder:
+      a Segment's own orientation relative to the camera's viewing axis,
+      rotated only around the vertical Y axis — `degrees(atan2(abs(dZ),
+      abs(dX)))`, reusing the segment's own already-computed `dX`/`dZ`.
+      Always in `[0, 90]` degrees by construction: 0 means broadside/
+      perpendicular to the camera (the most reliable presentation), 90
+      means pointing straight at/away from the camera (the least
+      reliable). Deliberately unsigned/bounded, not a full signed
+      rotation — confirmed with the project owner that a segment's
+      start/end order is arbitrary (click order, not a real "facing
+      direction"), and this app only ever sees the side of an object
+      facing the camera, so there's no physically meaningful angle
+      beyond 90 degrees. A Total's Angle is the simple average of every
+      segment's Angle in the chain (safe with no circular-mean handling
+      needed, since Angle is always bounded to `[0, 90]`).
+- [x] Known-answer regression test (`tests/test_main.py`'s
+      `test_segment_and_total_range_and_angle_match_hand_computed_values`),
+      independently derived from `known_chain_pixels`'s known 3D points
+      rather than by calling into the implementation — deliberately hits
+      both of Angle's edge cases exactly (a segment with `dZ=0` giving
+      0 degrees, a segment with `dX=0` giving 90 degrees), not just "some
+      number comes out."
+- [x] Updated `RESULT_TOOLTIPS`' `range`/`angle` text and
+      `measurement_window.py`'s module docstring to describe the real
+      calculations instead of the Phase 16 placeholder wording.
+- [x] Full test suite: 299/299 passing. Manually verified live against
+      the real app with the same known chain used in the automated test.

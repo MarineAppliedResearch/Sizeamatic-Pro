@@ -37,6 +37,7 @@ app.
 
 import ctypes
 import datetime
+import math
 import os
 import signal
 import sys
@@ -1708,10 +1709,16 @@ class SizeamaticProApp(QMainWindow):
         # Each point's raw ray_residual_mm (or None), parallel to pts3d -
         # the segment loop below averages a pair of these for "error".
         point_ray_residuals = []
+        # Each point's raw Range (distance from the camera), parallel to
+        # pts3d (ROADMAP.md Phase 20) - the segment loop below averages a
+        # pair of these for a Segment's own Distance, and the Total row
+        # averages every point's Range across the whole chain.
+        point_ranges = []
 
         # Build one "Point" row per clicked point pair.
         for i, (X, Y, Z) in enumerate(pts3d):
             R = (X * X + Y * Y + Z * Z) ** 0.5
+            point_ranges.append(R)
 
             # Assumption-free quality metric (pixel-space reprojection
             # consistency, using the Y-averaged triangulated point).
@@ -1782,6 +1789,12 @@ class SizeamaticProApp(QMainWindow):
         have_total_sigma_jac = True
         total_error_var_mm2 = 0.0
         have_total_error = True
+        # Sum of every segment's Angle in the chain, for the Total row's
+        # simple average (ROADMAP.md Phase 20). Safe as a plain arithmetic
+        # mean (no circular-mean wraparound handling needed) because Angle
+        # is bounded to [0, 90] by construction - see the per-segment
+        # comment below.
+        total_angle_sum = 0.0
 
         if len(pts3d) >= 2:
             for i in range(1, len(pts3d)):
@@ -1792,6 +1805,33 @@ class SizeamaticProApp(QMainWindow):
                 dZ = Z1 - Z0
                 L = (dX * dX + dY * dY + dZ * dZ) ** 0.5
                 total_len_mm += L
+
+                # This segment's Distance is the average of its two
+                # endpoints' Range (distance from the camera) -
+                # ROADMAP.md Phase 20; a Segment has two ends, so there's
+                # no single Range of its own the way a Point has.
+                seg_range = (point_ranges[i - 1] + point_ranges[i]) / 2.0
+
+                # This segment's Angle: its orientation relative to the
+                # camera's own viewing axis (Z), rotated only around the
+                # vertical Y axis - ROADMAP.md Phase 20, confirmed against
+                # this app's own whitepaper (docs/Sizeamatic_Pro_Stereo_
+                # Length_Measurement_Method.pdf), which already lists
+                # "objects angled toward or away from the stereo pair" as
+                # a cause of higher length uncertainty; this operationalizes
+                # that concern as a reportable number. 0 degrees = broadside/
+                # perpendicular to the camera (dZ ~ 0, the ideal, most
+                # reliable presentation); 90 degrees = pointing straight
+                # at/away from the camera (dX ~ 0, the worst case). Uses
+                # abs(dX)/abs(dZ) rather than a signed atan2(dZ, dX)
+                # deliberately: a segment's own start/end order is
+                # arbitrary (click order, not a real "facing direction"),
+                # and this app only ever sees the side of an object facing
+                # the camera, so there's no physically meaningful "beyond
+                # 90 degrees" - the confirmed range is exactly [0, 90],
+                # never a full signed rotation.
+                angle_deg = math.degrees(math.atan2(abs(dZ), abs(dX)))
+                total_angle_sum += angle_deg
 
                 # Segment sigma length estimate (sample-standard-deviation).
                 seg_est = stereo_matching.estimate_segment_sigma_len_mm(self, i - 1, i, sigma_px)
@@ -1830,15 +1870,15 @@ class SizeamaticProApp(QMainWindow):
                     error_str = ""
                     have_total_error = False
 
-                # Trailing 4: range=(N/A for a Segment - it has two ends,
-                # not one distance from the camera), angle=(not
-                # calculated yet), length=L, error=averaged ray_residual.
+                # Trailing 4: range=seg_range (average of the two
+                # endpoints' distance from the camera), angle=angle_deg,
+                # length=L, error=averaged ray_residual.
                 rows.append((
                     video_col, frame_col, time_col, actual_time_col, "",
                     "Segment", f"{i-1}-{i}",
                     f"{dX:.1f}", f"{dY:.1f}", f"{dZ:.1f}", f"{L:.1f}",
                     "", "", "", "", sL_str, "", sL_jac_str, "",
-                    "", "", f"{L:.1f}", error_str,
+                    f"{seg_range:.1f}", f"{angle_deg:.1f}", f"{L:.1f}", error_str,
                 ))
 
             # Total: sum of the connected chain's segment lengths. Segment
@@ -1851,12 +1891,21 @@ class SizeamaticProApp(QMainWindow):
             # Total's error is the same quadrature-sum treatment as its
             # sigma, applied to each segment's averaged-ray-residual error.
             total_error_str = f"{total_error_var_mm2 ** 0.5:.2f}" if have_total_error else ""
+            # Total's Distance/Angle (ROADMAP.md Phase 20): Distance is
+            # the average Range across every point in the whole chain
+            # (not just the two outer endpoints - the project owner's
+            # explicit choice); Angle is the simple average of every
+            # segment's own Angle in the chain (safe as a plain mean -
+            # see total_angle_sum's comment above for why no circular-mean
+            # handling is needed).
+            total_range_avg = sum(point_ranges) / len(point_ranges)
+            total_angle_avg = total_angle_sum / (len(pts3d) - 1)
             rows.append((
                 video_col, frame_col, time_col, actual_time_col, "",
                 "Total", "",
                 "", "", "", f"{total_len_mm:.1f}",
                 "", "", "", "", total_sigma_str, "", total_sigma_jac_str, "",
-                "", "", f"{total_len_mm:.1f}", total_error_str,
+                f"{total_range_avg:.1f}", f"{total_angle_avg:.1f}", f"{total_len_mm:.1f}", total_error_str,
             ))
 
             self._set_status_right(

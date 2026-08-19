@@ -48,15 +48,16 @@ Design notes:
     column visibility only - the underlying data and column order never
     change); four new dedicated columns (`range`/`angle`/`length`/`error`
     - see `RESULT_COLUMNS`'s own docstring for why a fifth, `distance`,
-    was added then cut before shipping; `angle` is always blank this
-    phase, a placeholder for a future phase's real calculation; `error`
-    is `ray_residual_mm` for Point rows, and the average of a Segment's
-    two endpoints' `ray_residual_mm` for Segment/Total rows); the Log
-    converted from a plain-text block to a real editable `QTableWidget`
-    (still user-editable per-cell, rows deleted via Delete/right-click
-    with a confirmation prompt, per the project owner's explicit
-    request); and Copy to Clipboard/Export to CSV buttons replacing the
-    old read-only "Copy (current measurement)" text panel entirely.
+    was added then cut before shipping; `angle` shipped always blank
+    that phase, a placeholder for the real calculation Phase 20 added
+    below; `error` is `ray_residual_mm` for Point rows, and the average
+    of a Segment's two endpoints' `ray_residual_mm` for Segment/Total
+    rows); the Log converted from a plain-text block to a real editable
+    `QTableWidget` (still user-editable per-cell, rows deleted via
+    Delete/right-click with a confirmation prompt, per the project
+    owner's explicit request); and Copy to Clipboard/Export to CSV
+    buttons replacing the old read-only "Copy (current measurement)"
+    text panel entirely.
 
     `RESULT_TOOLTIPS`'s text for the four new columns received the
     project owner's scientific-accuracy sign-off 2026-08-19, matching the
@@ -65,6 +66,39 @@ Design notes:
     instead point at the measurement methodology whitepaper, opened via
     the new Help menu item `main.py`'s `on_open_whitepaper` adds (a
     `QToolTip` can't contain a clickable link).
+
+    ROADMAP.md Phase 20 populated the previously-always-blank `angle`
+    column (and the previously Point-only `range` column, for Segment/
+    Total rows) with real calculations, computed in `main.py`'s
+    `_update_measurement_status_stub`:
+    - Point `range` is unchanged - each point's own distance from the
+      camera, `sqrt(X**2 + Y**2 + Z**2)`.
+    - Segment `range` is the average of its two endpoints' `range`
+      values - a Segment has two ends, not one distance from the camera
+      the way a Point does.
+    - Total `range` is the average of every point's `range` across the
+      whole connected chain (not just the two outer endpoints) - the
+      project owner's explicit choice.
+    - Segment `angle` is the segment's own orientation relative to the
+      camera's viewing axis, rotated only around the vertical Y axis:
+      `degrees(atan2(abs(dZ), abs(dX)))`, using the segment's own
+      already-computed `dX`/`dZ`. Confirmed against this app's own
+      whitepaper (`docs/Sizeamatic_Pro_Stereo_Length_Measurement_Method.pdf`),
+      which already lists "objects angled toward or away from the
+      stereo pair" as a cause of higher length uncertainty - this
+      operationalizes that concern as a reportable number. Always in
+      [0, 90] degrees by construction (`abs()` on both components,
+      never a signed full-range rotation): 0 degrees means broadside/
+      perpendicular to the camera (dZ ~ 0, the most reliable
+      presentation), 90 degrees means pointing straight at/away from
+      the camera (dX ~ 0, the least reliable). A signed value was
+      deliberately rejected - a segment's start/end order is arbitrary
+      (click order, not a real "facing direction"), and this app only
+      ever sees the side of an object facing the camera, so there's no
+      physically meaningful angle beyond 90 degrees.
+    - Total `angle` is the simple arithmetic mean of every segment's
+      `angle` in the chain - safe with no circular-mean wraparound
+      handling needed, since `angle` is always bounded to [0, 90].
 
 Assumptions:
     - Rows passed into `update_window` are already computed and
@@ -256,8 +290,19 @@ RESULT_TOOLTIPS = {
     "sigma2": "Estimated uncertainty in Range, in millimeters - sample standard deviation of several slightly-perturbed re-measurements.",
     "sigma1_jac": "Same as σZ / σLen, but from a more formal statistical estimate (Jacobian/covariance propagation) instead of a sample standard deviation.",
     "sigma2_jac": "Same as σRange, but from a more formal statistical estimate (Jacobian/covariance propagation) instead of a sample standard deviation.",
-    "range": "Straight-line distance from the camera to this point, in millimeters. Point rows only - a Segment or Total doesn't have one single distance from the camera.",
-    "angle": "Not yet calculated - a future phase will add this measurement's angle relative to the camera.",
+    "range": (
+        "Straight-line distance from the camera, in millimeters: for a Point, its own distance; "
+        "for a Segment, the average of its two endpoints' distances; for a Total, the average "
+        "across every point in the chain."
+    ),
+    "angle": (
+        "How the measurement is oriented relative to the camera, in degrees: 0° means broadside/"
+        "perpendicular to the camera (the most reliable presentation), 90° means pointing "
+        "straight at or away from the camera (the least reliable - see the measurement "
+        "methodology whitepaper (Help menu) for why). Blank on Point rows, which don't have an "
+        "orientation of their own. On a Total row, this is the average of every segment's Angle "
+        "in the chain."
+    ),
     "length": "This segment's real-world length, or (on a Total row) the summed length of every connected segment in the chain, in millimeters. Blank on individual Point rows, which don't have a length of their own.",
     "error": (
         "How much you can trust this measurement, in millimeters: for a Point, how well its "

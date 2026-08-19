@@ -1189,6 +1189,69 @@ def test_measurement_chain_produces_point_segment_and_total_rows(
     assert float(total_row[10]) == pytest.approx(known_chain_pixels["total_length_mm"], abs=0.05)
 
 
+def test_segment_and_total_range_and_angle_match_hand_computed_values(
+    sizeamatic_app, synthetic_cal, known_chain_pixels
+):
+    """Regression/known-answer test for ROADMAP.md Phase 20's Segment/
+    Total Range (Distance) and Angle calculations, independently derived
+    here from `known_chain_pixels`'s known 3D points rather than by
+    calling into `main.py`'s own implementation - same rationale as
+    `known_chain_pixels`'s own `total_length_mm`.
+
+    The chain's three points - (30, -20, 2000), (60, -20, 2000),
+    (60, 10, 2200) - were deliberately chosen so the two segments land on
+    Angle's two clean edge cases: segment 0-1 has dZ=0 (broadside,
+    0 degrees) and segment 1-2 has dX=0 (pointing straight along the
+    depth axis, 90 degrees) - directly confirming the [0, 90] mapping
+    the project owner specified, not just that some number comes out.
+    """
+
+    app = sizeamatic_app
+    app.view_rectified.set(True)
+    app.cal = dict(synthetic_cal)
+
+    points = known_chain_pixels["points"]
+    app.ptsL = [(p["xL"], p["yL"]) for p in points]
+    app.ptsR = [(p["xR"], p["yR"]) for p in points]
+
+    app.left_video_path = "some/path/lefty_test.mp4"
+    app.metaL = {"fps": 25.0}
+    app.left_frame_index = 125
+
+    app._update_measurement_status_stub()
+
+    rows = app.measurement_window._last_rows
+    point_rows = [r for r in rows if r[5] == "Point"]
+    segment_rows = [r for r in rows if r[5] == "Segment"]
+    total_row = [r for r in rows if r[5] == "Total"][0]
+
+    # Independently-derived expected values, straight from the known 3D
+    # points - not calling into stereo_matching.py or main.py at all.
+    xyz = [(p["X"], p["Y"], p["Z"]) for p in points]
+    ranges = [(x * x + y * y + z * z) ** 0.5 for x, y, z in xyz]
+
+    for point_row, expected_range in zip(point_rows, ranges):
+        assert float(point_row[19]) == pytest.approx(expected_range, abs=0.05)
+        assert point_row[20] == ""  # a Point has no orientation of its own
+
+    # Segment 0-1: dX=30, dY=0, dZ=0 -> broadside, Angle = 0 degrees.
+    seg01_expected_range = (ranges[0] + ranges[1]) / 2.0
+    assert float(segment_rows[0][19]) == pytest.approx(seg01_expected_range, abs=0.05)
+    assert float(segment_rows[0][20]) == pytest.approx(0.0, abs=0.05)
+
+    # Segment 1-2: dX=0, dY=30, dZ=200 -> pointing straight along the
+    # depth axis, Angle = 90 degrees.
+    seg12_expected_range = (ranges[1] + ranges[2]) / 2.0
+    assert float(segment_rows[1][19]) == pytest.approx(seg12_expected_range, abs=0.05)
+    assert float(segment_rows[1][20]) == pytest.approx(90.0, abs=0.05)
+
+    # Total: Range averages every point in the chain; Angle averages
+    # every segment's Angle (0 and 90 -> 45).
+    total_expected_range = sum(ranges) / len(ranges)
+    assert float(total_row[19]) == pytest.approx(total_expected_range, abs=0.05)
+    assert float(total_row[20]) == pytest.approx(45.0, abs=0.05)
+
+
 def test_clearing_points_clears_a_stale_results_table(sizeamatic_app, synthetic_cal, known_point_pixels):
     """Regression test: every early-return branch in
     `_update_measurement_status_stub` used to skip refreshing the
